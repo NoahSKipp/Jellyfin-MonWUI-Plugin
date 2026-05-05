@@ -123,7 +123,7 @@ https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/manifest.js
 1. Open **Jellyfin → Plugins**
 2. Uninstall **JMSFusion**
 3. Restart Jellyfin
-4. Hard refresh (**Ctrl + F5**)
+4. Hard refresh (**Ctrl + F5 or Ctrl + Shift + R**)
 
 ---
 
