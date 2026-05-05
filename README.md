@@ -109,9 +109,9 @@ The goal is simple: make Jellyfin feel more polished, more personal, and more pr
 1. Open **Jellyfin Dashboard**
 2. Go to **Plugins → Repositories**
 3. Add:
-
+```text
 https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/manifest.json
-
+```
 4. Go to **Plugins → Available**
 5. Install **JMSFusion**
 6. Restart Jellyfin
