@@ -1023,26 +1023,47 @@ function shouldIgnoreNativePlayInterception(element) {
 }
 
 function resolveNativePlayButton(target) {
-  const candidates = [
-    target,
-    target?.closest?.([
-      ".itemAction",
-      "[data-action=\"play\"]",
-      "[data-action=\"resume\"]",
-      "[data-action=\"playallfromhere\"]",
-      ".btnPlay",
-      ".btnResume",
-      ".actionSheetMenuItem",
-      ".actionSheetItem",
-      ".actionSheet .listItem",
-      ".actionSheetMenu .listItem",
-      ".actionSheetContainer .listItem",
-      ".actionSheetDialog .listItem",
-      "[role=\"menuitem\"]",
-      "[role=\"menuitemradio\"]"
-    ].join(", ")),
-    target?.closest?.(".actionsheetListItemBody")
-  ].filter(Boolean);
+  const candidates = [];
+  const seen = new Set();
+
+  const add = (element) => {
+    if (!element || seen.has(element)) return;
+    seen.add(element);
+    candidates.push(element);
+  };
+
+  add(target);
+
+  add(target?.closest?.([
+    "[data-action=\"play\"]",
+    "[data-action=\"resume\"]",
+    "[data-action=\"playallfromhere\"]",
+    ".btnPlay",
+    ".btnResume"
+  ].join(", ")));
+
+  add(target?.closest?.([
+    ".itemAction",
+    ".listItem",
+    ".actionSheetMenuItem",
+    ".actionSheetItem",
+    ".actionSheet .listItem",
+    ".actionSheetMenu .listItem",
+    ".actionSheetContainer .listItem",
+    ".actionSheetDialog .listItem",
+    "[role=\"menuitem\"]",
+    "[role=\"menuitemradio\"]"
+  ].join(", ")));
+
+  add(target?.closest?.(".actionsheetListItemBody"));
+
+  let current = target?.parentElement || null;
+  let depth = 0;
+  while (current && depth < 12) {
+    add(current);
+    current = current.parentElement;
+    depth += 1;
+  }
 
   for (const element of candidates) {
     if (isNativePlayActionElement(element) && !shouldIgnoreNativePlayInterception(element)) {
@@ -1053,8 +1074,28 @@ function resolveNativePlayButton(target) {
   return null;
 }
 
+function resolveAudioListPlayAllFromHereElement(target) {
+  const row = target?.closest?.(".listItem[data-action=\"playallfromhere\"]");
+  if (!row) return null;
+
+  const blocked = target?.closest?.([
+    ".listViewUserDataButtons",
+    "button",
+    "[data-action=\"menu\"]",
+    "[data-action=\"addtoplaylist\"]",
+    "[is=\"emby-ratingbutton\"]"
+  ].join(", "));
+
+  return blocked ? null : row;
+}
+
 function resolveNativePlayButtonFromEvent(event) {
   for (const element of collectEventElements(event)) {
+    const audioListRow = resolveAudioListPlayAllFromHereElement(element);
+    if (audioListRow && !shouldIgnoreNativePlayInterception(audioListRow)) {
+      return audioListRow;
+    }
+
     if (resolveMenuLauncherElement(element)) {
       return null;
     }
@@ -1204,35 +1245,66 @@ function installNativePlayInterceptor() {
 
   nativePlayInterceptorInstalled = true;
 
-  document.addEventListener("contextmenu", (event) => {
-    if (!event.isTrusted) return;
-    rememberNativePlayContextFromEvent(event);
-  }, true);
+  let lastIntercept = {
+    itemId: "",
+    at: 0
+  };
 
-  document.addEventListener("click", (event) => {
-    if (!event.isTrusted) return;
+  const runPlayNow = async (itemId) => {
+    try {
+      const apiModule = await import("../../Plugins/JMSFusion/runtime/api.js");
+      await apiModule?.playNow?.(itemId);
+    } catch (error) {
+      console.error("Native Jellyfin play interception failed:", error);
+    }
+  };
+
+  const interceptNativePlayEvent = (event) => {
+    if (!event.isTrusted) return false;
 
     rememberNativePlayContextFromEvent(event);
 
     const button = resolveNativePlayButtonFromEvent(event);
-    if (!button) return;
+    if (!button) return false;
 
     const itemId = extractItemIdFromNativePlayButton(button);
-    if (!itemId) return;
+    if (!itemId) return false;
+
     rememberNativePlayContext(itemId);
 
     event.preventDefault();
     event.stopImmediatePropagation();
     event.stopPropagation();
 
-    queueMicrotask(async () => {
-      try {
-        const apiModule = await import("../../Plugins/JMSFusion/runtime/api.js");
-        await apiModule?.playNow?.(itemId);
-      } catch (error) {
-        console.error("Native Jellyfin play interception failed:", error);
-      }
-    });
+    const now = Date.now();
+    if (lastIntercept.itemId === itemId && (now - lastIntercept.at) < 750) {
+      return true;
+    }
+
+    lastIntercept = {
+      itemId,
+      at: now
+    };
+
+    queueMicrotask(() => runPlayNow(itemId));
+    return true;
+  };
+
+  document.addEventListener("contextmenu", (event) => {
+    if (!event.isTrusted) return;
+    rememberNativePlayContextFromEvent(event);
+  }, true);
+
+  document.addEventListener("pointerdown", interceptNativePlayEvent, true);
+  document.addEventListener("mousedown", interceptNativePlayEvent, true);
+  document.addEventListener("touchstart", interceptNativePlayEvent, true);
+  document.addEventListener("click", interceptNativePlayEvent, true);
+  document.addEventListener("dblclick", interceptNativePlayEvent, true);
+
+  document.addEventListener("keydown", (event) => {
+    if (!event.isTrusted) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    interceptNativePlayEvent(event);
   }, true);
 }
 

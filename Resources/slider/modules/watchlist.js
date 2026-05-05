@@ -12,10 +12,17 @@ const WATCHLIST_STYLE_ID = "monwui-watchlist-modal-style";
 const WATCHLIST_NAV_BUTTON_CLASS = "monwui-watchlist-nav-button";
 const WATCHLIST_MUI_NAV_LINK_CLASS = "monwui-watchlist-nav-link";
 const WATCHLIST_NAV_KIND_ATTR = "data-monwui-watchlist-nav-kind";
+const WATCHLIST_ICON_PATH = "M1 3h16v2H1Zm0 6h6v2H1Zm0 6h8v2H1Zm8-4.24h3.85L14.5 7l1.65 3.76H20l-3 3.17l.9 4.05l-3.4-2.14L11.1 18l.9-4.05Z";
+const WATCHLIST_ICON_DATA_URI = `data:image/svg+xml;utf8,${encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill="rgba(255,247,224,0.92)" d="${WATCHLIST_ICON_PATH}"/></svg>`
+)}`;
 const DASHBOARD_TTL_MS = 30_000;
+const GENERAL_STATS_TTL_MS = 60_000;
 
 let dashboardCache = null;
 let dashboardPromise = null;
+let generalStatsCache = null;
+let generalStatsPromise = null;
 let usersCache = null;
 let usersPromise = null;
 let tabsSliderObserver = null;
@@ -39,13 +46,16 @@ const scheduleFavoriteMirrorTask = typeof queueMicrotask === "function"
   ? (cb) => queueMicrotask(cb)
   : (cb) => Promise.resolve().then(cb);
 
+const WATCHLIST_STATS_TAB_KEY = "stats";
 const WATCHLIST_TABS = [
   { key: "movies", labelKey: "watchlistMovieTab", fallback: "Filmler" },
   { key: "series", labelKey: "watchlistSeriesTab", fallback: "Diziler" },
   { key: "music", labelKey: "watchlistMusicTab", fallback: "Müzik" },
   { key: "collections", labelKey: "watchlistCollectionTab", fallback: "Koleksiyonlar" },
-  { key: "albums", labelKey: "watchlistAlbumTab", fallback: "Müzik Albümleri" }
+  { key: "albums", labelKey: "watchlistAlbumTab", fallback: "Müzik Albümleri" },
+  { key: WATCHLIST_STATS_TAB_KEY, labelKey: "watchlistStatsTab", fallback: "İstatistikler" }
 ];
+const WATCHLIST_CONTENT_TABS = WATCHLIST_TABS.filter((tab) => tab.key !== WATCHLIST_STATS_TAB_KEY);
 const WATCHLIST_TAB_KEYS = new Set(WATCHLIST_TABS.map((tab) => tab.key));
 const WATCHLIST_TAB_ALIASES = {
   watchlist: "movies",
@@ -62,7 +72,13 @@ const WATCHLIST_TAB_ALIASES = {
   collections: "collections",
   boxset: "collections",
   album: "albums",
-  albums: "albums"
+  albums: "albums",
+  stats: WATCHLIST_STATS_TAB_KEY,
+  statistics: WATCHLIST_STATS_TAB_KEY,
+  summary: WATCHLIST_STATS_TAB_KEY,
+  overview: WATCHLIST_STATS_TAB_KEY,
+  istatistik: WATCHLIST_STATS_TAB_KEY,
+  istatistikler: WATCHLIST_STATS_TAB_KEY
 };
 const DEFAULT_WATCHLIST_TAB = "movies";
 const WATCHLIST_PREVIEW_HOVER_DELAY_MS = 90;
@@ -71,6 +87,9 @@ const WATCHLIST_COLLECTION_CACHE_TTL_MS = 2 * 24 * 60 * 60 * 1000;
 const WATCHLIST_COLLECTION_REFRESH_MS = 30_000;
 const WATCHLIST_COLLECTION_PREVIEW_LIMIT = 8;
 const WATCHLIST_COLLECTION_PAGE_SIZE = 200;
+const GENERAL_STATS_ITEM_FIELDS = [
+  "Type","Name","SeriesName","ProductionYear","DateCreated","UserData","AlbumArtist","Artists","RunTimeTicks"
+];
 const WATCHLIST_VIEW_FIELDS = [
   "Type","Name","SeriesId","SeriesName","Album","AlbumId","AlbumArtist","Artists","Overview","Genres","RunTimeTicks",
   "CumulativeRunTimeTicks",
@@ -189,6 +208,10 @@ function normalizeWatchlistTabKey(value) {
   return WATCHLIST_TAB_KEYS.has(normalized) ? normalized : DEFAULT_WATCHLIST_TAB;
 }
 
+function isWatchlistStatsTab(value) {
+  return normalizeWatchlistTabKey(value) === WATCHLIST_STATS_TAB_KEY;
+}
+
 function createEmptyWatchlistModel() {
   return Object.fromEntries(
     WATCHLIST_TABS.map((tab) => [tab.key, { own: [], shared: [] }])
@@ -198,6 +221,20 @@ function createEmptyWatchlistModel() {
 function getWatchlistTabLabel(tabKey) {
   const tab = WATCHLIST_TABS.find((entry) => entry.key === normalizeWatchlistTabKey(tabKey));
   return L(tab?.labelKey || "watchlistMovieTab", tab?.fallback || "Filmler");
+}
+
+function getWatchlistTabButtonText(model, tabKey) {
+  const normalizedTabKey = normalizeWatchlistTabKey(tabKey);
+  const tab = WATCHLIST_TABS.find((entry) => entry.key === normalizedTabKey);
+  if (!tab) return "";
+
+  const label = L(tab.labelKey, tab.fallback);
+  if (normalizedTabKey === WATCHLIST_STATS_TAB_KEY) {
+    return label;
+  }
+
+  const count = (model?.[normalizedTabKey]?.own || []).length + (model?.[normalizedTabKey]?.shared || []).length;
+  return `${label} (${formatCount(count)})`;
 }
 
 function isSeriesItem(itemLike) {
@@ -459,7 +496,7 @@ function getWatchlistTabsButtonMarkup(label) {
   return `
     <span class="monwui-watchlist-nav-icon" aria-hidden="true">
       <svg class="monwui-watchlist-nav-svg" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 20 20" focusable="false">
-        <path fill="currentColor" d="M1 3h16v2H1Zm0 6h6v2H1Zm0 6h8v2H1Zm8-4.24h3.85L14.5 7l1.65 3.76H20l-3 3.17l.9 4.05l-3.4-2.14L11.1 18l.9-4.05Z" />
+        <path fill="currentColor" d="${WATCHLIST_ICON_PATH}" />
       </svg>
     </span>
     <span class="monwui-watchlist-nav-label">${safeLabel}</span>
@@ -471,11 +508,17 @@ function getWatchlistMuiTabsButtonMarkup(label) {
   return `
     <span class="MuiButton-icon MuiButton-startIcon MuiButton-iconSizeMedium monwui-watchlist-nav-icon" aria-hidden="true">
       <svg class="MuiSvgIcon-root MuiSvgIcon-fontSizeMedium monwui-watchlist-nav-svg" xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" focusable="false" aria-hidden="true" viewBox="0 0 20 20">
-        <path fill="currentColor" d="M1 3h16v2H1Zm0 6h6v2H1Zm0 6h8v2H1Zm8-4.24h3.85L14.5 7l1.65 3.76H20l-3 3.17l.9 4.05l-3.4-2.14L11.1 18l.9-4.05Z" />
+        <path fill="currentColor" d="${WATCHLIST_ICON_PATH}" />
       </svg>
     </span>
     <span class="monwui-watchlist-nav-label">${safeLabel}</span>
   `;
+}
+
+function renderWatchlistIconSvg(className = "", { ariaHidden = true } = {}) {
+  const safeClassName = escapeHtml(text(className));
+  const hiddenAttr = ariaHidden ? ' aria-hidden="true" focusable="false"' : "";
+  return `<svg class="${safeClassName}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"${hiddenAttr}><path fill="currentColor" d="${WATCHLIST_ICON_PATH}" /></svg>`;
 }
 
 function getWatchlistNavHref() {
@@ -862,6 +905,7 @@ function normalizeDashboard(raw) {
     myItems: Array.isArray(data.myItems) ? data.myItems : [],
     sharedWithMe: Array.isArray(data.sharedWithMe) ? data.sharedWithMe : [],
     outgoingShares: Array.isArray(data.outgoingShares) ? data.outgoingShares : [],
+    historyEntries: Array.isArray(data.historyEntries) ? data.historyEntries : [],
   };
 
   normalized._membership = buildMembershipSet(normalized);
@@ -943,6 +987,11 @@ function refreshMembership(dashboard = dashboardCache) {
   dashboard._userId = getCurrentUserContext().userId;
   dashboardCache = dashboard;
   return dashboardCache;
+}
+
+function invalidateGeneralStatsCache() {
+  generalStatsCache = null;
+  generalStatsPromise = null;
 }
 
 function dashboardStale() {
@@ -1033,16 +1082,93 @@ function snapshotFromItem(item, itemId) {
   };
 }
 
-function mutateCacheAfterAdd(entry) {
-  const normalizedEntry = entry && typeof entry === "object" ? entry : null;
-  if (!normalizedEntry) return;
+function ensureDashboardCacheShell() {
   if (!dashboardCache) {
     dashboardCache = normalizeDashboard({
       myItems: [],
       sharedWithMe: [],
-      outgoingShares: []
+      outgoingShares: [],
+      historyEntries: []
     });
   }
+  return dashboardCache;
+}
+
+function createLocalHistoryEntry(itemLike, itemId, { removedAfterPlayed = false } = {}) {
+  const { userId, userName } = getCurrentUserContext();
+  const now = Date.now();
+  return {
+    ItemId: text(itemLike?.ItemId || itemLike?.itemId || itemLike?.Id || itemId),
+    ItemType: text(itemLike?.ItemType || itemLike?.itemType || itemLike?.Type),
+    Name: text(itemLike?.Name || itemLike?.name || itemLike?.Album || itemLike?.album),
+    OwnerUserId: text(itemLike?.OwnerUserId || itemLike?.ownerUserId || userId),
+    OwnerUserName: text(itemLike?.OwnerUserName || itemLike?.ownerUserName || userName),
+    FirstAddedAtUtc: Number(itemLike?.AddedAtUtc || itemLike?.addedAtUtc || now),
+    LastAddedAtUtc: Number(itemLike?.AddedAtUtc || itemLike?.addedAtUtc || now),
+    LastRemovedAtUtc: removedAfterPlayed ? now : 0,
+    AddCount: 1,
+    RemoveCount: removedAfterPlayed ? 1 : 0,
+    RemovedAfterPlayed: removedAfterPlayed === true
+  };
+}
+
+function mutateHistoryAfterAdd(entry) {
+  const cache = ensureDashboardCacheShell();
+  const itemId = text(entry?.ItemId || entry?.itemId);
+  if (!itemId) return;
+
+  const historyEntries = Array.isArray(cache.historyEntries) ? cache.historyEntries : [];
+  const existing = historyEntries.find((item) => text(item?.ItemId || item?.itemId) === itemId);
+  const now = Number(entry?.AddedAtUtc || entry?.addedAtUtc || Date.now());
+
+  if (!existing) {
+    historyEntries.unshift(createLocalHistoryEntry(entry, itemId));
+    cache.historyEntries = historyEntries;
+    return;
+  }
+
+  if (text(entry?.ItemType || entry?.itemType) && !text(existing?.ItemType || existing?.itemType)) {
+    existing.ItemType = text(entry?.ItemType || entry?.itemType);
+  }
+  if (text(entry?.Name || entry?.name) && !text(existing?.Name || existing?.name)) {
+    existing.Name = text(entry?.Name || entry?.name);
+  }
+  if (now > Number(existing?.LastAddedAtUtc || existing?.lastAddedAtUtc || 0)) {
+    existing.LastAddedAtUtc = now;
+  }
+  if (!(Number(existing?.FirstAddedAtUtc || existing?.firstAddedAtUtc || 0) > 0)) {
+    existing.FirstAddedAtUtc = now;
+  }
+  existing.AddCount = Math.max(1, Number(existing?.AddCount || existing?.addCount || 0) + 1);
+}
+
+function mutateHistoryAfterRemove(itemId, options = {}) {
+  const cache = ensureDashboardCacheShell();
+  const id = text(itemId);
+  if (!id) return;
+
+  const played = options?.played === true || isMarkedPlayed(options?.item);
+  const historyEntries = Array.isArray(cache.historyEntries) ? cache.historyEntries : [];
+  let existing = historyEntries.find((item) => text(item?.ItemId || item?.itemId) === id);
+
+  if (!existing) {
+    existing = createLocalHistoryEntry(options?.item || { ItemId: id }, id, { removedAfterPlayed: played });
+    historyEntries.unshift(existing);
+    cache.historyEntries = historyEntries;
+  }
+
+  const now = Date.now();
+  existing.LastRemovedAtUtc = now;
+  existing.RemoveCount = Math.max(1, Number(existing?.RemoveCount || existing?.removeCount || 0) + 1);
+  if (played) {
+    existing.RemovedAfterPlayed = true;
+  }
+}
+
+function mutateCacheAfterAdd(entry) {
+  const normalizedEntry = entry && typeof entry === "object" ? entry : null;
+  if (!normalizedEntry) return;
+  ensureDashboardCacheShell();
 
   const itemId = text(normalizedEntry.ItemId || normalizedEntry.itemId);
   if (!itemId) return;
@@ -1050,31 +1176,21 @@ function mutateCacheAfterAdd(entry) {
   const nextItems = (dashboardCache.myItems || []).filter((item) => text(item?.ItemId || item?.itemId) !== itemId);
   nextItems.unshift(normalizedEntry);
   dashboardCache.myItems = nextItems;
+  mutateHistoryAfterAdd(normalizedEntry);
   refreshMembership(dashboardCache);
 }
 
-function mutateCacheAfterRemove(itemId) {
-  if (!dashboardCache) {
-    dashboardCache = normalizeDashboard({
-      myItems: [],
-      sharedWithMe: [],
-      outgoingShares: []
-    });
-  }
+function mutateCacheAfterRemove(itemId, options = {}) {
+  ensureDashboardCacheShell();
   if (!dashboardCache) return;
   const id = text(itemId);
   dashboardCache.myItems = (dashboardCache.myItems || []).filter((item) => text(item?.ItemId || item?.itemId) !== id);
+  mutateHistoryAfterRemove(id, options);
   refreshMembership(dashboardCache);
 }
 
 function mutateCacheAfterShareRemoval(shareId) {
-  if (!dashboardCache) {
-    dashboardCache = normalizeDashboard({
-      myItems: [],
-      sharedWithMe: [],
-      outgoingShares: []
-    });
-  }
+  ensureDashboardCacheShell();
   if (!dashboardCache) return;
   const id = text(shareId);
   dashboardCache.sharedWithMe = (dashboardCache.sharedWithMe || []).filter((item) => text(item?.Id || item?.id) !== id);
@@ -1179,12 +1295,14 @@ export async function addToWatchlist(itemId, options = {}) {
 export async function removeFromWatchlist(itemId, options = {}) {
   const id = text(itemId);
   if (!id) throw new Error("itemId gerekli");
+  const wasPlayed = options?.played === true || isMarkedPlayed(options?.item);
 
   const syncedFavorite = await syncJellyfinFavoriteFromWatchlist(id, false, options);
 
   let result;
   try {
-    result = await requestWatchlist(`/items/${encodeURIComponent(id)}`, {
+    const query = wasPlayed ? "?played=true" : "";
+    result = await requestWatchlist(`/items/${encodeURIComponent(id)}${query}`, {
       method: "DELETE"
     });
   } catch (error) {
@@ -1197,7 +1315,7 @@ export async function removeFromWatchlist(itemId, options = {}) {
     throw error;
   }
 
-  mutateCacheAfterRemove(id);
+  mutateCacheAfterRemove(id, options);
   if (options?.item) patchItemMembership(options.item);
   notifyWatchlistChanged({ itemId: id, inWatchlist: false });
   return result;
@@ -1455,9 +1573,9 @@ async function processAutoRemovalTasks(tasks = []) {
             await removeWatchlistShare(task.shareId);
           } else if (task.itemId) {
             if (shouldAutoRemovePlayedFromFavorites()) {
-              await updateFavoriteStatus(task.itemId, false);
+              await updateFavoriteStatus(task.itemId, false, { played: true });
             } else {
-              await removeFromWatchlist(task.itemId, { syncJellyfinFavorite: false });
+              await removeFromWatchlist(task.itemId, { syncJellyfinFavorite: false, played: true });
             }
           }
         } catch {} finally {
@@ -1713,6 +1831,13 @@ function ensureStyles() {
       height: 100%;
       min-height: 0;
     }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-layout.is-stats-tab {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-areas: "main";
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-layout.is-stats-tab .monwuiwl-preview {
+      display: none;
+    }
     #${WATCHLIST_MODAL_ID} .monwuiwl-main {
       grid-area: main;
       min-height: 0;
@@ -1722,6 +1847,426 @@ function ensureStyles() {
       overscroll-behavior: contain;
       -webkit-overflow-scrolling: touch;
       touch-action: pan-y;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-layout.is-stats-tab .monwuiwl-main {
+      padding-right: 0;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-shell {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero {
+      position: relative;
+      isolation: isolate;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(150px, 220px);
+      align-items: stretch;
+      gap: 20px;
+      border-radius: 24px;
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 24px;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top right, rgba(255,183,3,0.22), transparent 38%),
+        linear-gradient(135deg, rgba(18,22,32,0.98), rgba(10,12,18,0.98));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-content {
+      position: relative;
+      z-index: 1;
+      min-width: 0;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art {
+      position: relative;
+      display: flex;
+      align-items: flex-end;
+      justify-content: flex-end;
+      min-height: 152px;
+      pointer-events: none;
+      z-index: 0;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art::before {
+      content: "";
+      position: absolute;
+      inset: 18px 14px 0 auto;
+      width: 132px;
+      height: 132px;
+      border-radius: 999px;
+      background:
+        radial-gradient(circle at 35% 35%, rgba(255,255,255,0.22), rgba(255,255,255,0.02) 54%, transparent 72%),
+        linear-gradient(145deg, rgba(255,255,255,0.12), rgba(255,255,255,0.02));
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.08),
+        0 24px 48px rgba(0,0,0,0.18);
+      opacity: 0.92;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art::after {
+      content: "";
+      position: absolute;
+      inset: auto 10px 6px auto;
+      width: 170px;
+      height: 100px;
+      border-radius: 28px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.02)),
+        rgba(6,10,18,0.28);
+      border: 1px solid rgba(255,255,255,0.06);
+      opacity: 0.64;
+      transform: rotate(-10deg);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-badge {
+      position: relative;
+      z-index: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 92px;
+      height: 92px;
+      margin: 0 18px 22px 0;
+      border-radius: 28px;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.18), rgba(255,255,255,0.03)),
+        rgba(12,18,30,0.38);
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,0.14),
+        0 22px 40px rgba(0,0,0,0.22);
+      color: rgba(255,247,224,0.94);
+      transform: rotate(-8deg);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-icon {
+      width: 46px;
+      height: 46px;
+      filter: drop-shadow(0 8px 16px rgba(0,0,0,0.24));
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars {
+      position: absolute;
+      inset: auto 0 18px auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 120px;
+      z-index: 1;
+      opacity: 0.8;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars span {
+      display: block;
+      height: 10px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.3));
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars span:nth-child(1) {
+      width: 100%;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars span:nth-child(2) {
+      width: 78%;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars span:nth-child(3) {
+      width: 58%;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-kicker {
+      color: #ffb703;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-user {
+      margin: 10px 0 8px;
+      font-size: 30px;
+      line-height: 1.05;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-copy {
+      margin: 0;
+      max-width: 560px;
+      color: rgba(255,255,255,0.74);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-total {
+      margin-top: 22px;
+      display: inline-flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 16px 32px rgba(0,0,0,0.22);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-total-label {
+      color: rgba(255,255,255,0.72);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-total-value {
+      color: #fff7e0;
+      font-size: 46px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stat-card {
+      min-height: 116px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stat-label {
+      color: rgba(255,255,255,0.72);
+      font-size: 12px;
+      line-height: 1.5;
+      font-weight: 700;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stat-value {
+      color: #fff;
+      font-size: 34px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-breakdown {
+      border-radius: 22px;
+      padding: 18px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02)),
+        rgba(8,11,18,0.72);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-breakdown-head {
+      margin-bottom: 14px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-breakdown-title {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-card {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-name {
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-total,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: rgba(255,255,255,0.76);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-total strong,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-row strong {
+      color: #fff;
+      font-size: 16px;
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-page {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-secondary {
+      background:
+        radial-gradient(circle at top left, rgba(96,165,250,0.16), transparent 36%),
+        linear-gradient(135deg, rgba(18,22,32,0.98), rgba(10,12,18,0.98));
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card {
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-height: 210px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.04);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card::before {
+      content: "";
+      position: absolute;
+      right: -8px;
+      bottom: -4px;
+      width: 94px;
+      height: 94px;
+      border-radius: 24px;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02)),
+        radial-gradient(circle at 35% 35%, rgba(255,255,255,0.12), transparent 68%),
+        url("${WATCHLIST_ICON_DATA_URI}") center / 52px 52px no-repeat;
+      border: 1px solid rgba(255,255,255,0.05);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+      opacity: 0.85;
+      pointer-events: none;
+      transform: rotate(-8deg);
+      z-index: 0;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card[data-media-key="movies"] {
+      background:
+        radial-gradient(circle at top right, rgba(244,63,94,0.16), transparent 40%),
+        rgba(255,255,255,0.04);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card[data-media-key="series"] {
+      background:
+        radial-gradient(circle at top right, rgba(96,165,250,0.16), transparent 40%),
+        rgba(255,255,255,0.04);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card[data-media-key="music"] {
+      background:
+        radial-gradient(circle at top right, rgba(52,211,153,0.16), transparent 40%),
+        rgba(255,255,255,0.04);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-head {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-badge {
+      flex: 0 0 auto;
+      width: 40px;
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 14px;
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.18), rgba(255,255,255,0.03)),
+        rgba(8,12,18,0.3);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.86);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.08);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-badge svg {
+      width: 20px;
+      height: 20px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-title {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.2;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-stats {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-stat {
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.05);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-stat span,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last-label,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last-subtitle,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last-meta,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-subtitle {
+      color: rgba(255,255,255,0.72);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-stat strong,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-count {
+      color: #fff;
+      font-size: 24px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: -0.03em;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last {
+      position: relative;
+      z-index: 1;
+      margin-top: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last-title,
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-title {
+      font-size: 15px;
+      line-height: 1.35;
+      font-weight: 800;
+      color: #fff;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-last-empty {
+      color: rgba(255,255,255,0.6);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.04);
+    }
+    #${WATCHLIST_MODAL_ID} .monwuiwl-general-repeat-main {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
     }
     #${WATCHLIST_MODAL_ID} .monwuiwl-preview {
       grid-area: preview;
@@ -2509,6 +3054,49 @@ function ensureStyles() {
       #${WATCHLIST_MODAL_ID} .monwuiwl-layout {
         gap: 14px;
       }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero {
+        grid-template-columns: 1fr;
+        padding: 20px;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art {
+        min-height: 96px;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art::before {
+        width: 96px;
+        height: 96px;
+        inset: 8px 10px 0 auto;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art::after {
+        width: 132px;
+        height: 74px;
+        bottom: 0;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-badge {
+        width: 72px;
+        height: 72px;
+        margin: 0 10px 8px 0;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-icon {
+        width: 34px;
+        height: 34px;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-hero-art-bars {
+        display: none;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-user {
+        font-size: 24px;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-total-value {
+        font-size: 38px;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-cards,
+      #${WATCHLIST_MODAL_ID} .monwuiwl-stats-type-grid,
+      #${WATCHLIST_MODAL_ID} .monwuiwl-general-grid {
+        grid-template-columns: 1fr;
+      }
+      #${WATCHLIST_MODAL_ID} .monwuiwl-general-card-stats {
+        grid-template-columns: 1fr;
+      }
       #${WATCHLIST_MODAL_ID} .monwuiwl-main {
         padding-right: 0;
       }
@@ -2607,6 +3195,15 @@ function formatDate(ts) {
     }).format(date);
   } catch {
     return date.toLocaleDateString();
+  }
+}
+
+function formatCount(value) {
+  const count = Math.max(0, Math.trunc(Number(value || 0)));
+  try {
+    return new Intl.NumberFormat(cfg()?.timeLocale || cfg()?.dateLocale || "tr-TR").format(count);
+  } catch {
+    return String(count);
   }
 }
 
@@ -3387,6 +3984,489 @@ function getWatchlistTabViews(model, tabKey) {
     ...(model?.[currentTab]?.own || []),
     ...(model?.[currentTab]?.shared || [])
   ];
+}
+
+function getAllWatchlistContentViews(model, kind = "") {
+  const views = [];
+  for (const tab of WATCHLIST_CONTENT_TABS) {
+    const bucket = model?.[tab.key];
+    if (!bucket) continue;
+
+    if (kind !== "shared") {
+      views.push(...(bucket.own || []));
+    }
+    if (kind !== "own") {
+      views.push(...(bucket.shared || []));
+    }
+  }
+
+  return views;
+}
+
+function createStatsBucketState(tab) {
+  return {
+    key: tab.key,
+    label: L(tab.labelKey, tab.fallback),
+    totalSet: new Set(),
+    activeSet: new Set(),
+    completedSet: new Set()
+  };
+}
+
+function getWatchlistHistoryEntries(dashboard = dashboardCache) {
+  return Array.isArray(dashboard?.historyEntries) ? dashboard.historyEntries : [];
+}
+
+function resolveWatchlistStatsBucket(itemLike) {
+  return getWatchlistTabKey({
+    Type: itemLike?.ItemType || itemLike?.itemType || itemLike?.Type,
+    MediaType: itemLike?.MediaType || itemLike?.mediaType
+  });
+}
+
+function buildWatchlistHistorySummary(model, dashboard = dashboardCache) {
+  const ownViews = getAllWatchlistContentViews(model, "own");
+  const sharedViews = getAllWatchlistContentViews(model, "shared");
+  const historyEntries = getWatchlistHistoryEntries(dashboard);
+  const completedItemIds = new Set();
+  const removedCompletedItemIds = new Set();
+  const buckets = new Map(WATCHLIST_CONTENT_TABS.map((tab) => [tab.key, createStatsBucketState(tab)]));
+
+  let outgoingSharesCount = 0;
+
+  for (const historyEntry of historyEntries) {
+    const itemId = text(historyEntry?.ItemId || historyEntry?.itemId);
+    if (!itemId) continue;
+
+    const bucketKey = resolveWatchlistStatsBucket(historyEntry);
+    const bucket = buckets.get(bucketKey);
+    bucket?.totalSet?.add(itemId);
+
+    if (historyEntry?.RemovedAfterPlayed === true) {
+      completedItemIds.add(itemId);
+      removedCompletedItemIds.add(itemId);
+      bucket?.completedSet?.add(itemId);
+    }
+  }
+
+  for (const view of ownViews) {
+    const itemId = text(view?.itemId);
+    if (!itemId) continue;
+
+    const bucketKey = resolveWatchlistStatsBucket(view?.item || {});
+    const bucket = buckets.get(bucketKey);
+    bucket?.activeSet?.add(itemId);
+
+    const playable = view?.item?.liveItem || view?.item || {};
+    if (isMarkedPlayed(playable)) {
+      completedItemIds.add(itemId);
+      bucket?.completedSet?.add(itemId);
+    }
+
+    outgoingSharesCount += Array.isArray(view?.outgoingShares) ? view.outgoingShares.length : 0;
+  }
+
+  const { userName } = getCurrentUserContext();
+  const resolvedUserName = text(
+    userName ||
+    dashboard?.myItems?.[0]?.OwnerUserName ||
+    dashboard?.outgoingShares?.[0]?.OwnerUserName,
+    L("unknownUser", "Bilinmeyen kullanıcı")
+  );
+
+  return {
+    userName: resolvedUserName,
+    totalEverAdded: historyEntries.length,
+    activeOwnCount: ownViews.length,
+    completedCount: completedItemIds.size,
+    removedCompletedCount: removedCompletedItemIds.size,
+    sharedCount: sharedViews.length,
+    outgoingSharesCount,
+    typeBreakdown: WATCHLIST_CONTENT_TABS.map((tab) => {
+      const bucket = buckets.get(tab.key) || createStatsBucketState(tab);
+      return {
+        key: tab.key,
+        label: bucket.label,
+        totalEverAdded: bucket.totalSet.size,
+        activeCount: bucket.activeSet.size,
+        completedCount: bucket.completedSet.size
+      };
+    })
+  };
+}
+
+function renderStatsCard(label, value) {
+  return `
+    <article class="monwuiwl-stat-card">
+      <div class="monwuiwl-stat-label">${escapeHtml(label)}</div>
+      <div class="monwuiwl-stat-value">${escapeHtml(formatCount(value))}</div>
+    </article>
+  `;
+}
+
+function renderWatchlistHistoryTypeCard(typeSummary) {
+  return `
+    <article class="monwuiwl-stats-type-card">
+      <div class="monwuiwl-stats-type-name">${escapeHtml(typeSummary.label)}</div>
+      <div class="monwuiwl-stats-type-total">
+        <span>${escapeHtml(L("watchlistStatsTracked", "Toplam kayıt"))}</span>
+        <strong>${escapeHtml(formatCount(typeSummary.totalEverAdded))}</strong>
+      </div>
+      <div class="monwuiwl-stats-type-row">
+        <span>${escapeHtml(L("watchlistHistoryActive", "Aktif watchlist"))}</span>
+        <strong>${escapeHtml(formatCount(typeSummary.activeCount))}</strong>
+      </div>
+      <div class="monwuiwl-stats-type-row">
+        <span>${escapeHtml(L("watchlistHistoryCompleted", "İzlenmiş / dinlenmiş toplam"))}</span>
+        <strong>${escapeHtml(formatCount(typeSummary.completedCount))}</strong>
+      </div>
+    </article>
+  `;
+}
+
+function getStatsUserId() {
+  return text(getCurrentUserContext().userId || getSessionInfo?.()?.userId);
+}
+
+function generalStatsStale() {
+  const userId = getStatsUserId();
+  if (!userId) return false;
+  if (!generalStatsCache) return true;
+  if (text(generalStatsCache?.userId) !== userId) return true;
+  return (Date.now() - Number(generalStatsCache?.loadedAt || 0)) > GENERAL_STATS_TTL_MS;
+}
+
+function buildUserItemsQuery(userId, params = {}) {
+  const search = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === null || value === undefined || value === "") return;
+    search.set(key, String(value));
+  });
+  return `/Users/${encodeURIComponent(userId)}/Items?${search.toString()}`;
+}
+
+async function queryUserItems(userId, params = {}, { signal } = {}) {
+  try {
+    const url = buildUserItemsQuery(userId, {
+      Recursive: "true",
+      EnableTotalRecordCount: "true",
+      ...params
+    });
+    return await makeApiRequest(url, { signal, __quiet: true, __preview: true });
+  } catch {
+    return { Items: [], TotalRecordCount: 0 };
+  }
+}
+
+function getTotalRecordCount(data) {
+  const direct = Number(data?.TotalRecordCount ?? data?.totalRecordCount);
+  if (Number.isFinite(direct) && direct >= 0) return direct;
+  return Array.isArray(data?.Items) ? data.Items.length : 0;
+}
+
+function getGeneralMediaSpecs() {
+  return [
+    {
+      key: "movies",
+      label: L("watchlistMovieTab", "Filmler"),
+      libraryTypes: "Movie",
+      playedTypes: "Movie",
+    },
+    {
+      key: "series",
+      label: L("watchlistSeriesTab", "Diziler"),
+      libraryTypes: "Series",
+      playedTypes: "Episode",
+    },
+    {
+      key: "music",
+      label: L("watchlistMusicTab", "Müzik"),
+      libraryTypes: "Audio",
+      playedTypes: "Audio",
+    }
+  ];
+}
+
+function mapGeneralStatsItem(item, key) {
+  if (!item || typeof item !== "object") return null;
+
+  const playedAt = getLastPlayedTimestamp(item);
+  const typeName = getItemTypeName(item);
+  const title = key === "series"
+    ? text(item?.SeriesName || item?.Name, L("untitled", "İsimsiz"))
+    : text(item?.Name || item?.Album, L("untitled", "İsimsiz"));
+
+  let subtitle = "";
+  if (key === "series") {
+    subtitle = text(item?.Name && item?.SeriesName && item.Name !== item.SeriesName ? item.Name : "");
+  } else if (key === "music") {
+    subtitle = text(
+      item?.AlbumArtist ||
+      (Array.isArray(item?.Artists) ? item.Artists.filter(Boolean).join(", ") : "") ||
+      item?.Album
+    );
+  } else if (typeName === "movie") {
+    subtitle = text(item?.ProductionYear);
+  }
+
+  return {
+    id: text(item?.Id || item?.ItemId),
+    title,
+    subtitle,
+    playedAt,
+    playCount: Number(item?.UserData?.PlayCount || 0),
+    label: key === "series" ? L("watchlistSeriesTab", "Diziler") : (key === "music" ? L("watchlistMusicTab", "Müzik") : L("watchlistMovieTab", "Filmler"))
+  };
+}
+
+async function loadWatchlistGeneralStats({ force = false } = {}) {
+  const userId = getStatsUserId();
+  if (!userId) {
+    generalStatsCache = {
+      userId: "",
+      loadedAt: Date.now(),
+      media: [],
+      topRepeated: []
+    };
+    return generalStatsCache;
+  }
+
+  if (!force && !generalStatsStale() && generalStatsCache) {
+    return generalStatsCache;
+  }
+
+  if (!force && generalStatsPromise) {
+    return generalStatsPromise;
+  }
+
+  generalStatsPromise = (async () => {
+    const fields = GENERAL_STATS_ITEM_FIELDS.join(",");
+    const specs = getGeneralMediaSpecs();
+    const media = await Promise.all(specs.map(async (spec) => {
+      const [libraryData, playedData] = await Promise.all([
+        queryUserItems(userId, {
+          IncludeItemTypes: spec.libraryTypes,
+          Limit: 1
+        }),
+        queryUserItems(userId, {
+          IncludeItemTypes: spec.playedTypes,
+          Filters: "IsPlayed",
+          EnableUserData: "true",
+          SortBy: "DatePlayed,DateCreated",
+          SortOrder: "Descending",
+          Limit: 1,
+          Fields: fields
+        })
+      ]);
+
+      return {
+        key: spec.key,
+        label: spec.label,
+        totalCount: getTotalRecordCount(libraryData),
+        playedCount: getTotalRecordCount(playedData),
+        lastItem: mapGeneralStatsItem(Array.isArray(playedData?.Items) ? playedData.Items[0] : null, spec.key)
+      };
+    }));
+
+    const topRepeatedData = await queryUserItems(userId, {
+      IncludeItemTypes: "Movie,Episode,Audio",
+      Filters: "IsPlayed",
+      EnableUserData: "true",
+      SortBy: "PlayCount,DatePlayed,DateCreated",
+      SortOrder: "Descending",
+      Limit: 12,
+      Fields: fields
+    });
+
+    const topRepeated = (Array.isArray(topRepeatedData?.Items) ? topRepeatedData.Items : [])
+      .filter((item) => Number(item?.UserData?.PlayCount || 0) > 1)
+      .slice(0, 6)
+      .map((item) => {
+        const bucket = resolveWatchlistStatsBucket(item);
+        return mapGeneralStatsItem(item, bucket === "albums" || bucket === "music" ? "music" : (bucket === "series" ? "series" : "movies"));
+      })
+      .filter(Boolean);
+
+    generalStatsCache = {
+      userId,
+      loadedAt: Date.now(),
+      media,
+      topRepeated
+    };
+
+    return generalStatsCache;
+  })().finally(() => {
+    generalStatsPromise = null;
+  });
+
+  return generalStatsPromise;
+}
+
+function renderWatchlistHistorySection(model) {
+  const summary = buildWatchlistHistorySummary(model);
+
+  return `
+    <section class="monwuiwl-stats-shell monwuiwl-stats-shell-history">
+      <article class="monwuiwl-stats-hero">
+        <div class="monwuiwl-stats-hero-content">
+          <div class="monwuiwl-stats-kicker">${escapeHtml(L("watchlistHistoryTitle", "Watchlist Geçmişi"))}</div>
+          <h3 class="monwuiwl-stats-user">${escapeHtml(summary.userName)}</h3>
+          <p class="monwuiwl-stats-copy">${escapeHtml(L("watchlistHistorySubtitle", "Aktif listen, kaldırılmış içerikler ve geçmiş toplamlar burada birlikte tutulur."))}</p>
+          <div class="monwuiwl-stats-total">
+            <span class="monwuiwl-stats-total-label">${escapeHtml(L("watchlistStatsTracked", "Toplam kayıt"))}</span>
+            <strong class="monwuiwl-stats-total-value">${escapeHtml(formatCount(summary.totalEverAdded))}</strong>
+          </div>
+        </div>
+        <div class="monwuiwl-stats-hero-art" aria-hidden="true">
+          <div class="monwuiwl-stats-hero-art-badge">
+            ${renderWatchlistIconSvg("monwuiwl-stats-hero-art-icon")}
+          </div>
+          <div class="monwuiwl-stats-hero-art-bars">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      </article>
+
+      <div class="monwuiwl-stats-cards">
+        ${renderStatsCard(L("watchlistHistoryActive", "Aktif watchlist"), summary.activeOwnCount)}
+        ${renderStatsCard(L("watchlistHistoryCompleted", "İzlenmiş / dinlenmiş toplam"), summary.completedCount)}
+        ${renderStatsCard(L("watchlistHistoryCompletedRemoved", "İzlenip kaldırılanlar"), summary.removedCompletedCount)}
+        ${renderStatsCard(L("watchlistStatsOutgoingShares", "Gönderilen paylaşımlar"), summary.outgoingSharesCount)}
+        ${renderStatsCard(L("watchlistSharedItems", "Seninle paylaşılanlar"), summary.sharedCount)}
+      </div>
+
+      <section class="monwuiwl-stats-breakdown">
+        <div class="monwuiwl-stats-breakdown-head">
+          <h3 class="monwuiwl-stats-breakdown-title">${escapeHtml(L("watchlistStatsByType", "Türlere göre dağılım"))}</h3>
+        </div>
+        <div class="monwuiwl-stats-type-grid">
+          ${summary.typeBreakdown.map(renderWatchlistHistoryTypeCard).join("")}
+        </div>
+      </section>
+    </section>
+  `;
+}
+
+function renderGeneralStatsMediaCard(section) {
+  const lastItem = section?.lastItem || null;
+  const lastItemMarkup = lastItem
+    ? `
+      <div class="monwuiwl-general-last-title">${escapeHtml(lastItem.title)}</div>
+      ${lastItem.subtitle ? `<div class="monwuiwl-general-last-subtitle">${escapeHtml(lastItem.subtitle)}</div>` : ""}
+      <div class="monwuiwl-general-last-meta">${escapeHtml(lastItem.playedAt ? formatDate(lastItem.playedAt) : L("watchlistGeneralEmptyLast", "Henüz oynatma yok"))}</div>
+    `
+    : `<div class="monwuiwl-general-last-empty">${escapeHtml(L("watchlistGeneralEmptyLast", "Henüz oynatma yok"))}</div>`;
+
+  return `
+    <article class="monwuiwl-general-card" data-media-key="${escapeHtml(section?.key || "")}">
+      <div class="monwuiwl-general-card-head">
+        <h4 class="monwuiwl-general-card-title">${escapeHtml(section?.label || "")}</h4>
+        <span class="monwuiwl-general-card-badge" aria-hidden="true">
+          ${renderWatchlistIconSvg("monwuiwl-general-card-badge-icon")}
+        </span>
+      </div>
+      <div class="monwuiwl-general-card-stats">
+        <div class="monwuiwl-general-card-stat">
+          <span>${escapeHtml(L("watchlistGeneralLibraryTotal", "Kütüphanedeki toplam"))}</span>
+          <strong>${escapeHtml(formatCount(section?.totalCount || 0))}</strong>
+        </div>
+        <div class="monwuiwl-general-card-stat">
+          <span>${escapeHtml(L("watchlistGeneralPlayedTotal", "İzlenen / dinlenen"))}</span>
+          <strong>${escapeHtml(formatCount(section?.playedCount || 0))}</strong>
+        </div>
+      </div>
+      <div class="monwuiwl-general-last">
+        <div class="monwuiwl-general-last-label">${escapeHtml(L("watchlistGeneralLastActivity", "Son hareket"))}</div>
+        ${lastItemMarkup}
+      </div>
+    </article>
+  `;
+}
+
+function renderGeneralTopRepeated(topRepeated = []) {
+  if (!Array.isArray(topRepeated) || !topRepeated.length) {
+    return `<div class="monwuiwl-empty">${escapeHtml(L("watchlistGeneralTopReplayEmpty", "Tekrar oynatma verisi henüz yok."))}</div>`;
+  }
+
+  return `
+    <div class="monwuiwl-general-repeat-list">
+      ${topRepeated.map((item) => `
+        <article class="monwuiwl-general-repeat-item">
+          <div class="monwuiwl-general-repeat-main">
+            <div class="monwuiwl-general-repeat-title">${escapeHtml(item.title)}</div>
+            <div class="monwuiwl-general-repeat-subtitle">${escapeHtml([item.label, item.subtitle].filter(Boolean).join(" • "))}</div>
+          </div>
+          <div class="monwuiwl-general-repeat-count">${escapeHtml(formatCount(item.playCount))}</div>
+        </article>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderWatchlistGeneralSection() {
+  const stats = generalStatsCache;
+  const currentUserId = getStatsUserId();
+  const statsMatchCurrentUser = !!currentUserId && text(stats?.userId) === currentUserId;
+  const loading = !statsMatchCurrentUser ? (!!currentUserId && (generalStatsStale() || !!generalStatsPromise)) : false;
+  const media = statsMatchCurrentUser && Array.isArray(stats?.media) ? stats.media : [];
+  const topRepeated = statsMatchCurrentUser && Array.isArray(stats?.topRepeated) ? stats.topRepeated : [];
+
+  return `
+    <section class="monwuiwl-stats-shell monwuiwl-stats-shell-general">
+      <article class="monwuiwl-stats-hero monwuiwl-stats-hero-secondary">
+        <div class="monwuiwl-stats-hero-content">
+          <div class="monwuiwl-stats-kicker">${escapeHtml(L("watchlistGeneralTitle", "Jellyfin Geneli"))}</div>
+          <h3 class="monwuiwl-stats-user">${escapeHtml(L("watchlistGeneralHeroTitle", "Kullanıcı Medya Özeti"))}</h3>
+          <p class="monwuiwl-stats-copy">${escapeHtml(L("watchlistGeneralSubtitle", "Toplam içerik, son oynatmalar ve tekrar izleme alışkanlığı burada gösterilir."))}</p>
+        </div>
+        <div class="monwuiwl-stats-hero-art" aria-hidden="true">
+          <div class="monwuiwl-stats-hero-art-badge">
+            ${renderWatchlistIconSvg("monwuiwl-stats-hero-art-icon")}
+          </div>
+          <div class="monwuiwl-stats-hero-art-bars">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+      </article>
+
+      <section class="monwuiwl-stats-breakdown">
+        <div class="monwuiwl-stats-breakdown-head">
+          <h3 class="monwuiwl-stats-breakdown-title">${escapeHtml(L("watchlistGeneralTitle", "Jellyfin Geneli"))}</h3>
+        </div>
+        ${loading
+          ? `<div class="monwuiwl-loading">${escapeHtml(L("watchlistGeneralLoading", "Genel istatistikler yükleniyor..."))}</div>`
+          : (media.length
+            ? `
+              <div class="monwuiwl-general-grid">
+                ${media.map(renderGeneralStatsMediaCard).join("")}
+              </div>
+            `
+            : `<div class="monwuiwl-empty">${escapeHtml(L("watchlistGeneralNoData", "Genel istatistik verisi bulunamadı."))}</div>`)}
+      </section>
+
+      <section class="monwuiwl-stats-breakdown">
+        <div class="monwuiwl-stats-breakdown-head">
+          <h3 class="monwuiwl-stats-breakdown-title">${escapeHtml(L("watchlistGeneralTopReplay", "En çok tekrar izlenen / dinlenenler"))}</h3>
+        </div>
+        ${loading
+          ? `<div class="monwuiwl-loading">${escapeHtml(L("watchlistGeneralLoading", "Genel istatistikler yükleniyor..."))}</div>`
+          : renderGeneralTopRepeated(topRepeated)}
+      </section>
+    </section>
+  `;
+}
+
+function renderWatchlistStatsPanel(model) {
+  return `
+    <section class="monwuiwl-stats-page">
+      ${renderWatchlistHistorySection(model)}
+      ${renderWatchlistGeneralSection()}
+    </section>
+  `;
 }
 
 function findViewByItemId(model, itemId, tabKey = "") {
@@ -4584,6 +5664,7 @@ function renderModalShell(model, activeTab) {
     currentTab,
   } = getRenderedTabData(model, activeTab);
   const tabTitle = getWatchlistTabLabel(currentTab);
+  const layoutClass = isWatchlistStatsTab(currentTab) ? " is-stats-tab" : "";
 
   return `
     <div class="monwuiwl-backdrop">
@@ -4600,13 +5681,12 @@ function renderModalShell(model, activeTab) {
 
         <div class="monwuiwl-tabs">
           ${WATCHLIST_TABS.map((tab) => {
-            const count = (model?.[tab.key]?.own || []).length + (model?.[tab.key]?.shared || []).length;
-            return `<button class="monwuiwl-tab ${currentTab === tab.key ? "active" : ""}" data-monwuiwl-tab="${escapeHtml(tab.key)}">${escapeHtml(L(tab.labelKey, tab.fallback))} (${count})</button>`;
+            return `<button class="monwuiwl-tab ${currentTab === tab.key ? "active" : ""}" data-monwuiwl-tab="${escapeHtml(tab.key)}">${escapeHtml(getWatchlistTabButtonText(model, tab.key))}</button>`;
           }).join("")}
         </div>
 
         <div class="monwuiwl-body">
-          <div class="monwuiwl-layout">
+          <div class="monwuiwl-layout${layoutClass}">
             <div class="monwuiwl-main">
               ${renderCurrentWatchlistTabSections(model, currentTab)}
             </div>
@@ -4621,6 +5701,10 @@ function renderModalShell(model, activeTab) {
 }
 
 function renderCurrentWatchlistTabSections(model, activeTab) {
+  if (isWatchlistStatsTab(activeTab)) {
+    return renderWatchlistStatsPanel(model);
+  }
+
   const {
     ownItems,
     sharedItems,
@@ -4665,8 +5749,7 @@ function updateWatchlistTabButtons(root, model, activeTab) {
     const tab = WATCHLIST_TABS.find((entry) => entry.key === tabKey);
     if (!tab) return;
 
-    const count = (model?.[tabKey]?.own || []).length + (model?.[tabKey]?.shared || []).length;
-    button.textContent = `${L(tab.labelKey, tab.fallback)} (${count})`;
+    button.textContent = getWatchlistTabButtonText(model, tabKey);
     button.classList.toggle("active", tabKey === currentTab);
   });
 }
@@ -4682,8 +5765,21 @@ function renderCurrentWatchlistTabContent(root, model, { preserveScroll = false 
   if (preserveScroll) {
     main.scrollTop = previousScrollTop;
   }
-  scheduleProgressiveWatchlistSections(root, model, root.__state?.activeTab);
+  if (!isWatchlistStatsTab(root.__state?.activeTab)) {
+    scheduleProgressiveWatchlistSections(root, model, root.__state?.activeTab);
+  }
+  maybeLoadStatsTabData(root);
   return true;
+}
+
+function maybeLoadStatsTabData(root) {
+  if (!root || !isWatchlistStatsTab(root.__state?.activeTab)) return;
+  if (!generalStatsStale() && !generalStatsPromise) return;
+
+  void loadWatchlistGeneralStats().then(() => {
+    if (!root?.isConnected || !isWatchlistStatsTab(root.__state?.activeTab) || !root.__model) return;
+    renderCurrentWatchlistTabContent(root, root.__model, { preserveScroll: true });
+  }).catch(() => {});
 }
 
 function updateWatchlistSectionAfterRemoval(root, sectionKey, title, items, change = {}) {
@@ -4896,15 +5992,34 @@ async function applyWatchlistAdditionToOpenModal(root, detail = {}) {
 
   const currentTab = normalizeWatchlistTabKey(root.__state?.activeTab);
   const currentTabAffected = change.affectedTabs.has(currentTab);
+  const currentTabIsStats = isWatchlistStatsTab(currentTab);
 
   updateWatchlistTabButtons(root, root.__model, currentTab);
-  if (!currentTabAffected) return true;
+  if (!currentTabAffected && !currentTabIsStats) return true;
 
   clearPreviewHoverTimer(root);
   cancelProgressiveWatchlistRender(root);
 
   if (!renderCurrentWatchlistTabContent(root, root.__model, { preserveScroll: true })) {
     return false;
+  }
+
+  if (currentTabIsStats) {
+    root.__state = {
+      ...(root.__state || {}),
+      focusItemId: "",
+      previewItemId: ""
+    };
+    try {
+      root.__previewAbortController?.abort?.();
+    } catch {}
+    const panel = root.querySelector(".monwuiwl-preview");
+    if (panel) {
+      panel.scrollTop = 0;
+      applyPreviewPanelMarkup(panel, renderPreviewEmptyState());
+    }
+    setPreviewActiveCard(root, "");
+    return true;
   }
 
   const currentPreviewItemId = text(root?.__state?.previewItemId);
@@ -4963,12 +6078,34 @@ async function applyWatchlistChangeToOpenModal(root, detail = {}) {
 
   const currentTab = normalizeWatchlistTabKey(root.__state?.activeTab);
   const currentTabAffected = change.affectedTabs.has(currentTab);
+  const currentTabIsStats = isWatchlistStatsTab(currentTab);
 
   updateWatchlistTabButtons(root, root.__model, currentTab);
 
-  if (currentTabAffected) {
+  if (currentTabAffected || currentTabIsStats) {
     clearPreviewHoverTimer(root);
     cancelProgressiveWatchlistRender(root);
+
+    if (currentTabIsStats) {
+      if (!renderCurrentWatchlistTabContent(root, root.__model, { preserveScroll: true })) {
+        return false;
+      }
+      root.__state = {
+        ...(root.__state || {}),
+        focusItemId: "",
+        previewItemId: ""
+      };
+      try {
+        root.__previewAbortController?.abort?.();
+      } catch {}
+      const panel = root.querySelector(".monwuiwl-preview");
+      if (panel) {
+        panel.scrollTop = 0;
+        applyPreviewPanelMarkup(panel, renderPreviewEmptyState());
+      }
+      setPreviewActiveCard(root, "");
+      return true;
+    }
 
     const {
       ownItems,
@@ -5053,7 +6190,10 @@ function renderWatchlistShellFromModel(root, model) {
   root.__focusItemApplied = "";
   root.__previewActiveCard = null;
   root.innerHTML = renderModalShell(model, root.__state?.activeTab);
-  scheduleProgressiveWatchlistSections(root, model, root.__state?.activeTab);
+  if (!isWatchlistStatsTab(root.__state?.activeTab)) {
+    scheduleProgressiveWatchlistSections(root, model, root.__state?.activeTab);
+  }
+  maybeLoadStatsTabData(root);
 }
 
 async function renderWatchlistModal(root, state = {}) {
@@ -5350,7 +6490,12 @@ function bindModalInteractions(root) {
         if (removeKind === "shared") {
           await removeWatchlistShare(targetId);
         } else {
-          await updateFavoriteStatus(targetId, false);
+          const currentView = findViewByItemId(root.__model || {}, targetId, root.__state?.activeTab);
+          const playableItem = currentView?.item?.liveItem || currentView?.item || null;
+          await updateFavoriteStatus(targetId, false, {
+            item: playableItem,
+            played: isMarkedPlayed(playableItem)
+          });
         }
         window.showMessage?.(L("watchlistRemoved", "Öğe listeden çıkarıldı"), "success");
       } catch (error) {

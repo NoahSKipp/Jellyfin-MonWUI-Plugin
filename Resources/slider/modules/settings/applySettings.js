@@ -613,6 +613,7 @@ const USER_ONLY_KEYS = [
             })(),
 
             enableStudioHubs: formData.get('enableStudioHubs') === 'on',
+            studioHubsColorize: formData.get('studioHubsColorize') === 'on',
             enablePersonalRecommendations: formData.get('enablePersonalRecommendations') === 'on',
             showPersonalRecsHeroCards: formData.get('showPersonalRecsHeroCards') === 'on',
             managedCardTitleDisplayMode: normalizeManagedCardTitleDisplayMode(
@@ -656,6 +657,7 @@ const USER_ONLY_KEYS = [
             showQualityDetail: formData.get('showQualityDetail') === 'on',
             showRatingInfo: formData.get('showRatingInfo') === 'on',
             showMatchPercentage: formData.get('showMatchPercentage') === 'on',
+            metaIconColors: formData.get('metaIconColors') === 'on',
             showCommunityRating: formData.get('showCommunityRating') === 'on',
             showCriticRating: formData.get('showCriticRating') === 'on',
             showOfficialRating: formData.get('showOfficialRating') === 'on',

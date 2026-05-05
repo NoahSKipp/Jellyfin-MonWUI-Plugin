@@ -967,9 +967,10 @@ async function runManagedRenderTask(task, generation = MANAGED_RENDER_QUEUE.gene
     ? Math.max(0, task.options.timeoutMs | 0)
     : 20000;
   const rootMargin = task?.options?.rootMargin || HOME_SECTION_QUEUE_ACTIVATE_ROOT_MARGIN;
+  const completionGated = COMPLETION_GATED_SECTION_KEYS.has(task?.key);
   const handoffTimeoutMs = Number.isFinite(task?.options?.handoffTimeoutMs)
     ? Math.max(0, task.options.handoffTimeoutMs | 0)
-    : HOME_SECTION_QUEUE_HANDOFF_TIMEOUT_MS;
+    : (completionGated ? timeoutMs : HOME_SECTION_QUEUE_HANDOFF_TIMEOUT_MS);
   const isStillValid = typeof task?.options?.isStillValid === "function"
     ? task.options.isStillValid
     : null;
@@ -1023,9 +1024,13 @@ async function runManagedRenderTask(task, generation = MANAGED_RENDER_QUEUE.gene
     () => undefined
   );
 
+  const handoffPromise = completionGated
+    ? waitForManagedSectionCompletion(task.key, { timeoutMs: handoffTimeoutMs })
+    : waitForManagedSectionReady(task.key, { timeoutMs: handoffTimeoutMs });
+
   await Promise.race([
     settledPromise,
-    waitForManagedSectionReady(task.key, { timeoutMs: handoffTimeoutMs }),
+    handoffPromise,
   ]);
 }
 

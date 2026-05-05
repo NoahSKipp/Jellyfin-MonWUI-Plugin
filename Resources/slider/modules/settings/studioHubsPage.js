@@ -1038,7 +1038,16 @@ export function createStudioHubsPanel(config, labels) {
     labels?.enableStudioHubs || config.languageLabels.enableStudioHubs || 'Stüdyo Koleksiyonlarını Etkinleştir',
     config.enableStudioHubs
   );
+
   section.appendChild(enableCheckbox);
+
+  const colorizeCheckbox = createCheckbox(
+    'studioHubsColorize',
+    labels?.studioHubsColorize || config.languageLabels.studioHubsColorize || 'Renkli Koleksiyonlar',
+    config.studioHubsColorize
+  );
+
+  section.appendChild(colorizeCheckbox);
 
   const enableHoverVideo = createCheckbox(
     'studioHubsHoverVideo',

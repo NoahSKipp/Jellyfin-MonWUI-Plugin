@@ -13,7 +13,7 @@ import { ensureProgressBarExists, resetProgressBar, pauseProgressBar, resumeProg
 import { createSlide } from "./modules/slideCreator.js";
 import { changeSlide, createDotNavigation, enablePeakNeighborActivation, getPeakDisplayOptions, initSwipeEvents, primePeakFirstPaint, syncPeakStructureNow, updatePeakClasses } from "./modules/navigation.js";
 import { attachMouseEvents } from "./modules/events.js";
-import { fetchItemDetails as fetchItemDetailsNet, getSessionInfo, getAuthHeader, waitForAuthReadyStrict, isAuthReadyStrict, AUTH_PROFILE_CHANGED_EVENT } from "../Plugins/JMSFusion/runtime/api.js";
+import { getSessionInfo, getAuthHeader, waitForAuthReadyStrict, isAuthReadyStrict, AUTH_PROFILE_CHANGED_EVENT, USERDATA_CHANGED_EVENT } from "../Plugins/JMSFusion/runtime/api.js";
 import { cachedFetchJson, createCachedItemDetailsFetcher, startLibraryDeltaWatcher } from "./modules/sliderCache.js";
 import { forceHomeSectionsTop, forceSkinHeaderPointerEvents } from "./modules/positionOverrides.js";
 import { initAvatarSystem } from "./modules/userAvatar.js";
@@ -27,6 +27,7 @@ import { withServer } from "./modules/jfUrl.js";
 import { initUserProfileAvatarPicker } from "./modules/avatarPicker.js";
 import { startBackgroundCollectionIndexer, getBackgroundCollectionIndexerStatus } from "./modules/collectionIndexer.js";
 import { initProfileChooser, syncProfileChooserHeaderButtonVisibility } from "./modules/profileChooser.js";
+import { waitForNativeHomeSectionStability, waitForVisibleHomeSections } from "./modules/homeSectionNative.js";
 export { loadCSS } from "./modules/playerStyles.js";
 export { waitForAnyVisible };
 const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 0));
@@ -53,6 +54,36 @@ const CUSTOM_SPLASH_EXIT_SYNC_MS = 120;
 const HOME_DEBUG_STORAGE_KEY = "jms:debug:home-sections";
 const HOME_TRACE_STORAGE_KEY = "jms:trace:home-sections";
 const AUTH_CONTEXT_REBOOT_DEBOUNCE_MS = 180;
+const HOME_ITEM_DETAILS_STATIC_FIELDS = [
+  "ImageTags",
+  "BackdropImageTags",
+  "PrimaryImageAspectRatio",
+  "RunTimeTicks",
+  "Overview",
+  "Genres",
+  "People",
+  "ProductionYear",
+  "ProductionLocations",
+  "Taglines",
+  "OriginalTitle",
+  "MediaStreams",
+  "ProviderIds",
+  "RemoteTrailers",
+  "TrailerUrls",
+  "CommunityRating",
+  "CriticRating",
+  "OfficialRating",
+  "ChildCount",
+  "ParentIndexNumber",
+  "IndexNumber",
+  "SeriesId",
+  "SeriesName",
+  "CollectionIds"
+];
+const HOME_ITEM_DETAILS_USERDATA_FIELDS = ["UserData"];
+const HOME_ITEM_DETAILS_REVALIDATE_MS = 6 * 60 * 60 * 1000;
+const HOME_ITEM_DETAILS_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const HOME_ITEM_USERDATA_CACHE_TTL_MS = 15_000;
 let materialIconsRepairPromise = null;
 let __notificationsModulePromise = null;
 let __detailsModalLoaderPromise = null;
@@ -72,6 +103,7 @@ let __customSplashAvailabilityValue = null;
 let __customSplashRouteGuardReady = false;
 let __authContextRecoveryTimer = 0;
 let __lastRecoveredAuthContextKey = "";
+let __sliderUserDataRefreshTimer = 0;
 const __customSplashProgressState = {
   authReady: false,
   dataPoolReady: false,
@@ -268,6 +300,110 @@ function injectMaterialIconsRepair(cssText, sourceHref) {
   }
   style.textContent = escapeNonAsciiCss(cssText);
   return true;
+}
+
+function isCompletedUserData(userData = {}) {
+  if (!userData || typeof userData !== "object") return false;
+  if (userData.Played === true) return true;
+  const playedPercentage = Number(userData.PlayedPercentage);
+  return Number.isFinite(playedPercentage) && playedPercentage >= 100;
+}
+
+function isPartialPlaybackUserData(userData = {}) {
+  if (!userData || typeof userData !== "object") return false;
+  if (isCompletedUserData(userData)) return false;
+  const playbackTicks = Number(userData.PlaybackPositionTicks || 0);
+  return playbackTicks > 0;
+}
+
+function mergePlaybackUserData(baseUserData = {}, detailUserData = {}) {
+  const baseCompleted = isCompletedUserData(baseUserData);
+  const detailCompleted = isCompletedUserData(detailUserData);
+
+  if (baseCompleted || detailCompleted) {
+    return {
+      ...(baseUserData || {}),
+      ...(detailUserData || {}),
+      Played: true,
+      PlayedPercentage: 100,
+      PlaybackPositionTicks: 0
+    };
+  }
+
+  const baseTicks = Number(baseUserData?.PlaybackPositionTicks || 0);
+  const detailTicks = Number(detailUserData?.PlaybackPositionTicks || 0);
+  return baseTicks > detailTicks
+    ? { ...(detailUserData || {}), ...(baseUserData || {}) }
+    : { ...(baseUserData || {}), ...(detailUserData || {}) };
+}
+
+function normalizeDurationMs(value, fallback, minimum = 1_000) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.max(minimum, Math.round(parsed));
+}
+
+function dedupeItemIds(ids = []) {
+  const out = [];
+  const seen = new Set();
+
+  for (const raw of Array.isArray(ids) ? ids : []) {
+    const id = raw == null ? "" : String(raw).trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+
+  return out;
+}
+
+function mergeHomeSliderItem(baseItem = null, detailItem = null, userDataItem = null) {
+  const base = baseItem && typeof baseItem === "object" ? baseItem : null;
+  const detail = detailItem && typeof detailItem === "object" ? detailItem : null;
+  const live = userDataItem && typeof userDataItem === "object" ? userDataItem : null;
+
+  if (!base && !detail) return null;
+
+  const merged = {
+    ...(base || {}),
+    ...(detail || {}),
+    ...(live || {})
+  };
+
+  const mergedUserData = mergePlaybackUserData(
+    base?.UserData || {},
+    live?.UserData || detail?.UserData || {}
+  );
+  if (Object.keys(mergedUserData).length) {
+    merged.UserData = mergedUserData;
+  }
+
+  merged.RunTimeTicks = detail?.RunTimeTicks || base?.RunTimeTicks || merged.RunTimeTicks || 0;
+
+  merged.MediaStreams = Array.isArray(detail?.MediaStreams) && detail.MediaStreams.length
+    ? detail.MediaStreams
+    : (Array.isArray(base?.MediaStreams) ? base.MediaStreams : []);
+
+  merged.RemoteTrailers = Array.isArray(detail?.RemoteTrailers) && detail.RemoteTrailers.length
+    ? detail.RemoteTrailers
+    : (Array.isArray(base?.RemoteTrailers) ? base.RemoteTrailers : []);
+
+  return merged;
+}
+
+function scheduleSliderUserDataRefresh() {
+  if (typeof window === "undefined") return;
+  if (__sliderUserDataRefreshTimer) {
+    clearTimeout(__sliderUserDataRefreshTimer);
+    __sliderUserDataRefreshTimer = 0;
+  }
+  __sliderUserDataRefreshTimer = window.setTimeout(() => {
+    __sliderUserDataRefreshTimer = 0;
+    if (!isHomeVisible()) return;
+    void slidesInit().catch((error) => {
+      console.warn("slider userData refresh failed:", error);
+    });
+  }, 180);
 }
 
 async function ensureMaterialIconsUtf8Integrity() {
@@ -3506,17 +3642,8 @@ function debounce(fn, wait = 150) {
   };
 }
 
-function upsertSlidesContainerAtTop(indexPage) {
-  if (!indexPage) return null;
-  let c = indexPage.querySelector("#monwui-slides-container");
-  if (!c) {
-    c = document.createElement("div");
-    c.id = "monwui-slides-container";
-  } else {
-    if (c.parentElement) c.parentElement.removeChild(c);
-  }
-
-  const deepAnchor = indexPage.querySelector(".homeSectionsContainer");
+function resolveSlidesContainerTopAnchor(indexPage) {
+  const deepAnchor = indexPage?.querySelector?.(".homeSectionsContainer");
   let anchorTop = null;
   if (deepAnchor) {
     let cur = deepAnchor;
@@ -3527,14 +3654,80 @@ function upsertSlidesContainerAtTop(indexPage) {
       anchorTop = cur;
     }
   }
+  return anchorTop;
+}
+
+function placeSlidesContainerAtTop(indexPage, container) {
+  if (!indexPage || !container) return container || null;
+
+  if (container.parentElement && container.parentElement !== indexPage) {
+    try { container.parentElement.removeChild(container); } catch {}
+  }
+
+  const anchorTop = resolveSlidesContainerTopAnchor(indexPage);
 
   if (anchorTop) {
-    indexPage.insertBefore(c, anchorTop);
-  } else if (indexPage.firstElementChild) {
-    indexPage.insertBefore(c, indexPage.firstElementChild);
-  } else {
-    indexPage.appendChild(c);
+    indexPage.insertBefore(container, anchorTop);
+  } else if (indexPage.firstElementChild !== container) {
+    if (indexPage.firstElementChild) {
+      indexPage.insertBefore(container, indexPage.firstElementChild);
+    } else {
+      indexPage.appendChild(container);
+    }
+  } else if (container.parentElement !== indexPage) {
+    indexPage.appendChild(container);
   }
+
+  return container;
+}
+
+function scheduleNativeAwareSlidesPlacement(indexPage, container) {
+  if (!indexPage?.isConnected || !container) return;
+
+  const nextToken = (Number(container.dataset.jmsSliderPlacementToken || 0) || 0) + 1;
+  container.dataset.jmsSliderPlacementToken = String(nextToken);
+
+  Promise.resolve().then(async () => {
+    const host = await waitForVisibleHomeSections({ timeout: 1800 }).catch(() => null);
+    const page = host?.page || indexPage;
+    const homeSections = host?.container || page?.querySelector?.(".homeSectionsContainer") || null;
+
+    if (!page?.isConnected || page !== indexPage) return;
+    if (!container.isConnected) return;
+    if (String(container.dataset.jmsSliderPlacementToken || "") !== String(nextToken)) return;
+
+    if (homeSections?.isConnected) {
+      try {
+        await waitForNativeHomeSectionStability(homeSections, {
+          timeoutMs: 1800,
+          stableMs: 220,
+          minVisibleCount: 1,
+        });
+      } catch {}
+    }
+
+    if (!indexPage.isConnected || !container.isConnected) return;
+    if (String(container.dataset.jmsSliderPlacementToken || "") !== String(nextToken)) return;
+
+    placeSlidesContainerAtTop(indexPage, container);
+    try {
+      updateSlidePosition();
+    } catch {}
+  });
+}
+
+function upsertSlidesContainerAtTop(indexPage) {
+  if (!indexPage) return null;
+  let c = indexPage.querySelector("#monwui-slides-container");
+  if (!c) {
+    c = document.createElement("div");
+    c.id = "monwui-slides-container";
+  } else {
+    if (c.parentElement) c.parentElement.removeChild(c);
+  }
+
+  placeSlidesContainerAtTop(indexPage, c);
+  scheduleNativeAwareSlidesPlacement(indexPage, c);
   try {
     updateSlidePosition();
   } catch {}
@@ -4108,61 +4301,102 @@ export async function slidesInit() {
     }
     if (!isBootActive()) return;
 
-    if (!fetchItemDetailsCached) {
-      const bulkBatchSize = Number(config?.detailsBulkBatchSize) || 60;
+    const bulkBatchSize = Number(config?.detailsBulkBatchSize) || 60;
+    const itemDetailsStaticMaxAgeMs = normalizeDurationMs(
+      config?.itemDetailsStaticMaxAgeMs,
+      HOME_ITEM_DETAILS_REVALIDATE_MS
+    );
+    const itemDetailsCacheTtlMs = Math.max(
+      itemDetailsStaticMaxAgeMs,
+      normalizeDurationMs(
+        config?.itemDetailsCacheTtlMs,
+        HOME_ITEM_DETAILS_CACHE_TTL_MS
+      )
+    );
+    const itemUserDataMaxAgeMs = normalizeDurationMs(
+      config?.itemDetailsUserDataMaxAgeMs,
+      HOME_ITEM_USERDATA_CACHE_TTL_MS
+    );
 
-      const fetchMany = async (ids) => {
-        let tok = accessToken;
-        try { tok = getSessionInfo?.()?.accessToken || tok; } catch {}
+    const getAuthHeaders = () => {
+      let tok = accessToken;
+      try { tok = getSessionInfo?.()?.accessToken || tok; } catch {}
+      return {
+        "Authorization": getAuthHeader(),
+        "X-Emby-Token": tok,
+      };
+    };
 
-        const headers = {
-          "Authorization": getAuthHeader(),
-          "X-Emby-Token": tok,
-        };
+    const fetchHomeItemDetailsOne = async (itemId) => {
+      if (!itemId) return null;
+      const qs = new URLSearchParams();
+      qs.set("Fields", HOME_ITEM_DETAILS_STATIC_FIELDS.join(","));
+      return fetchJsonViaSafeFetch(
+        `/Users/${userId}/Items/${encodeURIComponent(String(itemId).trim())}?${qs.toString()}`,
+        { headers: getAuthHeaders() }
+      );
+    };
 
+    const fetchHomeItemDetailsMany = async (ids) => {
+      const cleanIds = dedupeItemIds(ids);
+      if (!cleanIds.length) return [];
+
+      const qs = new URLSearchParams();
+      qs.set("Ids", cleanIds.join(","));
+      qs.set("EnableTotalRecordCount", "false");
+      qs.set("Fields", HOME_ITEM_DETAILS_STATIC_FIELDS.join(","));
+
+      const data = await fetchJsonViaSafeFetch(`/Users/${userId}/Items?${qs.toString()}`, {
+        headers: getAuthHeaders()
+      });
+      return data?.Items || data || [];
+    };
+
+    const fetchHomeItemUserDataMap = async (ids) => {
+      const cleanIds = dedupeItemIds(ids);
+      if (!cleanIds.length) return new Map();
+
+      const out = new Map();
+
+      for (let start = 0; start < cleanIds.length; start += bulkBatchSize) {
+        const chunk = cleanIds.slice(start, start + bulkBatchSize);
         const qs = new URLSearchParams();
-        qs.set("Ids", ids.join(","));
+        qs.set("Ids", chunk.join(","));
         qs.set("EnableUserData", "true");
         qs.set("EnableTotalRecordCount", "false");
-        qs.set(
-          "Fields",
-          [
-            "ImageTags",
-            "BackdropImageTags",
-            "UserData",
-            "PrimaryImageAspectRatio",
-            "RunTimeTicks",
-            "Overview",
-            "Genres",
-            "People",
-            "Studios",
-            "ProductionYear",
-            "ProductionLocations",
-            "Taglines",
-            "OriginalTitle",
-            "MediaStreams",
-            "Chapters",
-            "DateCreated",
-            "ProviderIds",
-            "ExternalUrls",
-            "RemoteTrailers",
-            "TrailerUrls"
-          ].join(",")
-        );
+        qs.set("Fields", HOME_ITEM_DETAILS_USERDATA_FIELDS.join(","));
 
-        const data = await fetchJsonViaSafeFetch(`/Users/${userId}/Items?${qs.toString()}`, { headers });
-        return data?.Items || data || [];
-      };
+        const data = await cachedFetchJson({
+          keyParts: ["homeItemUserData", userId, [...chunk].sort().join(",")],
+          url: `/Users/${userId}/Items?${qs.toString()}`,
+          opts: { headers: getAuthHeaders() },
+          fetchJson: fetchJsonViaSafeFetch,
+          ttlMs: itemUserDataMaxAgeMs,
+          allowStaleOnError: true,
+        });
 
+        const items = Array.isArray(data?.Items) ? data.Items : (Array.isArray(data) ? data : []);
+        for (const item of items) {
+          const id = item?.Id || item?.id;
+          if (id) out.set(id, item);
+        }
+      }
+
+      return out;
+    };
+
+    if (!fetchItemDetailsCached || window.__jmsFetchItemDetailsCachedUserId !== userId) {
       fetchItemDetailsCached = window.__jmsFetchItemDetailsCached =
         createCachedItemDetailsFetcher({
-          fetchOne: fetchItemDetailsNet,
-          fetchMany,
+          fetchOne: fetchHomeItemDetailsOne,
+          fetchMany: fetchHomeItemDetailsMany,
           batchSize: bulkBatchSize,
-          ttlMs: Number(config?.itemDetailsCacheTtlMs) || (24 * 60 * 60 * 1000),
+          ttlMs: itemDetailsCacheTtlMs,
+          revalidateAfterMs: itemDetailsStaticMaxAgeMs,
           allowStaleOnError: true,
           maxConcurrent: Number(config?.detailsFetchConcurrency) || 6,
         });
+      window.__jmsFetchItemDetailsCachedUserId = userId;
     }
 
     try {
@@ -4206,7 +4440,13 @@ export async function slidesInit() {
 
       if (Array.isArray(listItems) && listItems.length) {
         const details = await fetchItemDetailsCached.many(listItems);
-        items = details.filter((x) => x);
+        const userDataById = await fetchHomeItemUserDataMap(listItems);
+        items = details
+          .map((detail, idx) => {
+            const id = detail?.Id || listItems[idx];
+            return mergeHomeSliderItem(null, detail, userDataById.get(id) || null);
+          })
+          .filter((x) => x);
         syncCustomSplashProgress({
           dataPoolReady: true,
           poolCount: items.length
@@ -4244,11 +4484,11 @@ export async function slidesInit() {
             url: `/Users/${userId}/Items?Filters=IsResumable&MediaTypes=Video&Recursive=true&EnableUserData=true&Fields=${encodeURIComponent("Type,UserData,ImageTags,BackdropImageTags,PrimaryImageAspectRatio,Series,SeriesId,CollectionIds,MediaStreams")}&SortBy=DatePlayed,DateCreated&SortOrder=Descending&Limit=${Math.max(10, playingLimit * 3)}`,
             opts: { headers: authHeaders },
             fetchJson: fetchJsonViaSafeFetch,
-            ttlMs: Number(config?.resumeCacheTtlMs) || 30_000,
+            ttlMs: Number(config?.resumeCacheTtlMs) || 10_000,
             allowStaleOnError: true,
           });
             let fetchedItems = Array.isArray(data?.Items) ? data.Items : [];
-            fetchedItems = fetchedItems.filter((item) => Number(item?.UserData?.PlaybackPositionTicks || 0) > 0);
+            fetchedItems = fetchedItems.filter((item) => isPartialPlaybackUserData(item?.UserData));
 
             if (config.excludeEpisodesFromPlaying) {
               playingItems = fetchedItems.filter((item) => item.Type !== "Episode").slice(0, playingLimit);
@@ -4462,31 +4702,12 @@ export async function slidesInit() {
             .map((it) => [it.Id, it])
         );
         const detailed = await fetchItemDetailsCached.many(selectedItems.map(i => i.Id));
+        const userDataById = await fetchHomeItemUserDataMap(selectedItems.map((item) => item?.Id));
         items = detailed
           .map((detail, idx) => {
             const base = selectedById.get(detail?.Id || selectedItems[idx]?.Id) || selectedItems[idx] || null;
-            if (!detail) return base;
-            if (!base) return detail;
-
-            const baseTicks = Number(base?.UserData?.PlaybackPositionTicks || 0);
-            const detailTicks = Number(detail?.UserData?.PlaybackPositionTicks || 0);
-            const mergedUserData =
-              (baseTicks > detailTicks)
-                ? { ...(detail?.UserData || {}), ...(base?.UserData || {}) }
-                : { ...(base?.UserData || {}), ...(detail?.UserData || {}) };
-
-            return {
-              ...base,
-              ...detail,
-              UserData: mergedUserData,
-              RunTimeTicks: detail?.RunTimeTicks || base?.RunTimeTicks || 0,
-              MediaStreams: Array.isArray(detail?.MediaStreams) && detail.MediaStreams.length
-                ? detail.MediaStreams
-                : (base?.MediaStreams || []),
-              RemoteTrailers: Array.isArray(detail?.RemoteTrailers) && detail.RemoteTrailers.length
-                ? detail.RemoteTrailers
-                : (base?.RemoteTrailers || []),
-            };
+            const id = detail?.Id || base?.Id || selectedItems[idx]?.Id;
+            return mergeHomeSliderItem(base, detail, userDataById.get(id) || null);
           })
           .filter((x) => x);
       }
@@ -5465,6 +5686,10 @@ function installAuthContextRecovery() {
 
   document.addEventListener(AUTH_PROFILE_CHANGED_EVENT, (event) => {
     scheduleAuthContextRecovery(event?.detail || {});
+  }, true);
+
+  document.addEventListener(USERDATA_CHANGED_EVENT, () => {
+    scheduleSliderUserDataRefresh();
   }, true);
 }
 

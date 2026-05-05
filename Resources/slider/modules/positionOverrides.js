@@ -6,6 +6,8 @@ let applyHomeTop = null;
 let applySkinHeader = null;
 let homeTopLifecycleBound = false;
 let skinHeaderLifecycleBound = false;
+const homeTopHeaderBaselineByElement = new WeakMap();
+const HOME_HEADER_OFFSET_VAR = '--jms-home-sections-header-offset-vh';
 
 const OBSERVER_OPTIONS = {
   subtree: true,
@@ -41,6 +43,15 @@ function bindHomeTopLifecycle() {
     });
   };
 
+  let resizeRafId = 0;
+  const handleResize = () => {
+    if (resizeRafId) return;
+    resizeRafId = requestAnimationFrame(() => {
+      resizeRafId = 0;
+      reapply();
+    });
+  };
+
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
       try { homeTopObserver?.disconnect(); } catch {}
@@ -56,6 +67,7 @@ function bindHomeTopLifecycle() {
   window.addEventListener('hashchange', reapply);
   window.addEventListener('popstate', reapply);
   window.addEventListener('focus', reapply);
+  window.addEventListener('resize', handleResize, { passive: true });
 }
 
 function bindSkinHeaderLifecycle() {
@@ -98,13 +110,13 @@ function isMobileDevice() {
 
 function normalizeVariant(x) {
   const s = String(x ?? '').toLowerCase().trim();
-  if (!s) return 'slider';
+  if (!s) return 'normalslider';
 
   if (s.includes('normalslider') || s.includes('normal')) return 'normalslider';
   if (s.includes('fullslider') || s.includes('full'))   return 'fullslider';
   if (s.includes('peakslider') || s.includes('peak'))   return 'peakslider';
   if (s.includes('slider')) return 'slider';
-  return 'slider';
+  return 'normalslider';
 }
 
 function detectCssVariantFromDom() {
@@ -118,43 +130,143 @@ function detectCssVariantFromDom() {
   if (has('normalslider.css')) return 'normalslider';
   if (has('fullslider.css')) return 'fullslider';
   if (has('slider.css')) return 'slider';
-  return 'slider';
+  return 'normalslider';
 }
 
-function computeEffectiveTop() {
+function resolveConfiguredVariant(cfg = {}) {
+  const rawVariant = String(cfg?.cssVariant ?? '').trim();
+  if (rawVariant) {
+    return normalizeVariant(rawVariant);
+  }
+  return detectCssVariantFromDom();
+}
+
+function usesDynamicHeaderAdjustedTop(variant) {
+  return variant === 'normalslider' || variant === 'peakslider' || variant === 'slider';
+}
+
+function getHeaderViewportBucket() {
+  return window.matchMedia?.('(max-width: 768px)')?.matches ? 'mobile' : 'desktop';
+}
+
+function isElementVisible(element) {
+  if (!element?.isConnected) return false;
+  const rect = element.getBoundingClientRect?.();
+  if (!rect || rect.height <= 0 || rect.width <= 0) return false;
+  const style = window.getComputedStyle?.(element);
+  return style?.display !== 'none' && style?.visibility !== 'hidden';
+}
+
+function findVisibleSkinHeader() {
+  const candidates = document.querySelectorAll('.skinHeader:not(.osdHeader)');
+  for (const header of candidates) {
+    if (isElementVisible(header)) return header;
+  }
+  return null;
+}
+
+function computeHeaderHeightOffsetPx(header) {
+  const rect = header?.getBoundingClientRect?.();
+  const currentHeight = Number(rect?.height || 0);
+  if (!Number.isFinite(currentHeight) || currentHeight <= 0) return 0;
+
+  const viewportBucket = getHeaderViewportBucket();
+  const baselineState = homeTopHeaderBaselineByElement.get(header) || {
+    mobile: null,
+    desktop: null,
+  };
+
+  const previousBaseline = baselineState[viewportBucket];
+  const nextBaseline = Number.isFinite(previousBaseline) && previousBaseline > 0
+    ? Math.min(previousBaseline, currentHeight)
+    : currentHeight;
+
+  baselineState[viewportBucket] = nextBaseline;
+  homeTopHeaderBaselineByElement.set(header, baselineState);
+
+  const offsetPx = currentHeight - nextBaseline;
+  return Math.abs(offsetPx) < 1 ? 0 : offsetPx;
+}
+
+function getHeaderHeightOffsetVh(variant) {
+  if (!usesDynamicHeaderAdjustedTop(variant)) return 0;
+  const header = findVisibleSkinHeader();
+  if (!header) return 0;
+
+  const offsetPx = computeHeaderHeightOffsetPx(header);
+  if (!offsetPx) return 0;
+
+  const viewportHeight =
+    Number(window.innerHeight) ||
+    Number(document.documentElement?.clientHeight) ||
+    0;
+
+  if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return 0;
+  return Number(((offsetPx / viewportHeight) * 100).toFixed(3));
+}
+
+function setHomeHeaderOffsetVar(offsetVh = 0) {
+  const root = document.documentElement;
+  if (!root?.style) return;
+  const numericOffset = Number.isFinite(offsetVh) ? offsetVh : 0;
+  const value = `${numericOffset}vh`;
+  if (root.style.getPropertyValue(HOME_HEADER_OFFSET_VAR) !== value) {
+    root.style.setProperty(HOME_HEADER_OFFSET_VAR, value);
+  }
+}
+
+function computeEffectiveTopState() {
   const cfg = (typeof getConfig === 'function') ? getConfig() : {};
   const userTop = readUserTopFromLocalStorage();
-  if (userTop !== null) return userTop;
-  if (cfg?.enableSlider === false || cfg?.enableSlider === 'false') return 0;
+  if (userTop !== null) {
+    setHomeHeaderOffsetVar(0);
+    return {
+      topValue: `${userTop}vh`,
+      usesHeaderOffset: false,
+    };
+  }
+  if (cfg?.enableSlider === false || cfg?.enableSlider === 'false') {
+    setHomeHeaderOffsetVar(0);
+    return null;
+  }
 
-  const rawVariant = (cfg && 'cssVariant' in cfg) ? cfg.cssVariant : undefined;
-  const variant = normalizeVariant(rawVariant ?? detectCssVariantFromDom());
+  const variant = resolveConfiguredVariant(cfg);
+  const baseTop = getDefaultTopByVariant(variant);
+  const usesHeaderOffset = usesDynamicHeaderAdjustedTop(variant);
+  const headerOffsetVh = usesHeaderOffset ? getHeaderHeightOffsetVh(variant) : 0;
 
-  try {
-  } catch {}
+  setHomeHeaderOffsetVar(headerOffsetVh);
 
-  return getDefaultTopByVariant(variant);
+  return {
+    topValue: usesHeaderOffset
+      ? `calc(${baseTop}vh + var(${HOME_HEADER_OFFSET_VAR}, 0vh))`
+      : `${baseTop}vh`,
+    usesHeaderOffset,
+  };
 }
 
 function getDefaultTopByVariant(variant) {
-  const mobile = isMobileDevice();
+  let baseTop;
+  const mobile = window.matchMedia?.('(max-width: 768px)')?.matches || isMobileDevice();
   if (mobile) {
     switch (variant) {
-      case 'normalslider': return -12;
-      case 'fullslider': return -16;
-      case 'peakslider': return 2;
-      case 'slider': return 4;
-      default: return 0;
+      case 'normalslider': baseTop = -23; break;
+      case 'fullslider': baseTop = -16; break;
+      case 'peakslider': baseTop = -5.5; break;
+      case 'slider': baseTop = -3; break;
+      default: baseTop = 0; break;
     }
   } else {
     switch (variant) {
-      case 'normalslider': return -15;
-      case 'fullslider': return 6;
-      case 'peakslider': return -2;
-      case 'slider': return 2;
-      default: return 0;
+      case 'normalslider': baseTop = -15; break;
+      case 'fullslider': baseTop = 6; break;
+      case 'peakslider': baseTop = -3.5; break;
+      case 'slider': baseTop = 1; break;
+      default: baseTop = 0; break;
     }
   }
+
+  return baseTop;
 }
 
 function readUserTopFromLocalStorage() {
@@ -182,8 +294,7 @@ function shouldAffectFavoritesTab(cfg) {
   return !coerceBoolean(cfg?.onlyShowSliderOnHomeTab, true);
 }
 
-function applyTopToElements(vh, affectFavoritesTab = true) {
-  const value = `${vh}vh`;
+function applyTopToElements(value, affectFavoritesTab = true) {
   const targets = [...document.querySelectorAll('.homeSectionsContainer')]
     .filter(el => affectFavoritesTab || el?.id !== 'favoritesTab');
   if (affectFavoritesTab) {
@@ -195,6 +306,19 @@ function applyTopToElements(vh, affectFavoritesTab = true) {
     if (el.style.top !== value) {
       el.style.setProperty('top', value, 'important');
     }
+  }
+}
+
+function clearTopOverrides(affectFavoritesTab = true) {
+  const targets = [...document.querySelectorAll('.homeSectionsContainer')]
+    .filter(el => affectFavoritesTab || el?.id !== 'favoritesTab');
+  if (affectFavoritesTab) {
+    const fav = document.querySelector('#favoritesTab');
+    if (fav && !targets.includes(fav)) targets.push(fav);
+  }
+  for (const el of targets) {
+    if (!el) continue;
+    el.style.removeProperty('top');
   }
 }
 
@@ -212,7 +336,7 @@ function waitForFavoritesTabAndApply(topValue) {
 
     const el = document.querySelector('#favoritesTab');
     if (el) {
-      el.style.setProperty('top', `${topValue}vh`, 'important');
+      el.style.setProperty('top', topValue, 'important');
       return;
     }
     if (++tries < 30) setTimeout(attempt, 100);
@@ -222,13 +346,19 @@ function waitForFavoritesTabAndApply(topValue) {
 
 export function forceHomeSectionsTop() {
   const applyAlways = () => {
-    const top = computeEffectiveTop();
+    const topState = computeEffectiveTopState();
     const cfg = (typeof getConfig === 'function') ? getConfig() : {};
     const affectFavoritesTab = shouldAffectFavoritesTab(cfg);
 
-    applyTopToElements(top, affectFavoritesTab);
+    if (topState === null) {
+      clearTopOverrides(affectFavoritesTab);
+      if (!affectFavoritesTab) clearFavoritesTabTopOverride();
+      return;
+    }
+
+    applyTopToElements(topState.topValue, affectFavoritesTab);
     if (affectFavoritesTab) {
-      waitForFavoritesTabAndApply(top);
+      waitForFavoritesTabAndApply(topState.topValue);
     } else {
       clearFavoritesTabTopOverride();
     }

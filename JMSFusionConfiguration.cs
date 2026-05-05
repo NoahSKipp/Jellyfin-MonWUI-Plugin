@@ -101,6 +101,9 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("watchlistShares")]
         public List<WatchlistShareEntry> WatchlistShares { get; set; } = new();
 
+        [JsonPropertyName("watchlistHistoryEntries")]
+        public List<WatchlistHistoryEntry> WatchlistHistoryEntries { get; set; } = new();
+
         [JsonPropertyName("watchlistRevision")]
         public long WatchlistRevision { get; set; } = 0;
 
@@ -195,6 +198,21 @@ namespace Jellyfin.Plugin.JMSFusion
         public long AddedAtUtc { get; set; }
         public string? OwnerUserId { get; set; }
         public string? OwnerUserName { get; set; }
+    }
+
+    public class WatchlistHistoryEntry
+    {
+        public string? ItemId { get; set; }
+        public string? ItemType { get; set; }
+        public string? Name { get; set; }
+        public string? OwnerUserId { get; set; }
+        public string? OwnerUserName { get; set; }
+        public long FirstAddedAtUtc { get; set; }
+        public long LastAddedAtUtc { get; set; }
+        public long LastRemovedAtUtc { get; set; }
+        public int AddCount { get; set; }
+        public int RemoveCount { get; set; }
+        public bool RemovedAfterPlayed { get; set; }
     }
 
     public class WatchlistShareEntry

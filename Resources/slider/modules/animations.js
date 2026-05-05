@@ -125,9 +125,6 @@ function cleanupTree(root) {
 }
 
 const animationStyles = `
-  #monwui-slides-container {
-    perspective: 1000px;
-  }
   .monwui-slide {
     transform-style: preserve-3d;
     transform-origin: center center;

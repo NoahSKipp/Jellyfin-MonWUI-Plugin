@@ -120,6 +120,18 @@ function toNoTagSrcset(srcset) {
     .join(", ");
 }
 
+function isPlaybackCompleted(userData, runtimeTicks = 0) {
+  if (!userData || typeof userData !== "object") return false;
+  if (userData.Played === true) return true;
+
+  const playedPercentage = Number(userData.PlayedPercentage);
+  if (Number.isFinite(playedPercentage) && playedPercentage >= 100) return true;
+
+  const positionTicks = Number(userData.PlaybackPositionTicks || 0);
+  const totalTicks = Number(runtimeTicks || 0);
+  return positionTicks > 0 && totalTicks > 0 && positionTicks >= totalTicks;
+}
+
 function promoteTaglessBackdropData(data) {
   if (!data || data.__taglessPromoted) return data;
   if (data.lqSrcNoTag && data.lqSrcNoTag !== data.lqSrc) data.lqSrc = data.lqSrcNoTag;
@@ -496,10 +508,7 @@ async function createSlide(item, options = {}) {
   slide.dataset.detailUrl = `/web/#/details?id=${itemId}`;
   slide.dataset.itemId = itemId;
   slide.setAttribute('data-media-streams', JSON.stringify(MediaStreams || []));
-  slide.dataset.played =
-  (typeof UserData?.PlaybackPositionTicks === "number" && UserData.PlaybackPositionTicks > 0)
-    ? "true"
-    : "false";
+  slide.dataset.played = isPlaybackCompleted(UserData, RunTimeTicks) ? "true" : "false";
 
   if (typeof UserData?.PlaybackPositionTicks === "number") {
     slide.dataset.playbackpositionticks = UserData.PlaybackPositionTicks;
@@ -796,7 +805,9 @@ async function createSlide(item, options = {}) {
   const providerContainer = createProviderContainer({ config, ProviderIds, RemoteTrailers, itemId, slide, item });
   const languageContainer = createLanguageContainer({ config, MediaStreams, itemType });
 
-  const metaContainer = createMetaContainer();
+  const metaContainer = createMetaContainer(
+    item?.Id || item?.Name || item?.BackdropImageTags?.[0] || Date.now()
+  );
   if (statusContainer) metaContainer.appendChild(statusContainer);
   if (ratingExists) metaContainer.appendChild(ratingContainer);
   if (languageContainer) metaContainer.appendChild(languageContainer);

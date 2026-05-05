@@ -57,6 +57,9 @@ const MOBILE_ROW_BATCH_SIZE = 1;
 const DESKTOP_INITIAL_GENRE_LOADS = 1;
 const GENRE_BATCH_SIZE = 1;
 const GENRE_ROOT_MARGIN = '500px 0px';
+const MANAGED_ROW_RELEASE_ROOT_MARGIN = IS_MOBILE
+  ? "0px 0px 60% 0px"
+  : "0px 0px 22% 0px";
 const GENRE_FIRST_SCROLL_PX = Number(getConfig()?.genreRowsFirstBatchScrollPx) || 200;
 const MIN_GENRE_VISIBLE_CARD_COUNT = 3;
 const PRC_LOCK_DOWN_SCROLL = (getConfig()?.prcLockDownScrollDuringLoad === true);
@@ -94,6 +97,36 @@ function getGenreRowCardCount(source = null) {
 
 function getGenreRenderableMin(source = null) {
   return Math.max(getGenreRowCardCount(source) + 1, 6);
+}
+
+function isPlaybackCompletedUserData(userData) {
+  if (!userData || typeof userData !== "object") return false;
+  if (userData.Played === true) return true;
+
+  const playedPercentage = Number(userData.PlayedPercentage);
+  return Number.isFinite(playedPercentage) && playedPercentage >= 100;
+}
+
+function hasPartialPlaybackUserData(userData) {
+  if (!userData || typeof userData !== "object") return false;
+  if (isPlaybackCompletedUserData(userData)) return false;
+
+  const playedPercentage = Number(userData.PlayedPercentage);
+  if (Number.isFinite(playedPercentage) && playedPercentage > 0 && playedPercentage < 100) {
+    return true;
+  }
+
+  const positionTicks = Number(userData.PlaybackPositionTicks || 0);
+  return positionTicks > 0;
+}
+
+function isPartialPlaybackItem(item) {
+  const userData = item?.UserData || item?.UserDataDto || null;
+  if (!hasPartialPlaybackUserData(userData)) return false;
+
+  const positionTicks = Number(userData?.PlaybackPositionTicks || 0);
+  const runtimeTicks = Number(item?.RunTimeTicks || item?.CumulativeRunTimeTicks || 0);
+  return runtimeTicks > 0 ? positionTicks < runtimeTicks : positionTicks > 0;
 }
 
 function getHomeRecommendationRuntimeConfig(source = null) {
@@ -853,7 +886,7 @@ function requestNextGenreLoad({ force = false } = {}) {
   GENRE_STATE.advancePromise = Promise.resolve(
     waitForSectionTailAdvance(anchor, {
       timeoutMs: 25000,
-      rootMargin: "0px 0px 0px 0px",
+      rootMargin: MANAGED_ROW_RELEASE_ROOT_MARGIN,
     })
   ).catch(() => {
   }).then(() => {
@@ -1120,8 +1153,7 @@ async function applyResumeLabelsToCards(cardEls, userId) {
   for (const el of cardEls) {
     const id = el?.dataset?.itemId;
     const it = byId.get(id);
-    const pos = Number(it?.UserData?.PlaybackPositionTicks || 0);
-    const isResume = pos > 0;
+    const isResume = hasPartialPlaybackUserData(it?.UserData);
     const resumeText = (config.languageLabels?.devamet || 'Sürdür');
     const playText   = (config.languageLabels?.izle    || 'Oynat');
     setPrimaryCtaText(el, isResume ? resumeText : playText, isResume);
@@ -1923,7 +1955,7 @@ async function renderPersonalRecommendationsInternal(options = {}) {
         try {
           await waitForManagedHomeRowRelease({
             timeoutMs: 25000,
-            rootMargin: "0px 0px 0px 0px",
+            rootMargin: MANAGED_ROW_RELEASE_ROOT_MARGIN,
           });
         } catch {}
       }
@@ -2251,7 +2283,7 @@ async function fetchLastPlayedSeedItems(userId, count = 1) {
       `SortBy=DatePlayed,DateCreated&SortOrder=Descending&Limit=${Math.max(1, count)}&Fields=${encodeURIComponent(fields)}`;
     const r = await makeApiRequest(url);
     const items = Array.isArray(r?.Items) ? r.Items : [];
-    return items.filter(x => x?.Id && Number(x?.UserData?.PlaybackPositionTicks || 0) > 0);
+    return items.filter(x => x?.Id && isPartialPlaybackItem(x));
   } catch {}
 
   return [];
@@ -2432,7 +2464,7 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
       await waitForManagedHomeRowRelease({
         anchor: lastRenderedSection?.isConnected ? lastRenderedSection : null,
         timeoutMs: 25000,
-        rootMargin: "0px 0px 0px 0px",
+        rootMargin: MANAGED_ROW_RELEASE_ROOT_MARGIN,
       });
     } catch {}
 
@@ -3809,7 +3841,7 @@ async function renderGenreHubs(indexPage) {
         try {
           await waitForManagedHomeRowRelease({
             timeoutMs: 25000,
-            rootMargin: "0px 0px 0px 0px",
+            rootMargin: MANAGED_ROW_RELEASE_ROOT_MARGIN,
           });
         } catch {}
         await ensureGenreLoaded(i);
@@ -3855,7 +3887,7 @@ async function drainGenreHubsSequentially(renderSeq = GENRE_STATE.renderSeq) {
         await waitForManagedHomeRowRelease({
           anchor: previousSection?.isConnected ? previousSection : null,
           timeoutMs: 25000,
-          rootMargin: "0px 0px 0px 0px",
+          rootMargin: MANAGED_ROW_RELEASE_ROOT_MARGIN,
         });
       } catch {}
       await ensureGenreLoaded(index);

@@ -68,6 +68,9 @@ export function createStatusRatingPanel(config, labels) {
 
         bindCheckboxKontrol('#showRatingInfo', '.rating-sub-options');
 
+        const metaIconColorsCheckbox = createCheckbox('metaIconColors', labels.metaIconColors || 'Metaveri ikonlarında renk kullan', config.metaIconColors);
+        ratingSection.appendChild(metaIconColorsCheckbox);
+
         const description = document.createElement('div');
         description.className = 'description-text';
         description.textContent = labels.statusRatingDescription || 'Bu ayar, içeriğin kalite, izlenme durumu, medya türü, süre ve puanlama bilgilerinin görünürlüğünü kontrol eder.';

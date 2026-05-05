@@ -27,9 +27,72 @@ function buildMetaTextSpan(text, ...classNames) {
   return `<span class="${className}">${escapeMetaHtml(text)}</span>`;
 }
 
+function stringToVibrantColor(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+
+  const h = Math.abs(hash % 360);
+  const isCool = h >= 200 && h <= 280;
+  const isWarm = h < 45 || h > 300;
+  const s = isCool ? 55 : isWarm ? 65 : 50;
+
+  return `hsl(${h}, ${s}%, 45%)`;
+}
+
+function applyMetaIconColors(container, itemSeed = "") {
+  if (!container) return;
+  if (!config?.metaIconColors) return;
+
+  container.querySelectorAll(".monwui-meta-container i").forEach((icon, index) => {
+    const cls = icon.className || "";
+    const isHeartIcon =
+      cls.includes("fa-heart") ||
+      !!icon.closest(".monwui-match-percentage, .monwui-match-rating");
+
+    if (
+      isHeartIcon ||
+      cls.includes("fa-star") ||
+      icon.closest(".monwui-t-rating")
+    ) {
+      icon.style.removeProperty("color");
+      return;
+    }
+
+    const seed =
+      `${itemSeed}-${icon.closest("span")?.className || ""}-${cls}-${index}`;
+
+    icon.style.color = stringToVibrantColor(seed);
+  });
+}
+
 function getNormalizedDimension(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function isPlaybackCompleted(userData, runtimeTicks = 0) {
+  if (!userData || typeof userData !== "object") return false;
+  if (userData.Played === true) return true;
+
+  const playedPercentage = Number(userData.PlayedPercentage);
+  if (Number.isFinite(playedPercentage) && playedPercentage >= 100) return true;
+
+  const positionTicks = Number(userData.PlaybackPositionTicks || 0);
+  const totalTicks = Number(runtimeTicks || 0);
+  return positionTicks > 0 && totalTicks > 0 && positionTicks >= totalTicks;
+}
+
+function hasPartialPlayback(userData, runtimeTicks = 0) {
+  if (!userData || typeof userData !== "object") return false;
+  if (isPlaybackCompleted(userData, runtimeTicks)) return false;
+
+  const positionTicks = Number(userData.PlaybackPositionTicks || 0);
+  if (!(positionTicks > 0)) return false;
+
+  const totalTicks = Number(runtimeTicks || 0);
+  return totalTicks > 0 ? positionTicks < totalTicks : true;
 }
 
 function getVideoQualityInfo(videoStream) {
@@ -81,6 +144,7 @@ export function createStatusContainer(itemType, config, UserData, ChildCount, Ru
   const statusContainer = document.createElement("div");
   statusContainer.className = "monwui-status-container";
   applyContainerStyles(statusContainer, 'status');
+  const hasResumeProgress = !Array.isArray(RunTimeTicks) && hasPartialPlayback(UserData, RunTimeTicks);
 
   if (itemType && config.showTypeInfo) {
     const typeSpan = document.createElement("span");
@@ -159,9 +223,7 @@ export function createStatusContainer(itemType, config, UserData, ChildCount, Ru
         );
     } else {
       const remainingTicks =
-        typeof UserData?.PlaybackPositionTicks === "number" &&
-        UserData.PlaybackPositionTicks > 0 &&
-        UserData.PlaybackPositionTicks < RunTimeTicks
+        hasResumeProgress
           ? Math.max(RunTimeTicks - UserData.PlaybackPositionTicks, 0)
           : RunTimeTicks;
       const endHHMM = formatEndTimeLocalized(remainingTicks);
@@ -626,10 +688,17 @@ export function createLanguageContainer({ config, MediaStreams, itemType }) {
   return container;
 }
 
-export function createMetaContainer() {
+export function createMetaContainer(itemSeed = "") {
   const container = document.createElement("div");
   container.className = "monwui-meta-container";
   applyContainerStyles(container, 'meta');
+  const originalAppend = container.appendChild.bind(container);
+  container.appendChild = (child) => {
+    const res = originalAppend(child);
+    applyMetaIconColors(container, itemSeed);
+    return res;
+  };
+
   return container;
 }
 
@@ -643,6 +712,7 @@ export function createPlotContainer(config, Overview, UserData, RunTimeTicks) {
   const container = document.createElement("div");
   container.className = "monwui-plot-container";
   applyContainerStyles(container, 'plot');
+  const hasResumeProgress = hasPartialPlayback(UserData, RunTimeTicks);
 
   if (config.showDescriptions && config.showPlotInfo && Overview) {
     const plotSpan = document.createElement("span");
@@ -653,10 +723,9 @@ export function createPlotContainer(config, Overview, UserData, RunTimeTicks) {
 
   if (
     config.showPlaybackProgress &&
+    hasResumeProgress &&
     typeof UserData?.PlaybackPositionTicks === "number" &&
-    typeof RunTimeTicks === "number" &&
-    UserData.PlaybackPositionTicks > 0 &&
-    UserData.PlaybackPositionTicks < RunTimeTicks
+    typeof RunTimeTicks === "number"
   ) {
     const progressContainer = document.createElement("div");
     progressContainer.className = "monwui-playing-progress-container";

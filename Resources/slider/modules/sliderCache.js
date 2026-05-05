@@ -187,6 +187,24 @@ export async function cacheGetItem(id, { allowStale = false } = {}) {
   });
 }
 
+export async function cacheGetItemEntry(id, { allowStale = false } = {}) {
+  if (!id) return null;
+
+  return withStore("itemDetails", "readonly", async (store, _tx, memFallback) => {
+    if (memFallback) {
+      const entry = mem.item.get(id) || null;
+      if (!entry) return null;
+      if (isFresh(entry) || allowStale) return entry;
+      return null;
+    }
+
+    const row = await reqToPromise(store.get(id)).catch(() => null);
+    if (!row) return null;
+    if (row.expiresAt > now() || allowStale) return row;
+    return null;
+  });
+}
+
 export async function cachePutItem(id, data, { ttlMs = DEFAULTS.itemTtlMs } = {}) {
   if (!id) return false;
   const entry = createItemCacheEntry(id, data, ttlMs);
@@ -201,6 +219,24 @@ export async function cachePutItem(id, data, { ttlMs = DEFAULTS.itemTtlMs } = {}
       return true;
     } catch (e) {
       console.warn("[JMS][cache] cachePutItem failed:", e);
+      return false;
+    }
+  });
+}
+
+export async function cacheDeleteItem(id) {
+  if (!id) return false;
+
+  return withStore("itemDetails", "readwrite", async (store, _tx, memFallback) => {
+    try {
+      if (memFallback) {
+        mem.item.delete(id);
+        return true;
+      }
+      await reqToPromise(store.delete(id));
+      return true;
+    } catch (e) {
+      console.warn("[JMS][cache] cacheDeleteItem failed:", e);
       return false;
     }
   });
@@ -230,6 +266,36 @@ export async function cacheGetItemsMap(ids, { allowStale = false } = {}) {
     for (const [id, row] of rows) {
       if (!row) continue;
       if (row.expiresAt > now() || allowStale) out.set(id, row.data);
+    }
+
+    return out;
+  });
+}
+
+export async function cacheGetItemEntriesMap(ids, { allowStale = false } = {}) {
+  const uniq = dedupeIds(ids);
+  if (!uniq.length) return new Map();
+
+  return withStore("itemDetails", "readonly", async (store, _tx, memFallback) => {
+    const out = new Map();
+
+    if (memFallback) {
+      for (const id of uniq) {
+        const entry = mem.item.get(id) || null;
+        if (!entry) continue;
+        if (isFresh(entry) || allowStale) out.set(id, entry);
+      }
+      return out;
+    }
+
+    const requests = uniq.map((id) => [id, store.get(id)]);
+    const rows = await Promise.all(
+      requests.map(async ([id, req]) => [id, await reqToPromise(req).catch(() => null)])
+    );
+
+    for (const [id, row] of rows) {
+      if (!row) continue;
+      if (row.expiresAt > now() || allowStale) out.set(id, row);
     }
 
     return out;
@@ -317,6 +383,22 @@ export async function cachePutQuery(key, data, { ttlMs = DEFAULTS.queryTtlMs } =
       return true;
     } catch (e) {
       console.warn("[JMS][cache] cachePutQuery failed:", e);
+      return false;
+    }
+  });
+}
+
+export async function cacheClearQueries() {
+  return withStore("queryCache", "readwrite", async (store, _tx, memFallback) => {
+    try {
+      if (memFallback) {
+        mem.query.clear();
+        return true;
+      }
+      await reqToPromise(store.clear());
+      return true;
+    } catch (e) {
+      console.warn("[JMS][cache] cacheClearQueries failed:", e);
       return false;
     }
   });
@@ -610,6 +692,7 @@ export function createCachedItemDetailsFetcher({
   fetchMany = null,
   batchSize = 60,
   ttlMs = DEFAULTS.itemTtlMs,
+  revalidateAfterMs = 0,
   allowStaleOnError = DEFAULTS.allowStaleOnError,
   maxConcurrent = DEFAULTS.maxConcurrent,
 }) {
@@ -617,16 +700,27 @@ export function createCachedItemDetailsFetcher({
 
   const inflight = new Map();
   const resolvedBatchSize = Math.max(10, Math.min(200, Number(batchSize) || 60));
+  const resolvedRevalidateAfterMs = Math.max(0, Number(revalidateAfterMs) || 0);
+
+  function shouldRevalidateEntry(entry) {
+    if (!entry || !(resolvedRevalidateAfterMs > 0)) return false;
+    const fetchedAt = Number(entry.fetchedAt || 0);
+    if (!(fetchedAt > 0)) return true;
+    return (Date.now() - fetchedAt) > resolvedRevalidateAfterMs;
+  }
 
   async function getOne(id) {
     if (!id) return null;
 
-    const fresh = await cacheGetItem(id, { allowStale: false });
-    if (fresh) return fresh;
+    const freshEntry = await cacheGetItemEntry(id, { allowStale: false });
+    if (freshEntry && !shouldRevalidateEntry(freshEntry)) return freshEntry.data;
     if (inflight.has(id)) return inflight.get(id);
 
     const p = (async () => {
-      const stale = allowStaleOnError ? await cacheGetItem(id, { allowStale: true }) : null;
+      const staleEntry = allowStaleOnError
+        ? (freshEntry || await cacheGetItemEntry(id, { allowStale: true }))
+        : null;
+      const stale = staleEntry?.data || null;
 
       try {
         const data = await fetchOne(id);
@@ -663,16 +757,19 @@ export function createCachedItemDetailsFetcher({
     const list = Array.isArray(ids) ? ids : [];
     if (!list.length) return prefetchOnly ? { total: 0, missing: 0 } : [];
 
-    const freshMap = await cacheGetItemsMap(list, { allowStale: false });
+    const freshEntriesMap = await cacheGetItemEntriesMap(list, { allowStale: false });
     const out = prefetchOnly ? null : new Array(list.length).fill(null);
     const missing = [];
 
     for (let i = 0; i < list.length; i++) {
       const id = list[i];
       if (!id) continue;
-      const hit = freshMap.get(id) || null;
-      if (out && hit) out[i] = hit;
-      else if (!hit) missing.push(id);
+      const hitEntry = freshEntriesMap.get(id) || null;
+      if (hitEntry && !shouldRevalidateEntry(hitEntry)) {
+        if (out) out[i] = hitEntry.data;
+        continue;
+      }
+      missing.push(id);
     }
 
     if (missing.length && typeof fetchMany === "function") {
@@ -681,21 +778,24 @@ export function createCachedItemDetailsFetcher({
       } catch {}
     }
 
-    const hydratedMap = missing.length
-      ? await cacheGetItemsMap(missing, { allowStale: false })
-      : freshMap;
+    const hydratedEntriesMap = missing.length
+      ? await cacheGetItemEntriesMap(missing, { allowStale: false })
+      : freshEntriesMap;
 
     if (out) {
       for (let i = 0; i < list.length; i++) {
         if (out[i]) continue;
         const id = list[i];
-        const hit = hydratedMap.get(id) || null;
-        if (hit) out[i] = hit;
+        const hitEntry = hydratedEntriesMap.get(id) || null;
+        if (hitEntry && !shouldRevalidateEntry(hitEntry)) out[i] = hitEntry.data;
       }
     }
 
     const remainingIds = prefetchOnly
-      ? dedupeIds(missing.filter((id) => !hydratedMap.has(id)))
+      ? dedupeIds(missing.filter((id) => {
+          const hitEntry = hydratedEntriesMap.get(id) || null;
+          return !hitEntry || shouldRevalidateEntry(hitEntry);
+        }))
       : list
           .map((id, idx) => (!out[idx] ? id : null))
           .filter(Boolean);

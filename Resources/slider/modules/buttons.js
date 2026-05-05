@@ -225,7 +225,8 @@ export function createButtons(slide, config, UserData, itemId, RemoteTrailers, u
 };
 
     if (config.showWatchButton) {
-    const isResumable = UserData?.PlaybackPositionTicks > 0;
+    const playedPercentage = Number(UserData?.PlayedPercentage || 0);
+    const isResumable = UserData?.Played !== true && playedPercentage < 100 && Number(UserData?.PlaybackPositionTicks || 0) > 0;
 
     const watchBtnContainer = createButtonWithBackground(
         "watch",
@@ -309,20 +310,69 @@ export function createButtons(slide, config, UserData, itemId, RemoteTrailers, u
         "played",
         isPlayed ? '<i class="fa-solid fa-check" style="color: #FFC107;"></i>' : '<i class="fa-regular fa-circle-check"></i>',
         isPlayed ? config.languageLabels.izlendi : config.languageLabels.izlenmedi,
-        (event, buttonElement) => {
+        async (event, buttonElement) => {
             const iconWrapper = buttonElement.querySelector('.monwui-icon-wrapper');
             const textSpan = buttonElement.nextElementSibling;
+            const wasPlayed = buttonElement.classList.contains("played");
+            const prevUserData = UserData ? {
+                Played: UserData.Played === true,
+                PlayedPercentage: Number(UserData.PlayedPercentage || 0),
+                PlaybackPositionTicks: Number(UserData.PlaybackPositionTicks || 0)
+            } : null;
+            const prevDatasetPlayed = slide?.dataset?.played || "false";
+            const prevDatasetTicks = slide?.dataset?.playbackpositionticks || "0";
 
-            if (buttonElement.classList.contains("played")) {
-                buttonElement.classList.remove("played");
-                iconWrapper.innerHTML = '<i class="fa-regular fa-circle-check"></i>';
-                textSpan.textContent = config.languageLabels.izlenmedi;
-                updatePlayedStatus(itemId, false);
-            } else {
-                buttonElement.classList.add("played");
-                iconWrapper.innerHTML = '<i class="fa-solid fa-check" style="color: #FFC107;"></i>';
-                textSpan.textContent = config.languageLabels.izlendi;
-                updatePlayedStatus(itemId, true);
+            try {
+                if (wasPlayed) {
+                    buttonElement.classList.remove("played");
+                    iconWrapper.innerHTML = '<i class="fa-regular fa-circle-check"></i>';
+                    textSpan.textContent = config.languageLabels.izlenmedi;
+                    if (UserData) {
+                        UserData.Played = false;
+                        UserData.PlayedPercentage = 0;
+                        UserData.PlaybackPositionTicks = 0;
+                    }
+                    if (slide?.dataset) {
+                        slide.dataset.played = "false";
+                        slide.dataset.playbackpositionticks = "0";
+                    }
+                    await updatePlayedStatus(itemId, false);
+                } else {
+                    buttonElement.classList.add("played");
+                    iconWrapper.innerHTML = '<i class="fa-solid fa-check" style="color: #FFC107;"></i>';
+                    textSpan.textContent = config.languageLabels.izlendi;
+                    if (UserData) {
+                        UserData.Played = true;
+                        UserData.PlayedPercentage = 100;
+                        UserData.PlaybackPositionTicks = 0;
+                    }
+                    if (slide?.dataset) {
+                        slide.dataset.played = "true";
+                        slide.dataset.playbackpositionticks = "0";
+                    }
+                    await updatePlayedStatus(itemId, true);
+                }
+            } catch (error) {
+                if (wasPlayed) {
+                    buttonElement.classList.add("played");
+                    iconWrapper.innerHTML = '<i class="fa-solid fa-check" style="color: #FFC107;"></i>';
+                    textSpan.textContent = config.languageLabels.izlendi;
+                } else {
+                    buttonElement.classList.remove("played");
+                    iconWrapper.innerHTML = '<i class="fa-regular fa-circle-check"></i>';
+                    textSpan.textContent = config.languageLabels.izlenmedi;
+                }
+
+                if (UserData && prevUserData) {
+                    UserData.Played = prevUserData.Played;
+                    UserData.PlayedPercentage = prevUserData.PlayedPercentage;
+                    UserData.PlaybackPositionTicks = prevUserData.PlaybackPositionTicks;
+                }
+                if (slide?.dataset) {
+                    slide.dataset.played = prevDatasetPlayed;
+                    slide.dataset.playbackpositionticks = prevDatasetTicks;
+                }
+                console.error("Played durumu güncellenemedi:", error);
             }
         },
         isPlayed ? "played" : ""

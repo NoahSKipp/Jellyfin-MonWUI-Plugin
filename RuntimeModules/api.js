@@ -17,6 +17,7 @@ const MAX_DOT_GENRE_CACHE = 1200;
 const MAX_PREVIEW_CACHE = 200;
 const MAX_TOMBSTONES = 2000;
 export const AUTH_PROFILE_CHANGED_EVENT = "jms:auth-profile-changed";
+export const USERDATA_CHANGED_EVENT = "jms:userdata-changed";
 
 function setLastPlayNowBlockReason(reason = "") {
   try {
@@ -661,6 +662,61 @@ function pruneMapBySize(map, max) {
     const k = map.keys().next().value;
     map.delete(k);
   }
+}
+
+function isCompletedUserData(userData = {}) {
+  if (!userData || typeof userData !== "object") return false;
+  if (userData.Played === true) return true;
+  const playedPercentage = Number(userData.PlayedPercentage);
+  return Number.isFinite(playedPercentage) && playedPercentage >= 100;
+}
+
+function applyLocalPlayedSnapshot(itemId, played) {
+  const id = String(itemId || "").trim();
+  if (!id || !itemCache.has(id)) return;
+
+  const cached = itemCache.get(id);
+  if (!cached || !cached.data || typeof cached.data !== "object") return;
+
+  const nextUserData = {
+    ...(cached.data.UserData && typeof cached.data.UserData === "object" ? cached.data.UserData : {})
+  };
+
+  nextUserData.Played = played === true;
+  nextUserData.PlayedPercentage = played === true ? 100 : 0;
+  nextUserData.PlaybackPositionTicks = 0;
+  nextUserData.LastPlayedDate = new Date().toISOString();
+
+  itemCache.set(id, {
+    ...cached,
+    timestamp: Date.now(),
+    data: {
+      ...cached.data,
+      UserData: nextUserData
+    }
+  });
+}
+
+async function invalidatePersistentSliderCaches(itemId, { clearQueries = false } = {}) {
+  const id = String(itemId || "").trim();
+  if (!id) return;
+
+  try {
+    const cacheModule = await import("../../../slider/modules/sliderCache.js");
+    await cacheModule?.cacheDeleteItem?.(id);
+    if (clearQueries) {
+      await cacheModule?.cacheClearQueries?.();
+    }
+  } catch {}
+}
+
+function dispatchUserDataChanged(detail = {}) {
+  try {
+    window.dispatchEvent(new CustomEvent(USERDATA_CHANGED_EVENT, { detail }));
+  } catch {}
+  try {
+    document.dispatchEvent(new CustomEvent(USERDATA_CHANGED_EVENT, { detail }));
+  } catch {}
 }
 
 function isTombstoned(id) {
@@ -1625,6 +1681,15 @@ export async function updatePlayedStatus(itemId, played) {
     },
     body: JSON.stringify({ Played: played })
   });
+
+  try {
+    applyLocalPlayedSnapshot(itemId, played);
+    await invalidatePersistentSliderCaches(itemId, { clearQueries: true });
+    dispatchUserDataChanged({
+      itemId: String(itemId || "").trim(),
+      played: played === true
+    });
+  } catch {}
 
   if (played) {
     try {

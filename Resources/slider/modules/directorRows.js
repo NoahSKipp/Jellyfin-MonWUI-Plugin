@@ -1,3 +1,5 @@
+//directorRows.js
+
 import { getSessionInfo, makeApiRequest, getCachedUserTopGenres } from "../../Plugins/JMSFusion/runtime/api.js";
 import { getConfig, getHomeSectionsRuntimeConfig } from "./config.js";
 import { getLanguageLabels } from "../language/index.js";
@@ -61,6 +63,13 @@ const DIRECTOR_ROW_FILL_YIELD_MS = IS_MOBILE ? 48 : 24;
 const DIRECTOR_MOBILE_CARD_DELAY_MS = 90;
 const HOME_DEBUG_STORAGE_KEY = "jms:debug:home-sections";
 const HOME_TRACE_STORAGE_KEY = "jms:trace:home-sections";
+const DIRECTOR_ROWS_RELEASE_ROOT_MARGIN = IS_MOBILE
+  ? "0px 0px 60% 0px"
+  : "0px 0px 22% 0px";
+const DIRECTOR_ROWS_ARROW_OBSERVER_ROOT_MARGIN = IS_MOBILE
+  ? "0px 0px 66% 0px"
+  : "0px 0px 26% 0px";
+const DIRECTOR_ROWS_ARROW_OBSERVER_THRESHOLD = IS_MOBILE ? 0.01 : 0.2;
 
 function isDirectorRowsDebugEnabled() {
   try {
@@ -507,8 +516,8 @@ function attachDirectorScrollIdleLoader() {
   }
 }, {
   root: null,
-  rootMargin: '0px 0px 0px 0px',
-  threshold: 0.6,
+  rootMargin: DIRECTOR_ROWS_ARROW_OBSERVER_ROOT_MARGIN,
+  threshold: DIRECTOR_ROWS_ARROW_OBSERVER_THRESHOLD,
 });
 
   if (STATE._loadMoreArrow) {
@@ -869,20 +878,39 @@ function getDetailsUrl(itemId, serverId) {
 
 function clamp01(x){ return Math.max(0, Math.min(1, x)); }
 
+function getPlaybackRuntimeTicks(item) {
+  return (
+    (item?.Type === "Series" ? Number(item?.CumulativeRunTimeTicks) : Number(item?.RunTimeTicks)) ||
+    Number(item?.RunTimeTicks) ||
+    Number(item?.CumulativeRunTimeTicks) ||
+    0
+  );
+}
+
+function isPlaybackCompleted(item, runtimeOverride = 0) {
+  const ud = item?.UserData || item?.UserDataDto || null;
+  if (!ud) return false;
+  if (ud.Played === true) return true;
+
+  const playedPercentage = Number(ud.PlayedPercentage);
+  if (Number.isFinite(playedPercentage) && playedPercentage >= 100) return true;
+
+  const positionTicks = Number(ud.PlaybackPositionTicks || 0);
+  const runtimeTicks = Number(runtimeOverride || getPlaybackRuntimeTicks(item) || 0);
+  return positionTicks > 0 && runtimeTicks > 0 && positionTicks >= runtimeTicks;
+}
+
 function getPlaybackPercent(item) {
   const ud = item?.UserData || item?.UserDataDto || null;
   if (!ud) return 0;
+  const durTicks = getPlaybackRuntimeTicks(item);
+  if (isPlaybackCompleted(item, durTicks)) return 0;
 
   const p = Number(ud.PlayedPercentage);
   if (Number.isFinite(p) && p > 0) return clamp01(p / 100);
 
   const pos = Number(ud.PlaybackPositionTicks);
   if (!Number.isFinite(pos) || pos <= 0) return 0;
-
-  const durTicks =
-    (item?.Type === "Series" ? Number(item?.CumulativeRunTimeTicks) : Number(item?.RunTimeTicks)) ||
-    Number(item?.RunTimeTicks) ||
-    0;
 
   if (!Number.isFinite(durTicks) || durTicks <= 0) return 0;
   return clamp01(pos / durTicks);
@@ -2623,7 +2651,7 @@ async function initAndRenderFirstBatch(mountState) {
         await waitForManagedHomeRowRelease({
           anchor: getDirectorRowsAnchor(STATE.hostEl),
           timeoutMs: 25000,
-          rootMargin: "0px 0px 0px 0px",
+          rootMargin: DIRECTOR_ROWS_RELEASE_ROOT_MARGIN,
         });
       } catch {}
       await renderNextDirectorBatch();

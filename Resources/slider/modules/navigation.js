@@ -38,6 +38,37 @@ function getPeakShiftEasing() {
   return 'cubic-bezier(.23,.78,.32,1)';
 }
 
+function isPlaybackCompletedState({
+  isPlayed = false,
+  playedPercentage = NaN,
+  positionTicks = 0,
+  runtimeTicks = 0
+} = {}) {
+  if (isPlayed === true) return true;
+
+  const percent = Number(playedPercentage);
+  if (Number.isFinite(percent) && percent >= 100) return true;
+
+  const position = Number(positionTicks || 0);
+  const runtime = Number(runtimeTicks || 0);
+  return position > 0 && runtime > 0 && position >= runtime;
+}
+
+function hasPartialPlaybackState({
+  isPlayed = false,
+  playedPercentage = NaN,
+  positionTicks = 0,
+  runtimeTicks = 0
+} = {}) {
+  if (isPlaybackCompletedState({ isPlayed, playedPercentage, positionTicks, runtimeTicks })) return false;
+
+  const position = Number(positionTicks || 0);
+  if (!(position > 0)) return false;
+
+  const runtime = Number(runtimeTicks || 0);
+  return runtime > 0 ? position < runtime : true;
+}
+
 if (typeof document !== 'undefined' && (document.hidden || document.visibilityState === 'hidden')) {
   closeVideoModal();
 }
@@ -1063,8 +1094,13 @@ export function createDotNavigation() {
 
         const positionTicks = Number(slide.dataset.playbackpositionticks);
         const runtimeTicks = Number(slide.dataset.runtimeticks);
+        const slideIsPlayed = slide.dataset.played === "true";
 
-        if (config.showPlaybackProgress && !isNaN(positionTicks) && !isNaN(runtimeTicks) && positionTicks > 0 && positionTicks < runtimeTicks) {
+        if (config.showPlaybackProgress && hasPartialPlaybackState({
+            isPlayed: slideIsPlayed,
+            positionTicks,
+            runtimeTicks
+        })) {
             const progressContainer = document.createElement("div");
             progressContainer.className = "monwui-dot-progress-container";
 
@@ -1150,7 +1186,12 @@ export function createDotNavigation() {
       const isPlayed   = item.UserData?.Played || false;
       const positionTicks = Number(item.UserData?.PlaybackPositionTicks || 0);
       const runtimeTicks  = Number(item.RunTimeTicks || 0);
-      const hasPartialPlayback = positionTicks > 0 && positionTicks < runtimeTicks;
+      const hasPartialPlayback = hasPartialPlaybackState({
+        isPlayed,
+        playedPercentage: item.UserData?.PlayedPercentage,
+        positionTicks,
+        runtimeTicks
+      });
 
       const playButton = dot.querySelector('.monwui-dot-play-button');
       if (playButton) {
@@ -1223,7 +1264,12 @@ export function createDotNavigation() {
               const isPlayed = item.UserData?.Played || false;
               const positionTicks = Number(item.UserData?.PlaybackPositionTicks || 0);
               const runtimeTicks = Number(item.RunTimeTicks || 0);
-              const hasPartialPlayback = positionTicks > 0 && positionTicks < runtimeTicks;
+              const hasPartialPlayback = hasPartialPlaybackState({
+                isPlayed,
+                playedPercentage: item.UserData?.PlayedPercentage,
+                positionTicks,
+                runtimeTicks
+              });
               const playButton = dot.querySelector('.monwui-dot-play-button');
               if (playButton) {
               playButton.textContent = getPlayButtonText({

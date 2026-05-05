@@ -332,10 +332,15 @@ export async function updateModalContent(item, videoUrl) {
     }
   }
 
+  const isPlayed = item.UserData?.Played || false;
   const positionTicks = Number(item.UserData?.PlaybackPositionTicks || 0);
   const runtimeTicks = Number(item.RunTimeTicks || 0);
-  const hasPartialPlayback = positionTicks > 0 && positionTicks < runtimeTicks;
-  const isPlayed = item.UserData?.Played || false;
+  const hasPartialPlayback = hasPartialPlaybackState({
+    isPlayed,
+    playedPercentage: item.UserData?.PlayedPercentage,
+    positionTicks,
+    runtimeTicks
+  });
   const isFavorite = item.UserData?.IsFavorite || false;
   const videoStream = item.MediaStreams ? item.MediaStreams.find(s => s.Type === "Video") : null;
   const qualityText = videoStream ? getVideoQualityText(videoStream) : '';
@@ -1946,7 +1951,6 @@ function injectOrUpdateModalStyle() {
       user-select: none;
       box-sizing: border-box;
       max-width: calc(100vw - 32px);
-      perspective: 1000px;
     }
 
     .video-preview-modal.video-preview-modal--visible {
@@ -2185,7 +2189,7 @@ function injectOrUpdateModalStyle() {
     }
 
     .video-preview-modal .preview-play-button {
-      background: linear-gradient(94deg, #fff 78%, #eee 100%);
+      background: linear-gradient(94deg, #fff 78%, #eee 100%) !important;
       color: #000;
       border-radius: 4px;
       padding: 8px 18px 8px 16px;
@@ -2208,7 +2212,7 @@ function injectOrUpdateModalStyle() {
     }
 
     .video-preview-modal .preview-play-button:hover {
-      background: linear-gradient(92deg, #f5f4f9 64%, #fff 100%);
+      background: linear-gradient(92deg, #f5f4f9 64%, #fff 100%) !important;
       box-shadow: 0 4px 16px 0 rgba(21, 12, 50, 0.11);
       transform: scale(1.05);
     }
@@ -2938,6 +2942,24 @@ export function getPlayButtonText({ isPlayed, hasPartialPlayback, labels }) {
   if (isPlayed && !hasPartialPlayback) return L('izlendi', 'İzlendi');
   if (hasPartialPlayback) return L('devamet', 'Devam et');
   return L('izle', 'İzle');
+}
+
+function hasPartialPlaybackState({
+  isPlayed = false,
+  playedPercentage = NaN,
+  positionTicks = 0,
+  runtimeTicks = 0
+} = {}) {
+  if (isPlayed === true) return false;
+
+  const percent = Number(playedPercentage);
+  if (Number.isFinite(percent) && percent >= 100) return false;
+
+  const position = Number(positionTicks || 0);
+  if (!(position > 0)) return false;
+
+  const runtime = Number(runtimeTicks || 0);
+  return runtime > 0 ? position < runtime : true;
 }
 
 export async function ensureOverlaysClosed() {

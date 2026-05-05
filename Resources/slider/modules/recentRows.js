@@ -81,6 +81,9 @@ const HOME_TRACE_STORAGE_KEY = "jms:trace:home-sections";
 // useful for very long home pages, but on this module it can stall lower rows
 // behind the first visible ones and make them appear nondeterministic.
 const RECENT_ROWS_EAGER_RELEASE_COUNT = 1024;
+const RECENT_ROWS_RELEASE_ROOT_MARGIN = IS_MOBILE
+  ? "0px 0px 60% 0px"
+  : "0px 0px 22% 0px";
 
 function getLiveConfig() {
   try {
@@ -828,20 +831,50 @@ function getDetailsUrl(itemId, serverId) {
 
 function clamp01(x){ return Math.max(0, Math.min(1, x)); }
 
+function getPlaybackRuntimeTicks(item) {
+  return (
+    (item?.Type === "Series" ? Number(item?.CumulativeRunTimeTicks) : Number(item?.RunTimeTicks)) ||
+    Number(item?.RunTimeTicks) ||
+    Number(item?.CumulativeRunTimeTicks) ||
+    0
+  );
+}
+
+function isPlaybackCompleted(item, runtimeOverride = 0) {
+  const ud = item?.UserData || item?.UserDataDto || null;
+  if (!ud) return false;
+  if (ud.Played === true) return true;
+
+  const playedPercentage = Number(ud.PlayedPercentage);
+  if (Number.isFinite(playedPercentage) && playedPercentage >= 100) return true;
+
+  const positionTicks = Number(ud.PlaybackPositionTicks || 0);
+  const runtimeTicks = Number(runtimeOverride || getPlaybackRuntimeTicks(item) || 0);
+  return positionTicks > 0 && runtimeTicks > 0 && positionTicks >= runtimeTicks;
+}
+
+function isPartialPlaybackItem(item, runtimeOverride = 0) {
+  const ud = item?.UserData || item?.UserDataDto || null;
+  if (!ud || isPlaybackCompleted(item, runtimeOverride)) return false;
+
+  const positionTicks = Number(ud.PlaybackPositionTicks || 0);
+  if (!(positionTicks > 0)) return false;
+
+  const runtimeTicks = Number(runtimeOverride || getPlaybackRuntimeTicks(item) || 0);
+  return runtimeTicks > 0 ? positionTicks < runtimeTicks : true;
+}
+
 function getPlaybackPercent(item) {
   const ud = item?.UserData || item?.UserDataDto || null;
   if (!ud) return 0;
+  const durTicks = getPlaybackRuntimeTicks(item);
+  if (isPlaybackCompleted(item, durTicks)) return 0;
 
   const p = Number(ud.PlayedPercentage);
   if (Number.isFinite(p) && p > 0) return clamp01(p / 100);
 
   const pos = Number(ud.PlaybackPositionTicks);
   if (!Number.isFinite(pos) || pos <= 0) return 0;
-
-  const durTicks =
-    (item?.Type === "Series" ? Number(item?.CumulativeRunTimeTicks) : Number(item?.RunTimeTicks)) ||
-    Number(item?.RunTimeTicks) ||
-    0;
 
   if (!Number.isFinite(durTicks) || durTicks <= 0) return 0;
   return clamp01(pos / durTicks);
@@ -2513,7 +2546,7 @@ async function fetchContinue(userId, type, limit, parentId) {
     const items = Array.isArray(data?.Items) ? data.Items : [];
     const out = uniqById(
       items
-        .filter((it) => Number(it?.UserData?.PlaybackPositionTicks || 0) > 0)
+        .filter((it) => isPartialPlaybackItem(it))
         .sort((a, b) => getLastPlayedTs(b) - getLastPlayedTs(a))
     ).slice(0, limit);
     try {
@@ -2694,7 +2727,7 @@ async function fetchContinueEpisodes(userId, limit, parentId) {
     const eps = Array.isArray(data?.Items) ? data.Items : [];
     const uniqEps = uniqById(
       eps
-        .filter((it) => Number(it?.UserData?.PlaybackPositionTicks || 0) > 0)
+        .filter((it) => isPartialPlaybackItem(it))
         .sort((a, b) => getLastPlayedTs(b) - getLastPlayedTs(a))
     ).filter(isRealTvEpisode);
 
@@ -2818,7 +2851,7 @@ async function fetchContinueGeneric(userId, limit, parentId) {
     const items = Array.isArray(data?.Items) ? data.Items : [];
     const out = uniqById(
       items
-        .filter((it) => Number(it?.UserData?.PlaybackPositionTicks || 0) > 0)
+        .filter((it) => isPartialPlaybackItem(it))
         .sort((a, b) => getLastPlayedTs(b) - getLastPlayedTs(a))
     ).slice(0, limit);
     await attachSeriesPosterSourceToEpsAndSeasons(out);
@@ -3081,7 +3114,7 @@ async function fillSectionWithItems({
       anchor: getRecentRowsSectionAnchor(sectionKey, STATE.hostEl || getActiveHomePage() || document),
       eagerRows: RECENT_ROWS_EAGER_RELEASE_COUNT,
       timeoutMs: 25000,
-      rootMargin: "0px 0px 0px 0px",
+      rootMargin: RECENT_ROWS_RELEASE_ROOT_MARGIN,
     });
   } catch {}
   appendSection(sectionKey, section);
@@ -3611,14 +3644,24 @@ export async function mountRecentRowsLazy(options = {}) {
       setManagedRecentRowsDone(key, false);
     }
 
-    let allOk = true;
-    for (const sectionKey of sectionKeys) {
+    // Queue every managed recent-row section up front so the global managed
+    // render queue can see the full dependency chain before lower-priority
+    // modules like directorRows are allowed to advance.
+    const scheduledSectionRuns = sectionKeys.map((sectionKey) => {
       recentRowsTrace("mount:section:start", {
         sectionKey,
         force,
         stack: force ? buildTraceStack() : "",
       });
-      const ok = await mountRecentRowsSection(sectionKey, { force, options, homeParent });
+      return {
+        sectionKey,
+        promise: mountRecentRowsSection(sectionKey, { force, options, homeParent }),
+      };
+    });
+
+    let allOk = true;
+    for (const { sectionKey, promise } of scheduledSectionRuns) {
+      const ok = await promise;
       recentRowsTrace("mount:section:done", {
         sectionKey,
         force,

@@ -114,6 +114,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                     .Where(row => row.Entry is not null)
                     .ToList();
 
+                var historyEntries = cfg.WatchlistHistoryEntries
+                    .Where(entry => Same(entry.OwnerUserId, user.UserId))
+                    .OrderByDescending(entry => entry.LastAddedAtUtc)
+                    .ToList();
+
                 NoCache();
                 return Ok(new
                 {
@@ -121,7 +126,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                     revision = cfg.WatchlistRevision,
                     myItems,
                     sharedWithMe,
-                    outgoingShares
+                    outgoingShares,
+                    historyEntries
                 });
             }
         }
@@ -146,6 +152,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
                 var cfg = plugin.Configuration;
                 var changed = NormalizeConfig(cfg);
+                var created = false;
 
                 var existing = cfg.WatchlistEntries.FirstOrDefault(entry =>
                     Same(entry.OwnerUserId, user.UserId) &&
@@ -153,6 +160,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
                 if (existing is null)
                 {
+                    created = true;
                     existing = new WatchlistEntry
                     {
                         Id = Guid.NewGuid().ToString("N"),
@@ -166,6 +174,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 }
 
                 changed |= ApplySnapshot(existing, req, user);
+                if (created)
+                {
+                    changed |= RegisterHistoryAdd(cfg, existing, user, existing.AddedAtUtc);
+                }
                 changed |= TrimOwnerItems(cfg, user.UserId);
 
                 if (changed)
@@ -205,6 +217,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
                 var cfg = plugin.Configuration;
                 var changed = NormalizeConfig(cfg);
+                var removedAfterPlayed = IsTrue(Request.Query["played"].FirstOrDefault()) || IsTrue(Request.Query["completed"].FirstOrDefault());
 
                 var hasOwnEntry = cfg.WatchlistEntries.Any(entry =>
                     Same(entry.OwnerUserId, user.UserId) &&
@@ -212,9 +225,21 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
                 if (hasOwnEntry)
                 {
+                    var removedEntries = cfg.WatchlistEntries
+                        .Where(entry =>
+                            Same(entry.OwnerUserId, user.UserId) &&
+                            Same(entry.ItemId, cleanItemId))
+                        .Select(CloneEntry)
+                        .ToList();
+
                     changed |= cfg.WatchlistEntries.RemoveAll(entry =>
                         Same(entry.OwnerUserId, user.UserId) &&
                         Same(entry.ItemId, cleanItemId)) > 0;
+
+                    foreach (var removedEntry in removedEntries)
+                    {
+                        changed |= RegisterHistoryRemoval(cfg, removedEntry, user, removedAfterPlayed);
+                    }
                 }
                 else
                 {
@@ -540,6 +565,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             cfg.WatchlistEntries ??= new List<WatchlistEntry>();
             cfg.WatchlistShares ??= new List<WatchlistShareEntry>();
+            cfg.WatchlistHistoryEntries ??= new List<WatchlistHistoryEntry>();
 
             var uniqueEntries = new Dictionary<string, WatchlistEntry>(StringComparer.OrdinalIgnoreCase);
             var normalizedEntries = new List<WatchlistEntry>();
@@ -623,6 +649,65 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             cfg.WatchlistShares = normalizedShares;
 
+            var historyByKey = new Dictionary<string, WatchlistHistoryEntry>(StringComparer.OrdinalIgnoreCase);
+            var normalizedHistoryEntries = new List<WatchlistHistoryEntry>();
+
+            foreach (var raw in cfg.WatchlistHistoryEntries)
+            {
+                if (raw is null) { changed = true; continue; }
+
+                var entry = NormalizeHistoryEntry(raw);
+                if (string.IsNullOrWhiteSpace(entry.ItemId) || string.IsNullOrWhiteSpace(entry.OwnerUserId))
+                {
+                    changed = true;
+                    continue;
+                }
+
+                var dedupeKey = BuildHistoryKey(entry.OwnerUserId, entry.ItemId);
+                if (historyByKey.TryGetValue(dedupeKey, out var existing))
+                {
+                    if (MergeHistoryEntry(existing, entry)) changed = true;
+                    changed = true;
+                    continue;
+                }
+
+                historyByKey[dedupeKey] = entry;
+                normalizedHistoryEntries.Add(entry);
+                if (!ReferenceEquals(raw, entry)) changed = true;
+            }
+
+            foreach (var entry in normalizedEntries)
+            {
+                var dedupeKey = BuildHistoryKey(entry.OwnerUserId, entry.ItemId);
+                if (!historyByKey.TryGetValue(dedupeKey, out var history))
+                {
+                    history = CreateHistoryEntryFromWatchlist(entry);
+                    historyByKey[dedupeKey] = history;
+                    normalizedHistoryEntries.Add(history);
+                    changed = true;
+                    continue;
+                }
+
+                if (ApplyHistorySnapshot(history, entry)) changed = true;
+                if (history.FirstAddedAtUtc <= 0)
+                {
+                    history.FirstAddedAtUtc = entry.AddedAtUtc;
+                    changed = true;
+                }
+                if (history.LastAddedAtUtc <= 0)
+                {
+                    history.LastAddedAtUtc = entry.AddedAtUtc;
+                    changed = true;
+                }
+                if (history.AddCount <= 0)
+                {
+                    history.AddCount = 1;
+                    changed = true;
+                }
+            }
+
+            cfg.WatchlistHistoryEntries = normalizedHistoryEntries;
+
             return changed;
         }
 
@@ -666,6 +751,233 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             source.Note = NormalizeNote(source.Note);
             if (source.SharedAtUtc <= 0) source.SharedAtUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             return source;
+        }
+
+        private static WatchlistHistoryEntry NormalizeHistoryEntry(WatchlistHistoryEntry source)
+        {
+            source.ItemId = Clean(source.ItemId);
+            source.ItemType = Clean(source.ItemType);
+            source.Name = Clean(source.Name);
+            source.OwnerUserId = Clean(source.OwnerUserId);
+            source.OwnerUserName = Clean(source.OwnerUserName);
+            if (source.FirstAddedAtUtc < 0) source.FirstAddedAtUtc = 0;
+            if (source.LastAddedAtUtc < 0) source.LastAddedAtUtc = 0;
+            if (source.LastRemovedAtUtc < 0) source.LastRemovedAtUtc = 0;
+            if (source.AddCount < 0) source.AddCount = 0;
+            if (source.RemoveCount < 0) source.RemoveCount = 0;
+            return source;
+        }
+
+        private static string BuildHistoryKey(string? ownerUserId, string? itemId)
+        {
+            return $"{Clean(ownerUserId)}::{Clean(itemId)}";
+        }
+
+        private static WatchlistHistoryEntry CreateHistoryEntryFromWatchlist(WatchlistEntry entry)
+        {
+            return new WatchlistHistoryEntry
+            {
+                ItemId = Clean(entry.ItemId),
+                ItemType = Clean(entry.ItemType),
+                Name = Clean(entry.Name),
+                OwnerUserId = Clean(entry.OwnerUserId),
+                OwnerUserName = Clean(entry.OwnerUserName),
+                FirstAddedAtUtc = entry.AddedAtUtc,
+                LastAddedAtUtc = entry.AddedAtUtc,
+                AddCount = 1
+            };
+        }
+
+        private static bool ApplyHistorySnapshot(WatchlistHistoryEntry target, WatchlistEntry source)
+        {
+            var changed = false;
+
+            if (!Same(target.ItemType, source.ItemType) && !string.IsNullOrWhiteSpace(Clean(source.ItemType)))
+            {
+                target.ItemType = Clean(source.ItemType);
+                changed = true;
+            }
+
+            if (!Same(target.Name, source.Name) && !string.IsNullOrWhiteSpace(Clean(source.Name)))
+            {
+                target.Name = Clean(source.Name);
+                changed = true;
+            }
+
+            if (!Same(target.OwnerUserName, source.OwnerUserName) && !string.IsNullOrWhiteSpace(Clean(source.OwnerUserName)))
+            {
+                target.OwnerUserName = Clean(source.OwnerUserName);
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static bool MergeHistoryEntry(WatchlistHistoryEntry target, WatchlistHistoryEntry incoming)
+        {
+            var changed = false;
+
+            if (string.IsNullOrWhiteSpace(Clean(target.ItemType)) && !string.IsNullOrWhiteSpace(Clean(incoming.ItemType)))
+            {
+                target.ItemType = Clean(incoming.ItemType);
+                changed = true;
+            }
+
+            if (string.IsNullOrWhiteSpace(Clean(target.Name)) && !string.IsNullOrWhiteSpace(Clean(incoming.Name)))
+            {
+                target.Name = Clean(incoming.Name);
+                changed = true;
+            }
+
+            if (string.IsNullOrWhiteSpace(Clean(target.OwnerUserName)) && !string.IsNullOrWhiteSpace(Clean(incoming.OwnerUserName)))
+            {
+                target.OwnerUserName = Clean(incoming.OwnerUserName);
+                changed = true;
+            }
+
+            if (target.FirstAddedAtUtc <= 0 || (incoming.FirstAddedAtUtc > 0 && incoming.FirstAddedAtUtc < target.FirstAddedAtUtc))
+            {
+                target.FirstAddedAtUtc = incoming.FirstAddedAtUtc;
+                changed = true;
+            }
+
+            if (incoming.LastAddedAtUtc > target.LastAddedAtUtc)
+            {
+                target.LastAddedAtUtc = incoming.LastAddedAtUtc;
+                changed = true;
+            }
+
+            if (incoming.LastRemovedAtUtc > target.LastRemovedAtUtc)
+            {
+                target.LastRemovedAtUtc = incoming.LastRemovedAtUtc;
+                changed = true;
+            }
+
+            if (incoming.AddCount > target.AddCount)
+            {
+                target.AddCount = incoming.AddCount;
+                changed = true;
+            }
+
+            if (incoming.RemoveCount > target.RemoveCount)
+            {
+                target.RemoveCount = incoming.RemoveCount;
+                changed = true;
+            }
+
+            if (!target.RemovedAfterPlayed && incoming.RemovedAfterPlayed)
+            {
+                target.RemovedAfterPlayed = true;
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static bool RegisterHistoryAdd(JMSFusionConfiguration cfg, WatchlistEntry entry, UserContext user, long addedAtUtc)
+        {
+            var history = cfg.WatchlistHistoryEntries.FirstOrDefault(candidate =>
+                Same(candidate.OwnerUserId, user.UserId) &&
+                Same(candidate.ItemId, entry.ItemId));
+            var timestamp = addedAtUtc > 0 ? addedAtUtc : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            if (history is null)
+            {
+                history = CreateHistoryEntryFromWatchlist(entry);
+                history.OwnerUserId = user.UserId;
+                history.OwnerUserName = string.IsNullOrWhiteSpace(user.UserName) ? Clean(entry.OwnerUserName) : user.UserName;
+                history.FirstAddedAtUtc = timestamp;
+                history.LastAddedAtUtc = history.FirstAddedAtUtc;
+                history.AddCount = 1;
+                cfg.WatchlistHistoryEntries.Add(history);
+                return true;
+            }
+
+            var changed = ApplyHistorySnapshot(history, entry);
+            if (!Same(history.OwnerUserId, user.UserId))
+            {
+                history.OwnerUserId = user.UserId;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(user.UserName) && !Same(history.OwnerUserName, user.UserName))
+            {
+                history.OwnerUserName = user.UserName;
+                changed = true;
+            }
+            if (history.FirstAddedAtUtc <= 0)
+            {
+                history.FirstAddedAtUtc = timestamp;
+                changed = true;
+            }
+            if (timestamp > history.LastAddedAtUtc)
+            {
+                history.LastAddedAtUtc = timestamp;
+                changed = true;
+            }
+            history.AddCount += 1;
+            return true;
+        }
+
+        private static bool RegisterHistoryRemoval(JMSFusionConfiguration cfg, WatchlistEntry entry, UserContext user, bool removedAfterPlayed)
+        {
+            var history = cfg.WatchlistHistoryEntries.FirstOrDefault(candidate =>
+                Same(candidate.OwnerUserId, user.UserId) &&
+                Same(candidate.ItemId, entry.ItemId));
+
+            var changed = false;
+            if (history is null)
+            {
+                history = CreateHistoryEntryFromWatchlist(entry);
+                history.OwnerUserId = user.UserId;
+                history.OwnerUserName = string.IsNullOrWhiteSpace(user.UserName) ? Clean(entry.OwnerUserName) : user.UserName;
+                cfg.WatchlistHistoryEntries.Add(history);
+                changed = true;
+            }
+
+            changed |= ApplyHistorySnapshot(history, entry);
+            if (!Same(history.OwnerUserId, user.UserId))
+            {
+                history.OwnerUserId = user.UserId;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(user.UserName) && !Same(history.OwnerUserName, user.UserName))
+            {
+                history.OwnerUserName = user.UserName;
+                changed = true;
+            }
+            if (history.FirstAddedAtUtc <= 0)
+            {
+                history.FirstAddedAtUtc = entry.AddedAtUtc;
+                changed = true;
+            }
+            if (history.LastAddedAtUtc <= 0)
+            {
+                history.LastAddedAtUtc = entry.AddedAtUtc;
+                changed = true;
+            }
+            if (history.AddCount <= 0)
+            {
+                history.AddCount = 1;
+                changed = true;
+            }
+
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (history.LastRemovedAtUtc != now)
+            {
+                history.LastRemovedAtUtc = now;
+                changed = true;
+            }
+
+            history.RemoveCount += 1;
+            changed = true;
+
+            if (removedAfterPlayed && !history.RemovedAfterPlayed)
+            {
+                history.RemovedAfterPlayed = true;
+                changed = true;
+            }
+
+            return changed;
         }
 
         private static bool ApplyShareSnapshot(WatchlistShareEntry share, WatchlistEntry entry)
@@ -913,6 +1225,16 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 if (!Same(l[i], r[i])) return false;
             }
             return true;
+        }
+
+        private static bool IsTrue(string? value)
+        {
+            var clean = Clean(value);
+            return
+                clean.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+                clean.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+                clean.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+                clean.Equals("on", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool Same(string? left, string? right)

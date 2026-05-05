@@ -4,10 +4,13 @@ import { getLanguageLabels } from "../language/index.js";
 import { attachMiniPosterHover } from "./studioHubsUtils.js";
 import { openDetailsModal } from "./detailsModalLoader.js";
 import {
+  keepManagedSectionsBelowNative,
   bindManagedSectionsBelowNative,
+  waitForNativeHomeSectionStability,
   waitForVisibleHomeSections
 } from "./homeSectionNative.js";
 import {
+  enqueueManagedSectionRender,
   registerManagedHomeRowAnchor,
   waitForManagedHomeRowRelease,
   waitForManagedSectionDependencyCompletion,
@@ -103,6 +106,26 @@ function setStudioHubsReady(done) {
   if (next && !prev) {
     try { document.dispatchEvent(new Event("jms:studio-hubs-ready")); } catch {}
   }
+}
+
+function stringToColor(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+
+  const h = Math.abs(hash % 360);
+  const isCool = (h >= 200 && h <= 280);
+  const isWarm = (h < 45 || h > 300);
+  const s = isCool ? 55 : isWarm ? 65 : 50;
+
+  return {
+    bg: `linear-gradient(145deg,
+          hsla(${h}, ${s}%, 14%, 0.97),
+          hsla(${h}, ${s - 10}%, 9%, 0.98),
+          hsla(${(h + 25) % 360}, ${s - 15}%, 6%, 1))`,
+    shadow: `hsla(${h}, ${s + 10}%, 35%, 0.40)`
+  };
 }
 
 function getActiveHomePage() {
@@ -1015,6 +1038,16 @@ export async function renderStudioHubs() {
     await Promise.allSettled(resolved.map(async ({ name, studio }) => {
       const card = shells[name];
       if (!card) return;
+      const enableColorize = config.studioHubsColorize !== false;
+
+      if (enableColorize) {
+        const { bg, shadow } = stringToColor(name);
+        card.style.setProperty('--hub-card-bg', bg);
+        card.style.setProperty('--hub-card-shadow', shadow);
+      } else {
+        card.style.removeProperty('--hub-card-bg');
+        card.style.removeProperty('--hub-card-shadow');
+      }
       const detailsHref = buildStudioHref(studio.Id, serverId);
       card.href = detailsHref;
       card.classList.remove("hub-card-textonly");
@@ -1106,6 +1139,13 @@ window.addEventListener("jms:studio-hubs-visibility-updated", () => {
   } catch {}
 });
 
+function enforceStudioHubsOrder(homeSections) {
+  if (!homeSections) return;
+  bindManagedSectionsBelowNative(homeSections);
+  try { keepManagedSectionsBelowNative(homeSections); } catch {}
+  try { homeSections.__jmsManagedBelowNativeSchedule?.(); } catch {}
+}
+
 function ensureContainer(indexPage) {
   const all = document.querySelectorAll("#studio-hubs");
   if (all.length > 1) {
@@ -1121,12 +1161,12 @@ function ensureContainer(indexPage) {
   }
   const homeSections = indexPage.querySelector(".homeSectionsContainer");
   if (!homeSections) return null;
-  bindManagedSectionsBelowNative(homeSections);
+  enforceStudioHubsOrder(homeSections);
   const moveSectionIntoPlace = (section) => {
     if (section.parentElement !== homeSections) {
       homeSections.appendChild(section);
     }
-    try { homeSections.__jmsManagedBelowNativeSchedule?.(); } catch {}
+    enforceStudioHubsOrder(homeSections);
   };
 
   let section = indexPage.querySelector("#studio-hubs") || document.getElementById("studio-hubs");
@@ -1283,27 +1323,51 @@ export function ensureStudioHubsMounted({ eager=false, force=false } = {}) {
         scheduleRetry(1200);
         return;
       }
-      await waitForManagedSectionGate("studioHubs", { timeoutMs: 25000 });
-      await waitForManagedSectionDependencyCompletion("studioHubs", { timeoutMs: 25000 });
-      if (!host.page?.isConnected || !getActiveHomePage()) {
-        scheduleRetry(800);
+      const homeSections = host.page.querySelector(".homeSectionsContainer");
+      if (!homeSections) {
+        scheduleRetry(900);
         return;
       }
-      try {
-        await waitForManagedHomeRowRelease({
-          timeoutMs: 25000,
-          rootMargin: "0px 0px 0px 0px",
-        });
-      } catch {}
-      const row = ensureContainer(host.page);
-      if (!row) { scheduleRetry(800); return; }
-      try { registerManagedHomeRowAnchor(host.page.querySelector("#studio-hubs")); } catch {}
-      if (!force && __studioHubsMountedOnce && hasMountedStudioHubsSection()) {
-        setStudioHubsReady(true);
-        return;
+      if (!host.page.querySelector("#studio-hubs")) {
+        try {
+          await waitForNativeHomeSectionStability(homeSections, {
+            timeoutMs: 1800,
+            stableMs: 220,
+            minVisibleCount: 1,
+          });
+        } catch {}
       }
-      await renderStudioHubs();
-      __studioHubsMountedOnce = true;
+
+      await enqueueManagedSectionRender("studioHubs", async () => {
+        await waitForManagedSectionGate("studioHubs", { timeoutMs: 25000 });
+        await waitForManagedSectionDependencyCompletion("studioHubs", { timeoutMs: 25000 });
+        if (!host.page?.isConnected || !getActiveHomePage()) {
+          scheduleRetry(800);
+          return false;
+        }
+        try {
+          await waitForManagedHomeRowRelease({
+            timeoutMs: 25000,
+            rootMargin: "0px 0px 0px 0px",
+          });
+        } catch {}
+        const row = ensureContainer(host.page);
+        if (!row) {
+          scheduleRetry(800);
+          return false;
+        }
+        try { registerManagedHomeRowAnchor(host.page.querySelector("#studio-hubs")); } catch {}
+        if (!force && __studioHubsMountedOnce && hasMountedStudioHubsSection()) {
+          setStudioHubsReady(true);
+          return true;
+        }
+        await renderStudioHubs();
+        __studioHubsMountedOnce = true;
+        return true;
+      }, {
+        force,
+        isStillValid: () => !!(host.page?.isConnected && getActiveHomePage()),
+      });
     } finally {
       __studioHubsMounting = false;
     }

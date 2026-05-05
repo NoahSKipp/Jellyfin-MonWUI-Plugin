@@ -1977,8 +1977,8 @@ function kickBindRetries(schedule = [50,150,350,800,1500,2500,4000,6000,8000,120
         style.textContent = `
         .rating-genre-overlay{
           position:fixed;
-          top:60px;
-          left:24px;
+          top:65px;
+          left:50px;
           z-index:9999;
           pointer-events:none;
           opacity:0;
@@ -3802,8 +3802,8 @@ function createIconEl() {
       style.textContent = `
       .rating-icons-overlay{
         position:fixed;
-        top:60px;
-        left:24px;
+        top:65px;
+        left:60px;
         z-index:9998;
         pointer-events:none;
         opacity:0;
