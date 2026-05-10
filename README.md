@@ -53,6 +53,21 @@ Rather than applying a single visual tweak, it enhances the entire browsing expe
 
 The goal is simple: make Jellyfin feel more polished, more personal, and more premium — without cluttering the interface.
 
+## Client Compatibility
+
+JMSFusion works by injecting JavaScript and CSS into the **Jellyfin Web UI**.
+
+Supported clients:
+
+* Web browsers using Jellyfin Web
+* Mobile clients that embed the Jellyfin Web client, such as **Jellyfin for Android** and **Jellyfin for iOS**
+
+Not supported:
+
+* **Jellyfin for Android TV** and other native TV clients that do not load the server's `jellyfin-web` frontend
+
+In short: if the client does not render `/web/index.html`, JMSFusion cannot run there.
+
 ---
 
 ## Screenshots
@@ -131,6 +146,7 @@ https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/manifest.js
 
 * After install/update, perform a hard refresh (**Ctrl + F5**)
 * You may need to refresh a few times for all UI assets to fully update
+* Android TV clients use a separate native UI and do not load the injected `jellyfin-web` assets, so JMSFusion features will not appear there
 * Some advanced modules are optional and may require admin access, API keys, or server-side tools
 * Hover videos for manually added studio collections can be sourced from YouTube. You can use Gharmonize as a tool: https://github.com/G-grbz/Gharmonize
 
