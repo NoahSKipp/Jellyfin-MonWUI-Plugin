@@ -38,6 +38,7 @@
   <a href="#overview">Overview</a> •
   <a href="#screenshots">Screenshots</a> •
   <a href="#highlights">Highlights</a> •
+  <a href="docs/seerr-arr-integration.md">Seerr & Arr Integration</a> •
   <a href="#installation">Installation</a> •
   <a href="#notes">Notes</a> •
   <a href="#license">License</a>
