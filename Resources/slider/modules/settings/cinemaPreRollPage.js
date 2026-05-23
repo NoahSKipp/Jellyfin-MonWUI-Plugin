@@ -25,6 +25,29 @@ const CINEMA_PREROLL_LANGUAGE_OPTIONS = Object.freeze([
   { value: "hi-IN", label: "🇮🇳 हिन्दी" },
   { value: "fa-IR", label: "🇮🇷 فارسی" }
 ]);
+const CINEMA_PREROLL_REGION_OPTIONS = Object.freeze([
+  { value: "TR", label: "Turkey (TR)" },
+  { value: "US", label: "United States (US)" },
+  { value: "GB", label: "United Kingdom (GB)" },
+  { value: "DE", label: "Germany (DE)" },
+  { value: "FR", label: "France (FR)" },
+  { value: "ES", label: "Spain (ES)" },
+  { value: "IT", label: "Italy (IT)" },
+  { value: "RU", label: "Russia (RU)" },
+  { value: "JP", label: "Japan (JP)" },
+  { value: "KR", label: "South Korea (KR)" },
+  { value: "CN", label: "China (CN)" },
+  { value: "IN", label: "India (IN)" },
+  { value: "BR", label: "Brazil (BR)" },
+  { value: "PT", label: "Portugal (PT)" },
+  { value: "NL", label: "Netherlands (NL)" },
+  { value: "SE", label: "Sweden (SE)" },
+  { value: "PL", label: "Poland (PL)" },
+  { value: "UA", label: "Ukraine (UA)" },
+  { value: "MX", label: "Mexico (MX)" },
+  { value: "CA", label: "Canada (CA)" },
+  { value: "AU", label: "Australia (AU)" }
+]);
 
 function normalizeTrailerCount(value) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
@@ -34,8 +57,14 @@ function normalizeTrailerCount(value) {
 
 function normalizeRegionMode(value) {
   const mode = String(value || "").trim().toLowerCase();
-  if (mode === "global" || mode === "custom") return mode;
-  return "auto";
+  if (mode === "global") return "global";
+  return "custom";
+}
+
+function normalizeFallbackMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  if (mode === "none" || mode === "global") return mode;
+  return "custom";
 }
 
 function normalizeCustomRegion(value) {
@@ -54,6 +83,33 @@ function normalizeLanguageSetting(value) {
   const exact = CINEMA_PREROLL_LANGUAGE_OPTIONS.find((entry) => entry.value === raw);
   if (exact) return exact.value;
   return "auto";
+}
+
+function inferRegionFromConfig(config = {}) {
+  const languageSetting = normalizeLanguageSetting(config?.cinemaPreRollLanguage);
+  const fallbackLanguage = (
+    typeof navigator !== "undefined" && navigator.language
+      ? navigator.language
+      : "tr-TR"
+  );
+  const language = String(
+    languageSetting === "auto"
+      ? (config?.defaultLanguage || fallbackLanguage)
+      : languageSetting
+  ).replace("_", "-");
+  const match = language.match(/-([A-Za-z]{2})$/);
+  return normalizeCustomRegion(match?.[1]) || "TR";
+}
+
+function regionOptionsWithCurrent(currentRegion) {
+  const normalized = normalizeCustomRegion(currentRegion);
+  if (!normalized || CINEMA_PREROLL_REGION_OPTIONS.some((entry) => entry.value === normalized)) {
+    return CINEMA_PREROLL_REGION_OPTIONS;
+  }
+  return [
+    ...CINEMA_PREROLL_REGION_OPTIONS,
+    { value: normalized, label: `${normalized} (${normalized})` }
+  ];
 }
 
 function createDescriptionText(text) {
@@ -186,16 +242,12 @@ export function createCinemaPreRollPanel(config, labels) {
   const currentRegionMode = normalizeRegionMode(config.cinemaPreRollRegionMode);
   [
     {
-      value: "auto",
-      label: labels.cinemaPreRollRegionModeAuto || "Otomatik - Dil kodundan ülkeyi türet"
-    },
-    {
       value: "global",
       label: labels.cinemaPreRollRegionModeGlobal || "Küresel - TMDb'ye bölge göndermeden kullan"
     },
     {
       value: "custom",
-      label: labels.cinemaPreRollRegionModeCustom || "Özel bölge - Ülke kodunu elle seç"
+      label: labels.cinemaPreRollRegionModeCustom || "Ülke seç - Aşağıdaki ülkeyi kullan"
     }
   ].forEach((entry) => {
     const option = document.createElement("option");
@@ -210,7 +262,7 @@ export function createCinemaPreRollPanel(config, labels) {
   appendDescriptionText(
     subOptions,
     labels.cinemaPreRollRegionModeHint ||
-      "Otomatik modda ülke kodu TMDb dil ayarından türetilir. Küresel modda TMDb isteğine bölge parametresi eklenmez. Özel bölge modunda iki harfli ülke kodu kullanılır."
+      "Küresel modda TMDb isteğine bölge parametresi eklenmez. Ülke modunda yalnızca seçilen ülkenin vizyon ve gelecek listeleri kullanılır."
   );
 
   const customRegionRow = document.createElement("div");
@@ -220,33 +272,103 @@ export function createCinemaPreRollPanel(config, labels) {
   customRegionLabel.className = "settings-label";
   customRegionLabel.htmlFor = "cinemaPreRollCustomRegion";
   customRegionLabel.textContent =
-    labels.cinemaPreRollCustomRegion || "Özel bölge kodu";
+    labels.cinemaPreRollCustomRegion || "TMDb ülkesi";
 
-  const customRegionInput = document.createElement("input");
-  customRegionInput.type = "text";
-  customRegionInput.id = "cinemaPreRollCustomRegion";
-  customRegionInput.name = "cinemaPreRollCustomRegion";
-  customRegionInput.className = "settings-input";
-  customRegionInput.placeholder = "US";
-  customRegionInput.maxLength = 2;
-  customRegionInput.autocomplete = "off";
-  customRegionInput.spellcheck = false;
-  customRegionInput.value = normalizeCustomRegion(config.cinemaPreRollCustomRegion);
-  customRegionInput.addEventListener("input", () => {
-    const next = customRegionInput.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 2);
-    if (customRegionInput.value !== next) {
-      const pos = next.length;
-      customRegionInput.value = next;
-      try { customRegionInput.setSelectionRange(pos, pos); } catch {}
-    }
+  const customRegionSelect = document.createElement("select");
+  customRegionSelect.id = "cinemaPreRollCustomRegion";
+  customRegionSelect.name = "cinemaPreRollCustomRegion";
+  customRegionSelect.className = "settings-select";
+
+  const currentRegion = normalizeCustomRegion(config.cinemaPreRollCustomRegion) || inferRegionFromConfig(config);
+  regionOptionsWithCurrent(currentRegion).forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    option.selected = currentRegion === entry.value;
+    customRegionSelect.appendChild(option);
   });
 
-  customRegionRow.append(customRegionLabel, customRegionInput);
+  customRegionRow.append(customRegionLabel, customRegionSelect);
   subOptions.appendChild(customRegionRow);
   const customRegionHint = appendDescriptionText(
     subOptions,
     labels.cinemaPreRollCustomRegionHint ||
-      "Örnek ülke kodları: US, GB, TR, DE. Ayar değiştiğinde önbellek dosyası yeni yerel ayar için anında yenilenir."
+      "Ön gösterim havuzunun hangi ülkenin vizyon ve gelecek listelerinden besleneceğini seçer. Ayar değiştiğinde önbellek yeni ülkeye göre yenilenir."
+  );
+
+  const fallbackModeRow = document.createElement("div");
+  fallbackModeRow.className = "fsetting-item";
+
+  const fallbackModeLabel = document.createElement("label");
+  fallbackModeLabel.className = "settings-label";
+  fallbackModeLabel.htmlFor = "cinemaPreRollFallbackMode";
+  fallbackModeLabel.textContent =
+    labels.cinemaPreRollFallbackMode || "Eksik fragmanları tamamlama";
+
+  const fallbackModeSelect = document.createElement("select");
+  fallbackModeSelect.id = "cinemaPreRollFallbackMode";
+  fallbackModeSelect.name = "cinemaPreRollFallbackMode";
+  fallbackModeSelect.className = "settings-select";
+
+  const currentFallbackMode = normalizeFallbackMode(config.cinemaPreRollFallbackMode);
+  [
+    {
+      value: "custom",
+      label: labels.cinemaPreRollFallbackModeCustom || "Seçilen ülkeyle tamamla"
+    },
+    {
+      value: "global",
+      label: labels.cinemaPreRollFallbackModeGlobal || "Global listeyle tamamla"
+    },
+    {
+      value: "none",
+      label: labels.cinemaPreRollFallbackModeNone || "Tamamlama kullanma"
+    }
+  ].forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    option.selected = currentFallbackMode === entry.value;
+    fallbackModeSelect.appendChild(option);
+  });
+
+  fallbackModeRow.append(fallbackModeLabel, fallbackModeSelect);
+  subOptions.appendChild(fallbackModeRow);
+  appendDescriptionText(
+    subOptions,
+    labels.cinemaPreRollFallbackModeHint ||
+      "Seçilen ülke 150 fragmanlık havuzu dolduramazsa kalan adayların hangi kaynaktan alınacağını belirler."
+  );
+
+  const fallbackRegionRow = document.createElement("div");
+  fallbackRegionRow.className = "fsetting-item cinema-preroll-fallback-region-row";
+
+  const fallbackRegionLabel = document.createElement("label");
+  fallbackRegionLabel.className = "settings-label";
+  fallbackRegionLabel.htmlFor = "cinemaPreRollFallbackRegion";
+  fallbackRegionLabel.textContent =
+    labels.cinemaPreRollFallbackRegion || "Tamamlama ülkesi";
+
+  const fallbackRegionSelect = document.createElement("select");
+  fallbackRegionSelect.id = "cinemaPreRollFallbackRegion";
+  fallbackRegionSelect.name = "cinemaPreRollFallbackRegion";
+  fallbackRegionSelect.className = "settings-select";
+
+  const currentFallbackRegion = normalizeCustomRegion(config.cinemaPreRollFallbackRegion) || "US";
+  regionOptionsWithCurrent(currentFallbackRegion).forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.value;
+    option.textContent = entry.label;
+    option.selected = currentFallbackRegion === entry.value;
+    fallbackRegionSelect.appendChild(option);
+  });
+
+  fallbackRegionRow.append(fallbackRegionLabel, fallbackRegionSelect);
+  subOptions.appendChild(fallbackRegionRow);
+  const fallbackRegionHint = appendDescriptionText(
+    subOptions,
+    labels.cinemaPreRollFallbackRegionHint ||
+      "US yerine hangi ülkenin vizyon ve gelecek listelerinin yedek kaynak olarak kullanılacağını seçer."
   );
   section.appendChild(subOptions);
 
@@ -254,10 +376,19 @@ export function createCinemaPreRollPanel(config, labels) {
     const enabled = normalizeRegionMode(regionModeSelect.value) === "custom";
     customRegionRow.style.display = enabled ? "" : "none";
     if (customRegionHint) customRegionHint.style.display = enabled ? "" : "none";
-    customRegionInput.disabled = !enabled;
+    customRegionSelect.disabled = !enabled;
   };
   updateCustomRegionState();
   regionModeSelect.addEventListener("change", updateCustomRegionState);
+
+  const updateFallbackRegionState = () => {
+    const enabled = normalizeFallbackMode(fallbackModeSelect.value) === "custom";
+    fallbackRegionRow.style.display = enabled ? "" : "none";
+    if (fallbackRegionHint) fallbackRegionHint.style.display = enabled ? "" : "none";
+    fallbackRegionSelect.disabled = !enabled;
+  };
+  updateFallbackRegionState();
+  fallbackModeSelect.addEventListener("change", updateFallbackRegionState);
 
   bindCheckboxKontrol("#cinemaPreRollEnabled", ".cinema-preroll-sub-options");
 

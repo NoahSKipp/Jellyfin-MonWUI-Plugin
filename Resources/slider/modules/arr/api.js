@@ -94,6 +94,14 @@ export async function getRadarrOptions() {
   return request("/radarr/options");
 }
 
+export async function getArrCalendar({ start = "", end = "" } = {}) {
+  const qs = new URLSearchParams();
+  if (start) qs.set("start", String(start));
+  if (end) qs.set("end", String(end));
+  const query = qs.toString();
+  return request(`/calendar${query ? `?${query}` : ""}`);
+}
+
 export async function requestArrEpisode(payload = {}) {
   return request("/episode", {
     method: "POST",

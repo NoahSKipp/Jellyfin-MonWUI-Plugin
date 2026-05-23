@@ -16,7 +16,7 @@ public sealed class CinemaPreRollCacheService
     private const string CacheFileName = "tmdb-cinema-preroll-cache.json";
     private const string TmdbApiBase = "https://api.themoviedb.org/3";
     private const string TmdbImageBase = "https://image.tmdb.org/t/p/original";
-    private const int CacheVersion = 5;
+    private const int CacheVersion = 6;
     private const long LibraryTmdbCacheTtlMs = 5 * 60 * 1000;
     private const int MaxItemsPerLocale = 150;
     private const int MaxPagesPerFeed = 8;
@@ -24,9 +24,6 @@ public sealed class CinemaPreRollCacheService
     private const int MaxConcurrentTmdbRequests = 8;
     private const int RecentReleasePastWindowDays = 70;
     private const int UpcomingReleaseFutureWindowDays = 365;
-    private const string EnglishFallbackLanguage = "en-US";
-    private const string EnglishFallbackRegion = "US";
-    private const string EnglishFallbackOriginalLanguage = "en";
     private static readonly string[] AdultContentMarkers =
     {
         "porn",
@@ -108,7 +105,8 @@ public sealed class CinemaPreRollCacheService
         public required string Region { get; init; }
         public required string CacheKey { get; init; }
         public required string IncludeVideoLanguage { get; init; }
-        public string? RequiredOriginalLanguage { get; init; }
+        public required string FallbackMode { get; init; }
+        public required string FallbackRegion { get; init; }
     }
 
     private sealed class CacheFileModel
@@ -231,10 +229,12 @@ public sealed class CinemaPreRollCacheService
         string? language,
         string? region,
         string? regionMode,
+        string? fallbackMode,
+        string? fallbackRegion,
         bool forceRefresh = false,
         CancellationToken ct = default)
     {
-        var locale = BuildLocaleRequest(language, region, regionMode);
+        var locale = BuildLocaleRequest(language, region, regionMode, fallbackMode, fallbackRegion);
         var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
 
         await _refreshLock.WaitAsync(ct).ConfigureAwait(false);
@@ -355,19 +355,11 @@ public sealed class CinemaPreRollCacheService
             FetchFeedAsync(apiKey, "/movie/upcoming", "upcoming", locale, ct)
         };
 
-        if (!IsEnglishFallbackLocale(locale))
+        var fallbackLocale = BuildFallbackLocaleRequest(locale);
+        if (fallbackLocale is not null)
         {
-            var englishFallbackLocale = new LocaleRequest
-            {
-                Language = EnglishFallbackLanguage,
-                Region = EnglishFallbackRegion,
-                CacheKey = $"{locale.Language}:ENGLISH-FALLBACK",
-                IncludeVideoLanguage = "en,null",
-                RequiredOriginalLanguage = EnglishFallbackOriginalLanguage
-            };
-
-            tasks.Add(FetchFeedAsync(apiKey, "/movie/now_playing", "now_playing_english", englishFallbackLocale, ct));
-            tasks.Add(FetchFeedAsync(apiKey, "/movie/upcoming", "upcoming_english", englishFallbackLocale, ct));
+            tasks.Add(FetchFeedAsync(apiKey, "/movie/now_playing", "fallback_now_playing", fallbackLocale, ct));
+            tasks.Add(FetchFeedAsync(apiKey, "/movie/upcoming", "fallback_upcoming", fallbackLocale, ct));
         }
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -422,7 +414,6 @@ public sealed class CinemaPreRollCacheService
                 movie.Id > 0 &&
                 !movie.Adult &&
                 IsCurrentTrailerRelease(movie.ReleaseDate) &&
-                MatchesRequiredOriginalLanguage(movie, locale.RequiredOriginalLanguage) &&
                 !LooksAdultContent(movie.Title, movie.OriginalTitle, movie.Overview))
             .Select(movie => new MovieSeed
             {
@@ -861,7 +852,7 @@ public sealed class CinemaPreRollCacheService
             seed.FeedRegion,
             locale.Region,
             ExtractRegionFromLanguage(locale.Language),
-            EnglishFallbackRegion,
+            "US",
             "GB"
         })
         {
@@ -985,27 +976,6 @@ public sealed class CinemaPreRollCacheService
         return builder.ToString();
     }
 
-    private static bool MatchesRequiredOriginalLanguage(TmdbMovie movie, string? requiredOriginalLanguage)
-    {
-        var required = TrimOrEmpty(requiredOriginalLanguage).ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(required))
-        {
-            return true;
-        }
-
-        return string.Equals(
-            TrimOrEmpty(movie.OriginalLanguage).ToLowerInvariant(),
-            required,
-            StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static bool IsEnglishFallbackLocale(LocaleRequest locale)
-    {
-        return string.Equals(locale.Language, EnglishFallbackLanguage, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(locale.Region, EnglishFallbackRegion, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(locale.RequiredOriginalLanguage, EnglishFallbackOriginalLanguage, StringComparison.OrdinalIgnoreCase);
-    }
-
     private static void MergeSeed(IDictionary<int, MovieSeed> target, MovieSeed seed)
     {
         if (!target.TryGetValue(seed.TmdbId, out var existing))
@@ -1062,8 +1032,8 @@ public sealed class CinemaPreRollCacheService
         {
             "now_playing" => 4d,
             "upcoming" => 3d,
-            "now_playing_english" => 2d,
-            "upcoming_english" => 1d,
+            "fallback_now_playing" => 2d,
+            "fallback_upcoming" => 1d,
             _ => 0d
         };
     }
@@ -1091,7 +1061,7 @@ public sealed class CinemaPreRollCacheService
             && releaseDate <= today.AddDays(UpcomingReleaseFutureWindowDays);
     }
 
-    private static LocaleRequest BuildLocaleRequest(string? language, string? region, string? regionMode)
+    private static LocaleRequest BuildLocaleRequest(string? language, string? region, string? regionMode, string? fallbackMode, string? fallbackRegion)
     {
         var normalizedLanguage = NormalizeTmdbLanguage(language);
         var normalizedRegionMode = NormalizeTmdbRegionMode(regionMode);
@@ -1101,14 +1071,53 @@ public sealed class CinemaPreRollCacheService
             _ => NormalizeTmdbRegion(region, normalizedLanguage)
         };
         var iso639 = normalizedLanguage.Split('-')[0];
+        var normalizedFallbackMode = NormalizeTmdbFallbackMode(fallbackMode);
+        var normalizedFallbackRegion = NormalizeTmdbFallbackRegion(fallbackRegion);
+        var baseCacheKey = string.IsNullOrWhiteSpace(normalizedRegion)
+            ? $"{normalizedLanguage}:GLOBAL"
+            : $"{normalizedLanguage}:{normalizedRegion}";
+        var fallbackCacheKey = normalizedFallbackMode switch
+        {
+            "global" => "FB-GLOBAL",
+            "custom" => $"FB-{normalizedFallbackRegion}",
+            _ => "FB-NONE"
+        };
         return new LocaleRequest
         {
             Language = normalizedLanguage,
             Region = normalizedRegion,
-            CacheKey = string.IsNullOrWhiteSpace(normalizedRegion)
-                ? $"{normalizedLanguage}:GLOBAL"
-                : $"{normalizedLanguage}:{normalizedRegion}",
-            IncludeVideoLanguage = $"{iso639},en,null"
+            CacheKey = $"{baseCacheKey}:{fallbackCacheKey}",
+            IncludeVideoLanguage = $"{iso639},en,null",
+            FallbackMode = normalizedFallbackMode,
+            FallbackRegion = normalizedFallbackRegion
+        };
+    }
+
+    private static LocaleRequest? BuildFallbackLocaleRequest(LocaleRequest locale)
+    {
+        if (string.Equals(locale.FallbackMode, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var fallbackRegion = string.Equals(locale.FallbackMode, "global", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : NormalizeCountry(locale.FallbackRegion);
+
+        if (string.Equals(locale.Region, fallbackRegion, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var fallbackCacheKey = string.IsNullOrWhiteSpace(fallbackRegion) ? "GLOBAL" : fallbackRegion;
+        return new LocaleRequest
+        {
+            Language = locale.Language,
+            Region = fallbackRegion,
+            CacheKey = $"{locale.Language}:FALLBACK:{fallbackCacheKey}",
+            IncludeVideoLanguage = locale.IncludeVideoLanguage,
+            FallbackMode = "none",
+            FallbackRegion = string.Empty
         };
     }
 
@@ -1126,13 +1135,31 @@ public sealed class CinemaPreRollCacheService
 
     private static string NormalizeTmdbRegionMode(string? raw)
     {
-        var value = string.IsNullOrWhiteSpace(raw) ? "auto" : raw.Trim().ToLowerInvariant();
+        var value = string.IsNullOrWhiteSpace(raw) ? "custom" : raw.Trim().ToLowerInvariant();
         return value switch
         {
             "global" => "global",
             "custom" => "custom",
-            _ => "auto"
+            _ => "custom"
         };
+    }
+
+    private static string NormalizeTmdbFallbackMode(string? raw)
+    {
+        var value = string.IsNullOrWhiteSpace(raw) ? "custom" : raw.Trim().ToLowerInvariant();
+        return value switch
+        {
+            "none" => "none",
+            "global" => "global",
+            "region" or "custom" => "custom",
+            _ => "custom"
+        };
+    }
+
+    private static string NormalizeTmdbFallbackRegion(string? raw)
+    {
+        var normalized = NormalizeCountry(raw);
+        return string.IsNullOrWhiteSpace(normalized) ? "US" : normalized;
     }
 
     private static string NormalizeTmdbLanguage(string? raw)

@@ -18,6 +18,13 @@ const MAX_PREVIEW_CACHE = 200;
 const MAX_TOMBSTONES = 2000;
 export const AUTH_PROFILE_CHANGED_EVENT = "jms:auth-profile-changed";
 export const USERDATA_CHANGED_EVENT = "jms:userdata-changed";
+const AUTH_SNAPSHOT_WARMUP_POLL_MS = 2000;
+const AUTH_SNAPSHOT_DEBUG_KEY = "jms_debug_auth_snapshot";
+
+function normalizeServerBase(s) {
+  if (!s || typeof s !== "string") return "";
+  return s.trim().replace(/\/+$/, "");
+}
 
 function setLastPlayNowBlockReason(reason = "") {
   try {
@@ -294,6 +301,8 @@ async function startResolvedVideoPlayback({ itemId, item, requesterUserId, persi
 let __lastAuthSnapshot = null;
 let __authWarmupStart = Date.now();
 let __authSnapshotSyncTimer = 0;
+let __authSnapshotSyncReason = "";
+let __authSnapshotWarmupPollTimer = 0;
 let __authSnapshotWatchdogInstalled = false;
 const AUTH_WARMUP_MS = 15000;
 const QB_PRIME_MAX = 2000;
@@ -432,10 +441,8 @@ function persistDeviceName(value) {
   const name = cleanReadableDeviceName(value);
   if (!name) return "";
   try {
-    localStorage.setItem(DEVICE_NAME_KEY, name);
-    sessionStorage.setItem(DEVICE_NAME_KEY, name);
-    localStorage.setItem("persist_device_name", name);
-    sessionStorage.setItem("persist_device_name", name);
+    safeSet(DEVICE_NAME_KEY, name);
+    safeSet("persist_device_name", name);
   } catch {}
   return name;
 }
@@ -600,11 +607,26 @@ function dispatchAuthProfileChanged(detail) {
   } catch {}
 }
 
- export function persistAuthSnapshotFromApiClient() {
+function shouldDebugAuthSnapshot() {
+  try {
+    return localStorage.getItem(AUTH_SNAPSHOT_DEBUG_KEY) === "1" ||
+      localStorage.getItem("jf_debug_api") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function debugAuthSnapshot(reason, extra = {}) {
+  if (!shouldDebugAuthSnapshot()) return;
+  try {
+    console.debug("[JMSFusion] auth snapshot sync", { reason, ...extra });
+  } catch {}
+}
+
+ export function persistAuthSnapshotFromApiClient(reason = "manual") {
   try {
     const api = (typeof window !== "undefined" && window.ApiClient) ? window.ApiClient : null;
     if (!api) return;
-    __authWarmupStart = Date.now();
 
     const token =
       (typeof api.accessToken === "function" ? api.accessToken() : api._accessToken) || null;
@@ -615,24 +637,28 @@ function dispatchAuthProfileChanged(detail) {
     const serverId = api._serverInfo?.SystemId || api._serverInfo?.Id || null;
     let serverBase = "";
     try {
-      const baseFromLoc = normalizeServerBase(getBaseFromLocation());
-      const baseFromApi = normalizeServerBase((typeof api.serverAddress === "function") ? api.serverAddress() : "");
-      const pick = baseFromLoc || (baseFromApi && !isOriginOnly(baseFromApi) ? baseFromApi : "");
-      serverBase = pick || "";
-      if (pick) persistServerBase(pick);
+      serverBase = normalizeServerBase(resolveServerBase({ getServerAddress }) || "");
     } catch {}
     if (!userId) return;
-    try { localStorage.setItem("persist_user_id", userId); } catch {}
-    try { localStorage.setItem("persist_device_id", deviceId); } catch {}
+    try { safeSet("persist_user_id", userId); } catch {}
+    try { safeSet("persist_device_id", deviceId); } catch {}
     if (serverId) {
-      try { localStorage.setItem("persist_server_id", serverId); } catch {}
+      try { safeSet("persist_server_id", serverId); } catch {}
     }
-    try { localStorage.setItem(DEVICE_ID_KEY, deviceId); sessionStorage.setItem(DEVICE_ID_KEY, deviceId); } catch {}
+    try { safeSet(DEVICE_ID_KEY, deviceId); } catch {}
     try { persistUserId(userId); } catch {}
 
     const result = { userId, accessToken: token || "", sessionId: api._sessionId || null, serverId, serverBase, deviceId, deviceName,
                      clientName: "Jellyfin Web Client", clientVersion: "1.0.0" };
                      dbgAuth("persistAuthSnapshot:done");
+    const detail = buildAuthProfileChangeDetail(__lastAuthSnapshot, result);
+    debugAuthSnapshot(reason, {
+      userId: !!userId,
+      serverId: !!serverId,
+      serverBase: !!serverBase,
+      deviceName: !!deviceName,
+      changed: detail.changed
+    });
     onAuthProfileChanged(__lastAuthSnapshot, result);
     __lastAuthSnapshot = { userId, accessToken: token || "", serverId, serverBase };
   } catch {
@@ -718,6 +744,7 @@ function onAuthProfileChanged(prev, next) {
   if (!prev) return;
   const detail = buildAuthProfileChangeDetail(prev, next);
   if (detail.changed) {
+    __authWarmupStart = Date.now();
     console.log("🔐 Auth profili değişti → tüm cache’ler temizleniyor");
     nukeAllCachesAndLocalUserCaches();
     invalidateServerBaseCache();
@@ -725,15 +752,18 @@ function onAuthProfileChanged(prev, next) {
   }
 }
 
-function queueAuthSnapshotSync(delayMs = 0) {
+function queueAuthSnapshotSync(delayMs = 0, reason = "manual") {
   if (typeof window === "undefined") return;
   if (__authSnapshotSyncTimer) {
     clearTimeout(__authSnapshotSyncTimer);
     __authSnapshotSyncTimer = 0;
   }
+  __authSnapshotSyncReason = reason || "manual";
   __authSnapshotSyncTimer = window.setTimeout(() => {
     __authSnapshotSyncTimer = 0;
-    try { persistAuthSnapshotFromApiClient(); } catch {}
+    const syncReason = __authSnapshotSyncReason || "manual";
+    __authSnapshotSyncReason = "";
+    try { persistAuthSnapshotFromApiClient(syncReason); } catch {}
   }, Math.max(0, delayMs | 0));
 }
 
@@ -741,27 +771,36 @@ function installAuthSnapshotWatchdog() {
   if (typeof window === "undefined" || __authSnapshotWatchdogInstalled) return;
   __authSnapshotWatchdogInstalled = true;
 
-  const queueNow = (delayMs = 0) => queueAuthSnapshotSync(delayMs);
+  const queueNow = (delayMs = 0, reason = "manual") => queueAuthSnapshotSync(delayMs, reason);
+  const scheduleWarmupPoll = () => {
+    if (__authSnapshotWarmupPollTimer) return;
+    __authSnapshotWarmupPollTimer = window.setTimeout(() => {
+      __authSnapshotWarmupPollTimer = 0;
+      if (!document.hidden) queueNow(0, "warmup-poll");
+      if (!isAuthReadyStrict() && (Date.now() - __authWarmupStart) < AUTH_WARMUP_MS) {
+        scheduleWarmupPoll();
+      }
+    }, AUTH_SNAPSHOT_WARMUP_POLL_MS);
+  };
 
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", () => queueNow(0), { once: true });
+    document.addEventListener("DOMContentLoaded", () => queueNow(0, "dom-ready"), { once: true });
   } else {
-    queueNow(0);
+    queueNow(0, "install");
   }
 
-  window.addEventListener("pageshow", () => queueNow(0), { passive: true });
-  window.addEventListener("focus", () => queueNow(0), { passive: true });
-  window.addEventListener("hashchange", () => queueNow(60), { passive: true });
-  window.addEventListener("popstate", () => queueNow(60), { passive: true });
+  window.addEventListener("pageshow", () => queueNow(0, "pageshow"), { passive: true });
+  window.addEventListener("focus", () => queueNow(0, "focus"), { passive: true });
+  window.addEventListener("hashchange", () => queueNow(60, "hashchange"), { passive: true });
+  window.addEventListener("popstate", () => queueNow(60, "popstate"), { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
-    queueNow(0);
+    queueNow(0, "visibilitychange");
   }, { passive: true });
 
-  window.setInterval(() => {
-    if (document.hidden) return;
-    queueNow(0);
-  }, 2000);
+  if (!isAuthReadyStrict()) {
+    scheduleWarmupPoll();
+  }
 }
 
 function isLikelyGuid(id) {
@@ -880,7 +919,12 @@ function safeGet(k) {
   try { return localStorage.getItem(k) || sessionStorage.getItem(k) || null; } catch { return null; }
 }
 function safeSet(k, v) {
-  try { if (v) { localStorage.setItem(k, v); sessionStorage.setItem(k, v); } } catch {}
+  try {
+    if (!v) return;
+    const value = String(v);
+    if (localStorage.getItem(k) !== value) localStorage.setItem(k, value);
+    if (sessionStorage.getItem(k) !== value) sessionStorage.setItem(k, value);
+  } catch {}
 }
 
 function readStoredCurrentUserName(expectedUserId = "") {
@@ -963,13 +1007,12 @@ function getStoredDeviceId() {
  }
 
 function persistUserId(id) {
-   try {
-     if (id) {
-       localStorage.setItem(USER_ID_KEY, id);
-       sessionStorage.setItem(USER_ID_KEY, id);
-     }
-   } catch {}
- }
+  try {
+    if (id) {
+      safeSet(USER_ID_KEY, id);
+    }
+  } catch {}
+}
 
 export async function fetchLocalTrailers(itemId, { signal } = {}) {
   if (!itemId) return [];

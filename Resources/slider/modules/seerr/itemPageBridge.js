@@ -671,6 +671,85 @@ export async function requestSerrMissingSyntheticItem(item, { button } = {}) {
   return null;
 }
 
+function normalizeCollectionRequestItem(collection = {}) {
+  const mediaId = Number(collection?.id || collection?.mediaId || collection?.tmdbId || collection?.TmdbId || collection?.__tmdbId || 0);
+  const title = text(
+    collection?.name ||
+    collection?.title ||
+    collection?.Name ||
+    collection?.Title ||
+    collection?.originalName ||
+    collection?.original_name,
+    L("boxset", "Koleksiyon")
+  );
+  return {
+    Id: text(collection?.Id || collection?.id || `tmdb-collection-${mediaId || normalizeKey(title)}`),
+    Type: "BoxSet",
+    Name: title,
+    OriginalTitle: text(collection?.originalName || collection?.original_name || collection?.originalTitle || collection?.original_title, title),
+    Overview: text(collection?.overview || collection?.Overview),
+    ProviderIds: { ...(collection?.ProviderIds || collection?.providerIds || {}), Tmdb: mediaId > 0 ? String(mediaId) : undefined },
+    PosterPath: text(collection?.posterPath || collection?.poster_path || collection?.PosterPath),
+    BackdropPath: text(collection?.backdropPath || collection?.backdrop_path || collection?.BackdropPath),
+    __tmdbId: Number.isFinite(mediaId) && mediaId > 0 ? Math.floor(mediaId) : 0
+  };
+}
+
+export async function openSerrCollectionRequestModal(collection = {}, { source = "jellyfin-search-collection" } = {}) {
+  if (!moduleEnabled()) return null;
+  const access = await getSerrAccess().catch(() => null);
+  if (!access?.enabled || !accessCanHandleDetails(access, "boxset")) {
+    throw new Error(L("serrDisabled", "Seerr entegrasyonu etkin değil."));
+  }
+
+  const collectionItem = normalizeCollectionRequestItem(collection);
+  const collectionId = tmdbId(collectionItem);
+  if (!collectionId) {
+    throw new Error(L("serrTmdbMissing", "TMDb ID bulunamadı. Seerr araması ile devam edin."));
+  }
+
+  const details = await getSerrCollectionDetails(collectionId, { language: serrLanguage(access) }).catch(() => null);
+  const expected = normalizeSerrCollectionDetails(details);
+  if (!expected.parts.length) {
+    throw new Error(L("serrNoResults", "Seerr'de sonuç bulunamadı."));
+  }
+
+  const [unavailableMovies, requestState] = await Promise.all([
+    filterUnavailableCollectionMovies(expected.parts),
+    getRequestState().catch(() => emptyRequestState())
+  ]);
+  const plan = {
+    kind: "collection",
+    pageItem: collectionItem,
+    collectionId,
+    expectedCollectionItems: expected.parts,
+    missingCollectionItems: unavailableMovies,
+    requestState,
+    serrSettings: access?.settings || {}
+  };
+  const missingMovies = unavailableMovies.filter((movie) => !isMovieRequested(plan, movie));
+  if (!missingMovies.length) {
+    notify(L("serrCollectionNothingToRequest", "Bu boxset içinde Jellyfin'de olmayan ya da bekleyen film yok."), "success");
+    return { empty: true };
+  }
+
+  if (await shouldConfirmRequests(plan)) {
+    openSelectionModal({
+      mode: "movie",
+      titleMode: "movie",
+      submitMode: "collection",
+      visualOnly: false,
+      plan,
+      items: missingMovies,
+      source
+    });
+    return { openedModal: true, count: missingMovies.length };
+  }
+
+  const result = await submitMovieCollection({ plan, movies: missingMovies, source });
+  return { submitted: true, count: missingMovies.length, result };
+}
+
 function ensureStyles() {
   ensureSerrStyles();
   const styleId = "monwui-serr-native-page-styles";
@@ -823,6 +902,9 @@ function ensureStyles() {
         pointer-events: none;
         height: 18px;
         width: 18px;
+      }
+      .monwui-serr-choice-row.is-selectable input {
+        pointer-events: auto;
       }
     .monwui-serr-choice-row input[type=checkbox]:checked {
       background-color: #ffb703;
@@ -1869,13 +1951,17 @@ function ensureSelectionModal() {
   return modal;
 }
 
-function selectionModalTitle(mode, titleMode) {
+function selectionModalTitle(mode, titleMode, submitMode = mode) {
+  if (submitMode === "collection") return L("serrNativeCollectionModalTitle", "Boxset İsteği");
   if (mode === "movie" || titleMode === "movie") return L("serrNativeMovieModalTitle", "Seerr Film İsteği");
   if (titleMode === "season") return L("serrNativeSeasonModalTitle", "Seerr Sezon İsteği");
   return L("serrNativeEpisodeModalTitle", "Seerr Bölüm İsteği");
 }
 
 function selectionModalHint(mode, titleMode, submitMode) {
+  if (submitMode === "collection") {
+    return L("serrCollectionConfirmHint", "Boxset içindeki Jellyfin'de olmayan filmleri kontrol edin.");
+  }
   if (mode === "movie" || submitMode === "movie") {
     return L("serrMovieConfirmHint", "Film isteği gönderilmeden önce içeriği kontrol edin.");
   }
@@ -1906,6 +1992,22 @@ function selectionHeroInfo({ mode, titleMode, submitMode, plan, items }) {
   const first = Array.isArray(items) ? (items[0] || {}) : {};
   const series = plan?.seriesItem || first.__monwuiSerrSeriesItem || {};
   const effectiveMode = mode === "movie" ? "movie" : (titleMode === "season" ? "season" : mode);
+  if (submitMode === "collection") {
+    const collection = plan?.pageItem || {};
+    const count = Array.isArray(items) ? items.length : 0;
+    return {
+      mode: "movie",
+      title: text(collection?.Name || collection?.OriginalTitle, L("boxset", "BoxSet")),
+      chips: [
+        L("boxset", "BoxSet"),
+        count ? `${count} ${L("serrMovie", "Film")}` : "",
+        tmdbId(collection) ? `TMDb ${tmdbId(collection)}` : ""
+      ].filter(Boolean),
+      overview: text(collection?.Overview || collection?.overview),
+      image: selectionImageUrl(collection, "movie"),
+      icon: "folder"
+    };
+  }
   if (mode === "movie") {
     const year = Number(first?.ProductionYear || readYear(first, "PremiereDate"));
     return {
@@ -2017,7 +2119,7 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
   const isSeasonMode = mode === "season";
   const isMovieMode = mode === "movie";
 
-  title.textContent = selectionModalTitle(mode, titleMode);
+  title.textContent = selectionModalTitle(mode, titleMode, submitMode);
   renderSelectionHero(modal, { mode, titleMode, submitMode, plan, items });
 
   toolbar.innerHTML = `<div class="monwui-serr-choice-hint">${escapeHtml(selectionModalHint(mode, titleMode, submitMode))}</div>`;
@@ -2040,8 +2142,8 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
     const thumbBg = thumb ? ` style="background-image:url('${thumb.replace(/'/g, "%27")}')"` : "";
     const icon = selectionIcon(rowMode, titleMode);
     return `
-      <label class="monwui-serr-choice-row ${rowMode === "episode" ? "is-episode" : ""}">
-        <input type="checkbox" checked ${visualOnly ? "disabled aria-disabled=\"true\"" : ""} data-season="${escapeHtml(String(seasonNumber))}" data-episode="${escapeHtml(String(episodeNumber))}" data-name="${escapeHtml(text(item?.Name))}">
+      <label class="monwui-serr-choice-row ${rowMode === "episode" ? "is-episode" : ""} ${visualOnly ? "" : "is-selectable"}">
+        <input type="checkbox" checked ${visualOnly ? "disabled aria-disabled=\"true\"" : ""} data-index="${escapeHtml(String(index))}" data-tmdb="${escapeHtml(String(tmdbId(item) || ""))}" data-season="${escapeHtml(String(seasonNumber))}" data-episode="${escapeHtml(String(episodeNumber))}" data-name="${escapeHtml(text(item?.Name))}">
         <span class="monwui-serr-choice-thumb ${rowMode === "episode" ? "is-episode" : ""}"${thumbBg}>
           <span class="material-icons ${escapeHtml(icon)}" aria-hidden="true"></span>
         </span>
@@ -2061,8 +2163,23 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
     }
 
     const effectiveMode = submitMode || mode;
+    if (effectiveMode === "collection") {
+      const selectedMovies = checked
+        .map((input) => items[Number(input.getAttribute("data-index"))])
+        .filter(Boolean);
+      await submitMovieCollection({
+        plan,
+        movies: selectedMovies,
+        button: submit,
+        originButton,
+        source: source || "jellyfin-native-collection"
+      });
+      return;
+    }
     if (effectiveMode === "movie") {
-      await submitMovieRequest({ movie: items[0], button: submit, originButton, source: source || "jellyfin-native-movie-card", requestedItem });
+      const selected = checked[0];
+      const movie = selected ? (items[Number(selected.getAttribute("data-index"))] || items[0]) : items[0];
+      await submitMovieRequest({ movie, button: submit, originButton, source: source || "jellyfin-native-movie-card", requestedItem });
       return;
     }
 
@@ -3080,6 +3197,110 @@ async function submitCollectionMovie({ plan, movie, button }) {
     originButton: button,
     source: "jellyfin-native-collection-card"
   });
+}
+
+async function requestCollectionMovieBackend(movie, { source = "jellyfin-native-collection", access = null } = {}) {
+  const mediaId = tmdbId(movie);
+  if (!mediaId) {
+    throw new Error(L("serrTmdbMissing", "TMDb ID bulunamadı. Seerr araması ile devam edin."));
+  }
+
+  const title = text(movie?.Name, L("serrMovie", "Film"));
+  try {
+    const result = await createSerrRequest({
+      mediaType: "movie",
+      mediaId,
+      seasons: [],
+      episodes: [],
+      requestAllSeasons: false,
+      title,
+      source,
+      jellyfinItemId: ""
+    });
+    if (result?.ok === false) {
+      const err = new Error(result?.error || L("serrRequestFailed", "Seerr isteği oluşturulamadı."));
+      err.payload = result;
+      throw err;
+    }
+    if (accessHasSerr(access) && shouldFallbackMovieToArr(result)) {
+      return await requestMovieFromArr(movie, { tmdbId: mediaId, title });
+    }
+    return result;
+  } catch (error) {
+    if (accessHasSerr(access) && !isJellyfinAlreadyAvailableError(error)) {
+      return await requestMovieFromArr(movie, { tmdbId: mediaId, title });
+    }
+    throw error;
+  }
+}
+
+async function submitMovieCollection({ plan = null, movies = [], button, originButton = null, source = "jellyfin-native-collection" } = {}) {
+  const list = [];
+  const seen = new Set();
+  for (const movie of Array.isArray(movies) ? movies : []) {
+    const id = tmdbId(movie);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    list.push(movie);
+  }
+  if (!list.length) {
+    notify(L("serrSelectAtLeastOne", "En az bir seçim yapın."), "error");
+    return;
+  }
+
+  const old = button?.innerHTML || "";
+  const requestState = planRequestState(plan);
+  const access = await getSerrAccess().catch(() => null);
+  let completed = 0;
+  let skipped = 0;
+  const failed = [];
+
+  try {
+    if (button) {
+      button.disabled = true;
+      button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestSending", "Gönderiliyor..."))}</span>`;
+    }
+
+    for (const movie of list) {
+      const id = tmdbId(movie);
+      if (id > 0 && requestState.movieIds?.has?.(id)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await requestCollectionMovieBackend(movie, { source, access });
+        completed += 1;
+        if (id > 0) requestState.movieIds?.add?.(id);
+        movie.__monwuiSerrRequested = true;
+      } catch (error) {
+        if (isJellyfinAlreadyAvailableError(error)) {
+          skipped += 1;
+          continue;
+        }
+        failed.push({
+          title: text(movie?.Name, L("serrMovie", "Film")),
+          message: requestErrorMessage(error)
+        });
+      }
+    }
+
+    const parts = [];
+    if (completed) parts.push(`${completed} ${L("serrMovie", "Film")} ${L("serrBulkRequestSent", "isteği gönderildi")}.`);
+    if (skipped) parts.push(`${skipped} ${L("serrBulkRequestSkipped", "atlandı")}.`);
+    if (failed.length) parts.push(`${failed.length} ${L("serrBulkRequestFailed", "gönderilemedi")}.`);
+    notify(parts.join(" ") || L("serrRequestCreatedToast", "İstek oluşturuldu."), failed.length && !completed ? "error" : "success");
+
+    if (completed) {
+      try { window.dispatchEvent(new CustomEvent("monwui:serr-requests-changed")); } catch {}
+      if (!failed.length) {
+        if (originButton) markButtonRequested(originButton);
+        closeSelectionModal();
+      }
+    }
+    return { completed, skipped, failedCount: failed.length };
+  } finally {
+    restoreSubmissionButton(button, old, originButton, completed > 0 && !failed.length);
+  }
 }
 
 async function submitMovieRequest({ movie, button, originButton = null, source = "jellyfin-native-movie-card", requestedItem = null }) {

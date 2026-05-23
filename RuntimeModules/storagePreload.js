@@ -20,21 +20,37 @@ const DENY_KEYS = new Set([
   "jf_serverAddress",
   "jf_userId",
   "jf_api_deviceId",
+  "jf_api_deviceName",
   "persist_user_id",
   "persist_device_id",
+  "persist_device_name",
   "persist_server_id",
   "serverAddress",
   "currentUserIsAdmin",
   "emby.device.id",
   "emby.session.id",
   "jellyfin_credentials",
-  "emby_credentials"
+  "emby_credentials",
+  "currentUserId",
+  "currentUserName",
+  "jf_debug_api",
+  "jms:lastPlayNowDebug",
+  "jms_backdrop_index",
+  "userTopGenresCache",
+  "userTopGenres_v2"
 ]);
 
 const DENY_PREFIXES = [
   "persist_",
   "jf:",
-  "emby."
+  "emby.",
+  "jms:debug:",
+  "jms:trace:",
+  "jms:focusedUserDataSync:",
+  "jms:last",
+  "jms_indexer_",
+  "studioHub_",
+  "avatar-"
 ];
 
 const managedKeys = new Set(EXPLICIT_KEYS);
@@ -46,6 +62,12 @@ let state = {};
 let serverSnapshotEmpty = true;
 let saveTimer = null;
 let savePromise = null;
+let saveQueued = false;
+let queuedPersistPromise = null;
+let resolveQueuedPersist = null;
+let rejectQueuedPersist = null;
+let activePersistJson = null;
+let lastPersistedJson = null;
 let suspendSync = false;
 let bootstrappedLocal = false;
 let snapshotLoaded = false;
@@ -70,9 +92,10 @@ function detectProfile() {
 
 function isDeniedKey(key) {
   const normalized = String(key || "").trim();
+  const lowered = normalized.toLowerCase();
   if (!normalized) return true;
   if (DENY_KEYS.has(normalized)) return true;
-  if (DENY_PREFIXES.some(prefix => normalized.startsWith(prefix))) return true;
+  if (DENY_PREFIXES.some(prefix => lowered.startsWith(prefix))) return true;
   if (/token|credential|session/i.test(normalized)) return true;
   return false;
 }
@@ -125,6 +148,20 @@ function normalizeSnapshot(source) {
   return out;
 }
 
+function serializeSnapshot(snapshot) {
+  return JSON.stringify(normalizeSnapshot(snapshot));
+}
+
+function getQueuedPersistPromise() {
+  if (!queuedPersistPromise) {
+    queuedPersistPromise = new Promise((resolve, reject) => {
+      resolveQueuedPersist = resolve;
+      rejectQueuedPersist = reject;
+    });
+  }
+  return queuedPersistPromise;
+}
+
 function applySnapshotToStorage(snapshot) {
   registerKeys(Object.keys(snapshot || {}));
   suspendSync = true;
@@ -152,8 +189,21 @@ function buildSnapshotFromStorage() {
 
 async function persistSnapshot(snapshot, options = {}) {
   const payload = normalizeSnapshot(snapshot);
+  const payloadJson = JSON.stringify(payload);
   state = payload;
   serverSnapshotEmpty = Object.keys(payload).length === 0;
+
+  if (savePromise) {
+    if (payloadJson === activePersistJson) {
+      return savePromise;
+    }
+    saveQueued = true;
+    return getQueuedPersistPromise();
+  }
+
+  if (payloadJson === lastPersistedJson) {
+    return { ok: true, skipped: true, profile, rev };
+  }
 
   const requestInit = {
     keepalive: options?.keepalive === true,
@@ -169,6 +219,7 @@ async function persistSnapshot(snapshot, options = {}) {
     })
   };
 
+  activePersistJson = payloadJson;
   savePromise = fetch(`${SAVE_URL}?profile=${encodeURIComponent(profile)}&ts=${Date.now()}`, requestInit).then(async response => {
     if (!response.ok) {
       const raw = await response.text().catch(() => "");
@@ -178,12 +229,27 @@ async function persistSnapshot(snapshot, options = {}) {
   }).then(result => {
     rev = Number(result?.rev || rev || 0);
     bridge.bootstrapOverride = { forceGlobal, global: payload, rev, profile };
+    lastPersistedJson = payloadJson;
     return result;
   }).catch(error => {
     console.warn("[JMSFusion] Managed storage persist failed:", error);
     throw error;
   }).finally(() => {
+    const runQueued = saveQueued;
+    const queuedResolve = resolveQueuedPersist;
+    const queuedReject = rejectQueuedPersist;
+    saveQueued = false;
+    queuedPersistPromise = null;
+    resolveQueuedPersist = null;
+    rejectQueuedPersist = null;
     savePromise = null;
+    activePersistJson = null;
+    if (runQueued) {
+      persistSnapshot(buildSnapshotFromStorage()).then(
+        result => queuedResolve?.(result),
+        error => queuedReject?.(error)
+      );
+    }
   });
 
   return savePromise;
@@ -217,7 +283,9 @@ function patchLocalStorage() {
   storage.setItem = function patchedSetItem(key, value) {
     const normalizedKey = String(key || "");
     const normalizedValue = String(value);
+    const previousValue = originalGetItem(normalizedKey);
     originalSetItem(normalizedKey, normalizedValue);
+    if (previousValue === normalizedValue) return;
     if (suspendSync) return;
     if (!shouldPersistKey(normalizedKey)) return;
     state[normalizedKey] = normalizedValue;
@@ -226,7 +294,9 @@ function patchLocalStorage() {
 
   storage.removeItem = function patchedRemoveItem(key) {
     const normalizedKey = String(key || "");
+    const previousValue = originalGetItem(normalizedKey);
     originalRemoveItem(normalizedKey);
+    if (previousValue === null) return;
     if (suspendSync) return;
     if (!shouldPersistKey(normalizedKey)) return;
     delete state[normalizedKey];
@@ -268,6 +338,7 @@ async function loadServerSnapshot() {
     const snapshot = normalizeSnapshot(payload?.global || {});
     state = snapshot;
     serverSnapshotEmpty = Object.keys(snapshot).length === 0;
+    lastPersistedJson = serializeSnapshot(snapshot);
     applySnapshotToStorage(snapshot);
     bridge.bootstrapOverride = { forceGlobal, global: snapshot, rev, profile };
   } catch (error) {

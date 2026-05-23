@@ -11,6 +11,8 @@ import {
   buildCinemaPreRollCacheUrl,
   getCinemaPreRollLocaleSignature,
   normalizeCinemaPreRollCustomRegion,
+  normalizeCinemaPreRollFallbackMode,
+  normalizeCinemaPreRollFallbackRegion,
   normalizeCinemaPreRollLanguageSetting,
   normalizeCinemaPreRollRegionMode
 } from "../cinemaPreRollLocale.js";
@@ -269,7 +271,9 @@ const USER_ONLY_KEYS = [
   "cinemaPreRollStartFullscreen",
   "cinemaPreRollTrailerCount",
   "cinemaPreRollRegionMode",
-  "cinemaPreRollCustomRegion"
+  "cinemaPreRollCustomRegion",
+  "cinemaPreRollFallbackMode",
+  "cinemaPreRollFallbackRegion"
 ];
 
   export async function applySettings(reload = false) {
@@ -459,9 +463,15 @@ const USER_ONLY_KEYS = [
             cinemaPreRollRegionMode: hasNamedControl('cinemaPreRollRegionMode')
               ? normalizeCinemaPreRollRegionMode(formData.get('cinemaPreRollRegionMode'))
               : normalizeCinemaPreRollRegionMode(config.cinemaPreRollRegionMode),
-            cinemaPreRollCustomRegion: hasNamedControl('cinemaPreRollCustomRegion')
+            cinemaPreRollCustomRegion: formData.has('cinemaPreRollCustomRegion')
               ? normalizeCinemaPreRollCustomRegion(formData.get('cinemaPreRollCustomRegion'))
               : normalizeCinemaPreRollCustomRegion(config.cinemaPreRollCustomRegion),
+            cinemaPreRollFallbackMode: hasNamedControl('cinemaPreRollFallbackMode')
+              ? normalizeCinemaPreRollFallbackMode(formData.get('cinemaPreRollFallbackMode'))
+              : normalizeCinemaPreRollFallbackMode(config.cinemaPreRollFallbackMode),
+            cinemaPreRollFallbackRegion: formData.has('cinemaPreRollFallbackRegion')
+              ? normalizeCinemaPreRollFallbackRegion(formData.get('cinemaPreRollFallbackRegion'))
+              : normalizeCinemaPreRollFallbackRegion(config.cinemaPreRollFallbackRegion),
             previewPlaybackMode: (() => {
               if (formData.get('disableAllPlayback') === 'on') return 'none';
               if (formData.get('enableTrailerThenVideo') === 'on') return 'trailerThenVideo';

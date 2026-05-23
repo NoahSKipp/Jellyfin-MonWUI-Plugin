@@ -274,6 +274,69 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return await ProxySerrMetadata("/collection/" + id.ToString(CultureInfo.InvariantCulture), language, cancellationToken);
         }
 
+        [HttpGet("metadata/collection/search")]
+        public async Task<IActionResult> SearchCollectionMetadata([FromQuery] string? query, [FromQuery] int page = 1, [FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null)
+            {
+                return userCheck.Result;
+            }
+
+            var q = CleanText(query, 120);
+            if (string.IsNullOrWhiteSpace(q))
+            {
+                return BadRequest(new { ok = false, error = "Search query is required." });
+            }
+
+            var cfg = GetConfig();
+            var lang = NormalizeLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var tmdb = await SearchTmdbCollections(cfg, q, page, lang, cancellationToken);
+            if (tmdb is not null)
+            {
+                NoCache();
+                return Ok(tmdb);
+            }
+
+            if (IsSerrConnectionConfigured(cfg))
+            {
+                var qs = new Dictionary<string, string>
+                {
+                    ["query"] = q,
+                    ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture)
+                };
+                if (!string.IsNullOrWhiteSpace(lang)) qs["language"] = lang;
+
+                var response = await SendSerrAsync(cfg, HttpMethod.Get, "/search?" + BuildQueryString(qs), null, cancellationToken);
+                if (response.Ok && response.Payload.ValueKind == JsonValueKind.Object)
+                {
+                    var results = ReadArray(response.Payload, "results", "Results")
+                        .Where(item => Same(ReadStringAny(item, "mediaType", "media_type"), "collection"))
+                        .Select(ToCollectionSearchDto)
+                        .Where(item => item is not null)
+                        .Cast<object>()
+                        .ToList();
+                    NoCache();
+                    return Ok(new
+                    {
+                        page = Math.Max(1, page),
+                        results,
+                        totalResults = results.Count,
+                        totalPages = results.Count > 0 ? 1 : 0
+                    });
+                }
+            }
+
+            NoCache();
+            return Ok(new
+            {
+                page = Math.Max(1, page),
+                results = Array.Empty<object>(),
+                totalResults = 0,
+                totalPages = 0
+            });
+        }
+
         [HttpGet("local/tmdb/{id:int}")]
         public IActionResult GetLocalByTmdbId(int id)
         {
@@ -609,12 +672,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             if (!response.Ok)
             {
-                return StatusCode(502, new
-                {
-                    ok = false,
-                    error = response.Error,
-                    status = response.StatusCode
-                });
+                var tmdb = await ProxyTmdbMetadata(cfg, path, language, cancellationToken);
+                if (tmdb is not null) return tmdb;
+                NoCache();
+                return Ok(new { });
             }
 
             NoCache();
@@ -699,6 +760,63 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             {
                 return SerrCallResult.Fail(0, ex.Message);
             }
+        }
+
+        private async Task<object?> SearchTmdbCollections(JMSFusionConfiguration cfg, string query, int page, string? language, CancellationToken cancellationToken)
+        {
+            var apiKey = CleanText(cfg.TmdbApiKey, 200);
+            if (string.IsNullOrWhiteSpace(apiKey) || Same(apiKey, "CHANGE_ME")) return null;
+
+            var qs = new Dictionary<string, string>
+            {
+                ["api_key"] = apiKey,
+                ["query"] = query,
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture),
+                ["include_adult"] = "false"
+            };
+            var lang = NormalizeTmdbLanguage(language);
+            if (!string.IsNullOrWhiteSpace(lang)) qs["language"] = lang;
+
+            var response = await SendTmdbAsync("/search/collection?" + BuildQueryString(qs), cancellationToken);
+            if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Object) return null;
+
+            var results = ReadArray(response.Payload, "results", "Results")
+                .Select(ToCollectionSearchDto)
+                .Where(item => item is not null)
+                .Cast<object>()
+                .ToList();
+            var totalResults = ReadIntValue(response.Payload, "total_results");
+            var totalPages = ReadIntValue(response.Payload, "total_pages");
+            var resultPage = ReadIntValue(response.Payload, "page");
+
+            return new
+            {
+                page = resultPage > 0 ? resultPage : Math.Max(1, page),
+                results,
+                totalResults = totalResults > 0 ? totalResults : results.Count,
+                totalPages = totalPages > 0 ? totalPages : (results.Count > 0 ? 1 : 0)
+            };
+        }
+
+        private static object? ToCollectionSearchDto(JsonElement item)
+        {
+            var id = ReadIntValue(item, "id");
+            if (id <= 0) return null;
+            var title = ReadStringAny(item, "name", "title", "originalName", "original_name");
+            if (string.IsNullOrWhiteSpace(title)) return null;
+            return new
+            {
+                id,
+                mediaType = "collection",
+                media_type = "collection",
+                name = title,
+                title,
+                originalName = ReadStringAny(item, "originalName", "original_name"),
+                overview = ReadStringAny(item, "overview"),
+                posterPath = ReadStringAny(item, "posterPath", "poster_path"),
+                backdropPath = ReadStringAny(item, "backdropPath", "backdrop_path"),
+                source = "tmdb"
+            };
         }
 
         private async Task<List<object>> SearchArrFallback(JMSFusionConfiguration cfg, string query, CancellationToken cancellationToken)
@@ -3081,6 +3199,23 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (el.ValueKind != JsonValueKind.String) return false;
             value = el.GetString() ?? string.Empty;
             return !string.IsNullOrWhiteSpace(value);
+        }
+
+        private static IEnumerable<JsonElement> ReadArray(JsonElement source, params string[] properties)
+        {
+            if (source.ValueKind != JsonValueKind.Object) return Array.Empty<JsonElement>();
+            foreach (var property in properties)
+            {
+                if (source.TryGetProperty(property, out var el) && el.ValueKind == JsonValueKind.Array)
+                {
+                    return el.EnumerateArray()
+                        .Where(item => item.ValueKind == JsonValueKind.Object)
+                        .Select(item => item.Clone())
+                        .ToList();
+                }
+            }
+
+            return Array.Empty<JsonElement>();
         }
 
         private static string ReadStringAny(JsonElement source, params string[] properties)

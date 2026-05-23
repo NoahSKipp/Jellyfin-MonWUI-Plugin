@@ -125,6 +125,14 @@ export async function getSerrCollectionDetails(id, options = {}) {
   return request(`/metadata/collection/${encodeURIComponent(String(Math.floor(clean)))}${metadataQuery(options)}`);
 }
 
+export async function searchSerrCollections(query, { page = 1, language = "" } = {}) {
+  const qs = new URLSearchParams();
+  qs.set("query", String(query || "").trim());
+  qs.set("page", String(Math.max(1, Number(page) || 1)));
+  if (language) qs.set("language", language);
+  return request(`/metadata/collection/search?${qs.toString()}`);
+}
+
 export async function searchJellyfinByTmdbId(id) {
   const clean = Number(id);
   if (!Number.isFinite(clean) || clean <= 0) return { ok: false, items: [] };

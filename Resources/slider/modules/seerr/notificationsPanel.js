@@ -9,6 +9,7 @@ import {
 import { getConfig } from "../config.js";
 import { getEffectiveLanguage, getLanguageLabels } from "../../language/index.js";
 import { requestMovieFromArr } from "../arr/requestFallback.js";
+import { getArrCalendar } from "../arr/api.js";
 import { showNotification } from "../player/ui/notification.js";
 
 let cachedCount = 0;
@@ -25,6 +26,7 @@ const ACTIVE_DOWNLOAD_POLL_MS = 2_000;
 const OPEN_IDLE_POLL_MS = 5_000;
 const BACKGROUND_POLL_MS = 15_000;
 const SERR_IMAGE_BASE = "https://image.tmdb.org/t/p";
+const CALENDAR_IMAGE_READY_TIMEOUT_MS = 3500;
 const posterCache = new Map();
 const posterPromises = new Map();
 
@@ -274,6 +276,1092 @@ function ensureSerrProgressStyles() {
   document.head.appendChild(style);
 }
 
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function dateKey(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function startOfMonth(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function addDays(date, days) {
+  const out = new Date(date);
+  out.setDate(out.getDate() + days);
+  return out;
+}
+
+function addMonths(date, months) {
+  return new Date(date.getFullYear(), date.getMonth() + months, 1);
+}
+
+function calendarRange(monthDate) {
+  const first = startOfMonth(monthDate);
+  const mondayOffset = (first.getDay() + 6) % 7;
+  const start = addDays(first, -mondayOffset);
+  return { start, end: addDays(start, 41) };
+}
+
+function parseEventDate(value) {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function monthTitle(date) {
+  try {
+    return date.toLocaleDateString(labels()?.timeLocale || undefined, { month: "long", year: "numeric" });
+  } catch {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+  }
+}
+
+function weekdayLabels() {
+  const base = new Date(2024, 0, 1);
+  return Array.from({ length: 7 }, (_, index) => {
+    try {
+      return addDays(base, index).toLocaleDateString(labels()?.timeLocale || undefined, { weekday: "short" });
+    } catch {
+      return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][index];
+    }
+  });
+}
+
+function calendarStatusLabel(status) {
+  switch (text(status).toLowerCase()) {
+    case "available": return L("serrStatusCompleted", "Tamamlandı");
+    case "missing": return L("serrCalendarMissing", "Eksik");
+    case "unmonitored": return L("serrCalendarUnmonitored", "İzlenmiyor");
+    case "upcoming":
+    default: return L("serrCalendarUpcoming", "Yakında");
+  }
+}
+
+function calendarReleaseLabel(type) {
+  switch (text(type).toLowerCase()) {
+    case "air": return L("episode", "Bölüm");
+    case "cinema": return L("serrCalendarCinema", "Sinema");
+    case "digital": return L("serrCalendarDigital", "Dijital");
+    case "physical": return L("serrCalendarPhysical", "Fiziksel");
+    case "release": return L("serrCalendarRelease", "Yayın");
+    default: return "";
+  }
+}
+
+function ensureSerrCalendarStyles() {
+  const id = "monwui-serr-calendar-styles";
+  if (document.getElementById(id)) return;
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = `
+    #jfNotifModal .monwui-serr-notif-tools {
+      gap: 8px;
+    }
+    #jfNotifModal .monwui-serr-calendar-btn,
+    #jfNotifModal .monwui-serr-manage-btn {
+      align-items: center;
+      display: inline-flex;
+      gap: 7px;
+      justify-content: center;
+      font-size: 0.875rem;
+    }
+    #jfNotifModal .monwui-serr-calendar-btn {
+        background: var(--ntf-btn-bg, var(--jf-notif-hover, var(--panel-bg, rgba(255,255,255,.08))));
+        border: 1px solid var(--ntf-divider, var(--jf-notif-border, rgba(255,255,255,.12)));
+        border-radius: var(--ntf-radius-sm, 8px);
+        color: var(--ntf-btn-text, var(--jf-notif-text, #fff));
+        cursor: pointer;
+        min-height: 32px;
+        padding: 6px 10px;
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+    }
+    .monwui-serr-calendar-btn i,.monwui-serr-calendar-btn span {
+        padding: 0;
+        margin: 0;
+        text-align: center;
+    }
+    #jfNotifModal .monwui-serr-calendar-btn:hover {
+      background: var(--ntf-btn-hover, var(--jf-notif-card-bg-hover, rgba(255,255,255,.12)));
+    }
+    .monwui-serr-calendar-modal {
+      box-sizing: border-box;
+      display: none;
+      inset: 0;
+      overflow: auto;
+      padding: 16px;
+      position: fixed;
+      z-index: 10002;
+    }
+    .monwui-serr-calendar-modal.open {
+      align-items: flex-start;
+      display: flex;
+      justify-content: center;
+    }
+    .monwui-serr-calendar-backdrop {
+      background: rgba(0,0,0,.52);
+      inset: 0;
+      position: absolute;
+    }
+    .monwui-serr-calendar-dialog {
+      background: var(--jf-notif-bg, var(--panel-bg, #151924));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 12px;
+      box-shadow: var(--jf-notif-shadow, 0 24px 70px rgba(0,0,0,.38));
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      margin: auto 0;
+      max-height: calc(100dvh - 32px);
+      overflow: hidden;
+      position: relative;
+      width: min(980px, calc(100vw - 28px));
+    }
+    .monwui-serr-calendar-head {
+      align-items: center;
+      border-bottom: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.1)));
+      display: grid;
+      gap: 10px;
+      grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      padding: 12px 14px;
+    }
+    .monwui-serr-calendar-title {
+      font-size: 17px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+      text-align: center;
+    }
+    .monwui-serr-calendar-nav,
+    .monwui-serr-calendar-close {
+      align-items: center;
+      background: var(--jf-notif-hover, var(--head-bg, rgba(255,255,255,.08)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 8px;
+      color: inherit;
+      cursor: pointer;
+      display: inline-flex;
+      height: 34px;
+      justify-content: center;
+      width: 34px;
+    }
+    .monwui-serr-calendar-nav:hover,
+    .monwui-serr-calendar-close:hover {
+      border-color: var(--jf-notif-accent, var(--notif-accent, #60a5fa));
+      color: var(--jf-notif-accent, var(--notif-accent, #60a5fa));
+    }
+    .monwui-serr-calendar-body {
+      display: grid;
+      gap: 10px;
+      min-height: 0;
+      overflow: auto;
+      padding: 12px;
+      scrollbar-color: var(--jf-notif-accent, var(--notif-accent, #60a5fa)) transparent;
+      scrollbar-width: thin;
+    }
+    .monwui-serr-calendar-legend {
+      align-items: center;
+      color: var(--jf-notif-subtext, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      display: flex;
+      flex-wrap: wrap;
+      font-size: 12px;
+      gap: 10px;
+    }
+    .monwui-serr-calendar-legend span {
+      align-items: center;
+      display: inline-flex;
+      gap: 6px;
+    }
+    .monwui-serr-calendar-dot {
+      background: var(--dot-bg, var(--dot, var(--jf-notif-accent, #60a5fa)));
+      border-radius: 999px;
+      display: inline-block;
+      height: 7px;
+      width: 7px;
+    }
+    .monwui-serr-calendar-dot.is-split {
+      background: linear-gradient(135deg,
+        var(--dot-service, #60a5fa) 0 48%,
+        rgba(255,255,255,.42) 48% 52%,
+        var(--dot-status, #94a3b8) 52% 100%);
+    }
+    .monwui-serr-calendar-grid {
+      display: grid;
+      gap: 6px;
+      grid-template-columns: repeat(7, minmax(42px, 1fr));
+      overflow: visible;
+    }
+    .monwui-serr-calendar-weekday {
+      color: var(--jf-notif-subtext, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      font-size: 11px;
+      font-weight: 800;
+      padding: 0 4px 2px;
+      text-align: center;
+      text-transform: uppercase;
+    }
+    .monwui-serr-calendar-day {
+      background: var(--jf-notif-card-bg, var(--head-bg, rgba(255,255,255,.04)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.1)));
+      border-radius: 8px;
+      min-height: clamp(62px, 10vh, 86px);
+      overflow: visible;
+      padding: 7px;
+      position: relative;
+    }
+    .monwui-serr-calendar-day:hover,
+    .monwui-serr-calendar-day:focus-within,
+    .monwui-serr-calendar-day.is-open {
+      z-index: 20;
+    }
+    .monwui-serr-calendar-day.is-muted {
+      opacity: 1;
+    }
+    .monwui-serr-calendar-day.is-muted .monwui-serr-calendar-number,
+    .monwui-serr-calendar-day.is-muted .monwui-serr-calendar-dot,
+    .monwui-serr-calendar-day.is-muted .monwui-serr-calendar-more {
+      opacity: .48;
+    }
+    .monwui-serr-calendar-day.is-muted .monwui-serr-calendar-popover {
+      opacity: 1;
+    }
+    .monwui-serr-calendar-day.is-today {
+      border-color: var(--jf-notif-accent, var(--notif-accent, #60a5fa));
+    }
+    .monwui-serr-calendar-number {
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .monwui-serr-calendar-dots {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .monwui-serr-calendar-dot-wrap {
+      align-items: center;
+      cursor: pointer;
+      display: inline-flex;
+      height: 16px;
+      justify-content: center;
+      position: relative;
+      width: 16px;
+    }
+    .monwui-serr-calendar-more {
+      color: var(--jf-notif-subtext, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      font-size: 10px;
+      line-height: 1;
+    }
+    .monwui-serr-calendar-popover {
+      -webkit-backdrop-filter: blur(12px);
+      backdrop-filter: blur(12px);
+      background: transparent;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 10px;
+      box-shadow: 0 18px 40px rgba(0,0,0,.34);
+      color: var(--jf-notif-subtext, rgba(255,255,255,.68));
+      display: none;
+      gap: 8px;
+      isolation: isolate;
+      left: 50%;
+      min-width: min(310px, calc(100vw - 40px));
+      overflow: hidden;
+      padding: 10px;
+      position: absolute;
+      top: calc(100% - 1px);
+      transform: translateX(-50%);
+      width: min(360px, calc(100vw - 40px));
+      z-index: 40;
+    }
+    .monwui-serr-calendar-popover-bg {
+      inset: -18px;
+      opacity: .28;
+      overflow: hidden;
+      pointer-events: none;
+      position: absolute;
+      z-index: 0;
+    }
+    .monwui-serr-calendar-popover-bg img {
+      filter: blur(12px) saturate(1.12) contrast(1.04);
+      height: 100%;
+      object-fit: cover;
+      transform: scale(1.08);
+      width: 100%;
+    }
+    .monwui-serr-calendar-day.is-left-edge .monwui-serr-calendar-popover {
+      left: 0;
+      transform: none;
+    }
+    .monwui-serr-calendar-day.is-right-edge .monwui-serr-calendar-popover {
+      left: auto;
+      right: 0;
+      transform: none;
+    }
+    .monwui-serr-calendar-day.is-bottom-row .monwui-serr-calendar-popover {
+      bottom: calc(100% - 1px);
+      top: auto;
+    }
+    .monwui-serr-calendar-dot-wrap.is-ready:hover .monwui-serr-calendar-popover,
+    .monwui-serr-calendar-dot-wrap.is-ready.is-open .monwui-serr-calendar-popover {
+      display: grid;
+      z-index: 999;
+    }
+    .monwui-serr-calendar-event {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 54px minmax(0, 1fr);
+      position: relative;
+      z-index: 1;
+    }
+    .monwui-serr-calendar-links {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      justify-content: center;
+      margin-top: 8px;
+    }
+    .monwui-serr-calendar-link {
+      align-items: center;
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 8px;
+      box-sizing: border-box;
+      display: inline-flex;
+      height: 28px;
+      justify-content: center;
+      padding: 5px;
+      transition: background .16s ease,border-color .16s ease,transform .16s ease;
+      width: 28px;
+    }
+    .monwui-serr-calendar-link:hover,
+    .monwui-serr-calendar-link:focus-visible {
+      background: rgba(255,255,255,.2);
+      border-color: rgba(255,255,255,.34);
+      outline: none;
+      transform: translateY(-1px);
+    }
+    .monwui-serr-calendar-link img {
+      display: block;
+      max-height: 18px;
+      max-width: 18px;
+      object-fit: contain;
+    }
+    .monwui-serr-calendar-event-poster {
+      align-items: center;
+      aspect-ratio: 2 / 3;
+      background: color-mix(in srgb, var(--jf-notif-accent, #60a5fa) 18%, transparent);
+      border: 1px solid var(--jf-notif-border, rgba(255,255,255,.12));
+      border-radius: 7px;
+      color: var(--jf-notif-subtext, rgba(255,255,255,.68));
+      display: flex;
+      justify-content: center;
+      overflow: hidden;
+      width: 54px;
+    }
+    .monwui-serr-calendar-event-poster img {
+      display: block;
+      height: 100%;
+      object-fit: cover;
+      width: 100%;
+    }
+    .monwui-serr-calendar-event-poster i {
+      font-size: 18px;
+    }
+    .monwui-serr-calendar-event strong,
+    .monwui-serr-calendar-event small {
+      overflow-wrap: anywhere;
+    }
+    .monwui-serr-calendar-event strong {
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      font-size: 13px;
+      line-height: 1.25;
+      display: flex;
+      text-align: center;
+      align-items: center;
+      justify-content: center;
+    }
+    .monwui-serr-calendar-event small {
+      color: var(--jf-notif-subtext, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      color: var(--jf-notif-subtext, rgba(255,255,255,.68));
+      font-size: 11px;
+      line-height: 1.35;
+      display: flex;
+      padding: 10px;
+      justify-content: center;
+      align-items: center;
+    }
+    .monwui-serr-calendar-loading,
+    .monwui-serr-calendar-empty,
+    .monwui-serr-calendar-error {
+      color: var(--jf-notif-subtext, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      padding: 28px;
+      text-align: center;
+    }
+    .monwui-serr-calendar-error {
+      color: #ef4444;
+    }
+    @media (max-width: 640px) {
+      .monwui-serr-calendar-dialog {
+        border-radius: 0;
+        height: 100dvh;
+        max-height: 100dvh;
+        width: 100vw;
+      }
+      .monwui-serr-calendar-modal {
+        padding: 0;
+      }
+      .monwui-serr-calendar-head {
+        align-items: center;
+        gap: 6px;
+        display: flex;
+        justify-content: space-between;
+        min-height: 48px;
+        padding: calc(7px + env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left));
+      }
+      .monwui-serr-calendar-title {
+        font-size: 14px;
+        line-height: 1.15;
+        min-width: 0;
+        overflow: hidden;
+        overflow-wrap: normal;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .monwui-serr-calendar-nav,
+      .monwui-serr-calendar-close {
+        box-sizing: border-box;
+        font-size: 14px;
+        height: 32px;
+        line-height: 1;
+        min-height: 0 !important;
+        min-width: 0 !important;
+        padding: 0 !important;
+        width: 32px;
+      }
+      .monwui-serr-calendar-close {
+        font-size: 19px;
+      }
+      .monwui-serr-calendar-body {
+        gap: 6px;
+        grid-template-rows: auto minmax(0, 1fr);
+        overflow: auto;
+        padding: 8px;
+      }
+      .monwui-serr-calendar-legend {
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 0 -8px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding: 0 8px 4px;
+        scrollbar-width: none;
+        white-space: nowrap;
+        align-items: center;
+        justify-content: center;
+        align-content: center;
+      }
+      .monwui-serr-calendar-legend::-webkit-scrollbar {
+        display: none;
+      }
+      .monwui-serr-calendar-legend > span {
+        flex: 0 0 auto;
+        font-size: 10px;
+        gap: 4px;
+        line-height: 1;
+        padding: 5px 7px;
+      }
+      .monwui-serr-calendar-grid {
+        gap: 3px;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        min-width: 0;
+        overflow: visible;
+        padding: 12px;
+      }
+      .monwui-serr-calendar-weekday {
+        font-size: 9px;
+        padding: 0 1px 1px;
+      }
+      .monwui-serr-calendar-day {
+        border-radius: 6px;
+        min-height: 49px;
+        min-width: 0;
+        padding: 4px 3px;
+      }
+      .monwui-serr-calendar-number {
+        font-size: 11px;
+        line-height: 1;
+      }
+      .monwui-serr-calendar-dots {
+        gap: 1px;
+        margin-top: 5px;
+      }
+      .monwui-serr-calendar-dot-wrap {
+        height: 12px;
+        width: 12px;
+      }
+      .monwui-serr-calendar-dot {
+        height: 6px;
+        width: 6px;
+      }
+      .monwui-serr-calendar-more {
+        font-size: 9px;
+      }
+      .monwui-serr-calendar-popover {
+        min-width: min(280px, calc(100vw - 24px));
+        width: min(320px, calc(100vw - 24px));
+      }
+      .monwui-serr-calendar-event {
+        grid-template-columns: 46px minmax(0, 1fr);
+      }
+      .monwui-serr-calendar-event-poster {
+        width: 46px;
+      }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+function calendarServiceColor(service) {
+  return text(service).toLowerCase() === "radarr" ? "#f59e0b" : "#60a5fa";
+}
+
+function calendarServiceLabel(service) {
+  return text(service).toLowerCase() === "radarr"
+    ? L("serrCalendarRadarr", "Radarr")
+    : L("serrCalendarSonarr", "Sonarr");
+}
+
+function normalizeCalendarStatusKey(status) {
+  switch (text(status).toLowerCase()) {
+    case "available":
+    case "completed":
+      return "completed";
+    case "missing":
+      return "missing";
+    case "processing":
+      return "processing";
+    case "approved":
+      return "approved";
+    case "pending":
+      return "pending";
+    case "requested":
+      return "requested";
+    case "unmonitored":
+      return "unmonitored";
+    case "declined":
+      return "declined";
+    case "failed":
+      return "failed";
+    case "withdrawn":
+      return "withdrawn";
+    case "upcoming":
+    default:
+      return "upcoming";
+  }
+}
+
+function calendarNumericId(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function findCalendarRequest(event) {
+  const mediaType = calendarMediaType(event);
+  const tmdbId = calendarNumericId(readFirst(event, "tmdbId", "TmdbId"));
+  const tvdbId = calendarNumericId(readFirst(event, "tvdbId", "TvdbId"));
+  const requests = cachedRequests;
+
+  return requests.find((req) => {
+    if (requestMediaType(req) !== mediaType) return false;
+    if (mediaType === "movie") return tmdbId > 0 && requestMediaId(req) === tmdbId;
+    const reqTvdbId = calendarNumericId(readFirst(req, "TvdbId", "tvdbId"));
+    return (tvdbId > 0 && reqTvdbId === tvdbId) || (tmdbId > 0 && requestMediaId(req) === tmdbId);
+  }) || null;
+}
+
+function calendarRequestStatus(event) {
+  const cached = findCalendarRequest(event);
+  return text(readFirst(cached, "Status", "status") || readFirst(event, "requestStatus", "RequestStatus"));
+}
+
+function calendarDotStatusKey(event) {
+  const requestStatus = calendarRequestStatus(event);
+  if (requestStatus) return normalizeCalendarStatusKey(requestStatus);
+  return normalizeCalendarStatusKey(readFirst(event, "status", "Status"));
+}
+
+function calendarStatusColor(status) {
+  switch (normalizeCalendarStatusKey(status)) {
+    case "completed": return "#22c55e";
+    case "missing": return "#ef4444";
+    case "processing": return "#a855f7";
+    case "approved": return "#14b8a6";
+    case "pending": return "#facc15";
+    case "requested": return "#38bdf8";
+    case "unmonitored": return "#94a3b8";
+    case "declined": return "#fb7185";
+    case "failed": return "#dc2626";
+    case "withdrawn": return "#64748b";
+    case "upcoming":
+    default: return "#c084fc";
+  }
+}
+
+function calendarDotStyle(event) {
+  return `--dot-service:${calendarServiceColor(event?.service)};--dot-status:${calendarStatusColor(calendarDotStatusKey(event))};`;
+}
+
+function calendarLegendDot(label, color) {
+  const safeColor = escapeHtml(color);
+  return `<span><span class="monwui-serr-calendar-dot" style="--dot:${safeColor};--dot-bg:${safeColor};background:${safeColor};background-color:${safeColor}"></span>${escapeHtml(label)}</span>`;
+}
+
+function calendarLegendHtml() {
+  return [
+    calendarLegendDot(calendarServiceLabel("sonarr"), calendarServiceColor("sonarr")),
+    calendarLegendDot(calendarServiceLabel("radarr"), calendarServiceColor("radarr")),
+    calendarLegendDot(L("serrCalendarMissing", "Eksik"), calendarStatusColor("missing")),
+    calendarLegendDot(L("serrCalendarUpcoming", "Yakında"), calendarStatusColor("upcoming")),
+    calendarLegendDot(statusLabel("pending"), calendarStatusColor("pending")),
+    calendarLegendDot(statusLabel("approved"), calendarStatusColor("approved")),
+    calendarLegendDot(statusLabel("processing"), calendarStatusColor("processing")),
+    calendarLegendDot(statusLabel("completed"), calendarStatusColor("completed")),
+    calendarLegendDot(L("serrCalendarUnmonitored", "İzlenmiyor"), calendarStatusColor("unmonitored"))
+  ].join("");
+}
+
+function servicePopoverClass(service) {
+  return text(service).toLowerCase() === "radarr" ? "is-radarr" : "is-sonarr";
+}
+
+function calendarPosterUrl(event) {
+  return imageUrl(readFirst(event, "posterUrl", "posterPath", "poster_path", "image", "thumbnail"), "w185");
+}
+
+const CALENDAR_ICON_BASE = "./slider/src/images/";
+
+function safeExternalUrl(value) {
+  const clean = text(value);
+  return /^https?:\/\//i.test(clean) ? clean : "";
+}
+
+function calendarId(value) {
+  const clean = text(value);
+  if (!clean || clean === "0") return "";
+  return clean;
+}
+
+function calendarMediaType(event) {
+  return text(readFirst(event, "mediaType", "MediaType")).toLowerCase() === "tv" ? "tv" : "movie";
+}
+
+function calendarProviderUrl(provider, id, mediaType) {
+  const cleanId = calendarId(id);
+  if (!cleanId) return "";
+  const encoded = encodeURIComponent(cleanId);
+  switch (provider) {
+    case "imdb":
+      return `https://www.imdb.com/title/${encoded}/`;
+    case "tmdb":
+      return `https://www.themoviedb.org/${mediaType === "tv" ? "tv" : "movie"}/${encoded}`;
+    case "tvdb":
+      return `https://www.thetvdb.com/dereferrer/${mediaType === "tv" ? "series" : "movie"}/${encoded}`;
+    default:
+      return "";
+  }
+}
+
+function calendarIconLink({ key, label, url }) {
+  const cleanUrl = safeExternalUrl(url);
+  if (!cleanUrl) return "";
+  const cleanKey = text(key).toLowerCase();
+  const cleanLabel = text(label, cleanKey.toUpperCase());
+  return `
+    <a class="monwui-serr-calendar-link ${escapeHtml(cleanKey)}" href="${escapeHtml(cleanUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(cleanLabel)}" aria-label="${escapeHtml(cleanLabel)}">
+      <img src="${CALENDAR_ICON_BASE}${escapeHtml(cleanKey)}.svg" alt="">
+    </a>
+  `;
+}
+
+function renderCalendarLinks(event) {
+  const mediaType = calendarMediaType(event);
+  const service = text(readFirst(event, "service", "Service")).toLowerCase();
+  const links = [];
+  const arrUrl = safeExternalUrl(readFirst(event, "arrUrl", "ArrUrl"));
+  const serrUrl = safeExternalUrl(readFirst(event, "serrUrl", "SerrUrl"));
+  const tmdbId = calendarId(readFirst(event, "tmdbId", "TmdbId"));
+  const imdbId = calendarId(readFirst(event, "imdbId", "ImdbId"));
+  const tvdbId = calendarId(readFirst(event, "tvdbId", "TvdbId"));
+
+  if (arrUrl) {
+    links.push(calendarIconLink({
+      key: service === "radarr" ? "radarr" : "sonarr",
+      label: calendarServiceLabel(service),
+      url: arrUrl
+    }));
+  }
+  if (serrUrl) links.push(calendarIconLink({ key: "seerr", label: "Seerr", url: serrUrl }));
+  if (tmdbId) links.push(calendarIconLink({ key: "tmdb", label: "TMDb", url: calendarProviderUrl("tmdb", tmdbId, mediaType) }));
+  if (imdbId) links.push(calendarIconLink({ key: "imdb", label: "IMDb", url: calendarProviderUrl("imdb", imdbId, mediaType) }));
+  if (tvdbId) links.push(calendarIconLink({ key: "tvdb", label: "TVDb", url: calendarProviderUrl("tvdb", tvdbId, mediaType) }));
+
+  const html = links.filter(Boolean).join("");
+  return html ? `<span class="monwui-serr-calendar-links">${html}</span>` : "";
+}
+
+function normalizedCalendarText(value) {
+  return text(value)
+    .toLowerCase()
+    .replace(/[•|/\\-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pushUniqueCalendarPart(parts, value) {
+  const clean = text(value);
+  if (!clean) return;
+  const normalized = normalizedCalendarText(clean);
+  if (!normalized || parts.some((part) => normalizedCalendarText(part) === normalized)) return;
+  parts.push(clean);
+}
+
+function calendarSubtitle(event, service, title) {
+  let subtitle = text(event?.subtitle);
+  if (!subtitle) return "";
+  if (subtitle.toLowerCase().startsWith(service.toLowerCase())) {
+    subtitle = subtitle.slice(service.length).replace(/^\s*(?:[•:|/\\-]\s*)?/, "").trim();
+  }
+  if (!subtitle) return "";
+  const normalizedSubtitle = normalizedCalendarText(subtitle);
+  const normalizedTitle = normalizedCalendarText(title);
+  if (normalizedSubtitle && normalizedTitle.includes(normalizedSubtitle)) return "";
+  return subtitle;
+}
+
+function renderCalendarEvent(event) {
+  const service = calendarServiceLabel(event?.service);
+  const status = calendarStatusLabel(event?.status);
+  const release = calendarReleaseLabel(event?.releaseType);
+  const requestStatusValue = calendarRequestStatus(event);
+  const requestStatus = requestStatusValue ? statusLabel(requestStatusValue) : "";
+  const title = text(event?.title, L("serrUntitled", "İçerik"));
+  const metaParts = [];
+  pushUniqueCalendarPart(metaParts, service);
+  pushUniqueCalendarPart(metaParts, release);
+  pushUniqueCalendarPart(metaParts, status);
+  pushUniqueCalendarPart(metaParts, requestStatus);
+  const meta = metaParts.join(" • ");
+  const subtitle = calendarSubtitle(event, service, title);
+  const poster = calendarPosterUrl(event);
+  return `
+    <div class="monwui-serr-calendar-event">
+      <span class="monwui-serr-calendar-event-poster">
+        ${poster
+          ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`
+          : `<i class="fas fa-clapperboard" aria-hidden="true"></i>`}
+      </span>
+      <span>
+        <strong>${escapeHtml(title)}</strong>
+        <small>${escapeHtml(meta)}</small>
+        ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ""}
+        ${renderCalendarLinks(event)}
+      </span>
+    </div>
+  `;
+}
+
+function renderCalendarDot(event) {
+  const title = text(event?.title, L("serrUntitled", "İçerik"));
+  const poster = calendarPosterUrl(event);
+  return `
+    <span class="monwui-serr-calendar-dot-wrap" role="button" tabindex="0" data-serr-calendar-event-dot aria-label="${escapeHtml(title)}">
+      <span class="monwui-serr-calendar-dot is-split" style="${escapeHtml(calendarDotStyle(event))}" title="${escapeHtml(title)}"></span>
+      <span class="monwui-serr-calendar-popover ${escapeHtml(servicePopoverClass(event?.service))}" role="tooltip">
+        ${poster ? `<span class="monwui-serr-calendar-popover-bg" aria-hidden="true"><img src="${escapeHtml(poster)}" alt="" loading="lazy" decoding="async"></span>` : ""}
+        ${renderCalendarEvent(event)}
+      </span>
+    </span>
+  `;
+}
+
+function calendarPopoverImageUrls(dot) {
+  const popover = dot?.querySelector?.(".monwui-serr-calendar-popover");
+  if (!popover) return [];
+  const seen = new Set();
+  const urls = [];
+  popover.querySelectorAll("img").forEach((img) => {
+    const url = text(img.currentSrc || img.getAttribute("src") || img.src);
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    urls.push(url);
+  });
+  return urls;
+}
+
+function waitForCalendarImage(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok === true);
+    };
+    const timer = setTimeout(() => finish(false), CALENDAR_IMAGE_READY_TIMEOUT_MS);
+    img.onload = () => finish(true);
+    img.onerror = () => finish(false);
+    img.decoding = "async";
+    img.src = url;
+    if (img.complete) finish(img.naturalWidth > 0);
+  });
+}
+
+function replaceFailedCalendarImages(dot, failedUrls) {
+  if (!dot || !failedUrls?.length) return;
+  const failed = new Set(failedUrls);
+  dot.querySelectorAll(".monwui-serr-calendar-popover img").forEach((img) => {
+    const url = text(img.currentSrc || img.getAttribute("src") || img.src);
+    if (!failed.has(url)) return;
+    const bg = img.closest(".monwui-serr-calendar-popover-bg");
+    if (bg) {
+      bg.remove();
+      return;
+    }
+    const poster = img.closest(".monwui-serr-calendar-event-poster");
+    if (poster) {
+      poster.innerHTML = `<i class="fas fa-clapperboard" aria-hidden="true"></i>`;
+      return;
+    }
+    img.remove();
+  });
+}
+
+function ensureCalendarDotImagesReady(dot) {
+  if (!dot) return Promise.resolve(false);
+  if (dot.classList.contains("is-ready")) return Promise.resolve(true);
+  if (dot.__monwuiCalendarReadyPromise) return dot.__monwuiCalendarReadyPromise;
+
+  const urls = calendarPopoverImageUrls(dot);
+  if (!urls.length) {
+    dot.classList.add("is-ready");
+    dot.setAttribute("data-serr-calendar-images-ready", "1");
+    return Promise.resolve(true);
+  }
+
+  dot.classList.add("is-loading");
+  dot.__monwuiCalendarReadyPromise = Promise.all(urls.map(async (url) => ({
+    url,
+    ok: await waitForCalendarImage(url)
+  }))).then((results) => {
+    if (!dot.isConnected) return false;
+    replaceFailedCalendarImages(dot, results.filter((item) => !item.ok).map((item) => item.url));
+    dot.classList.remove("is-loading");
+    dot.classList.add("is-ready");
+    dot.setAttribute("data-serr-calendar-images-ready", "1");
+    return true;
+  }).finally(() => {
+    dot.__monwuiCalendarReadyPromise = null;
+  });
+
+  return dot.__monwuiCalendarReadyPromise;
+}
+
+function closeCalendarDots(modal, exceptDot = null, exceptDay = null) {
+  modal?.querySelectorAll?.(".monwui-serr-calendar-dot-wrap.is-open, .monwui-serr-calendar-dot-wrap.is-open-pending").forEach((node) => {
+    if (node === exceptDot) return;
+    node.classList.remove("is-open", "is-open-pending");
+    node.__monwuiCalendarOpenToken = "";
+  });
+  modal?.querySelectorAll?.(".monwui-serr-calendar-day.is-open").forEach((node) => {
+    if (node !== exceptDay) node.classList.remove("is-open");
+  });
+}
+
+async function openCalendarDotAfterImages(dot, modal) {
+  if (!dot) return;
+  const day = dot.closest(".monwui-serr-calendar-day");
+  const token = `${Date.now()}:${Math.random()}`;
+  dot.__monwuiCalendarOpenToken = token;
+  dot.classList.add("is-open-pending");
+  closeCalendarDots(modal, dot, day);
+  const ready = await ensureCalendarDotImagesReady(dot);
+  if (!ready || !dot.isConnected || dot.__monwuiCalendarOpenToken !== token) return;
+  dot.classList.remove("is-open-pending");
+  dot.classList.add("is-open");
+  day?.classList?.add?.("is-open");
+}
+
+function renderCalendarDay(day, monthDate, events, dayIndex = 0) {
+  const key = dateKey(day);
+  const today = dateKey(new Date()) === key;
+  const muted = day.getMonth() !== monthDate.getMonth();
+  const col = dayIndex % 7;
+  const row = Math.floor(dayIndex / 7);
+  const classes = [
+    "monwui-serr-calendar-day",
+    muted ? "is-muted" : "",
+    today ? "is-today" : "",
+    events.length ? "has-events" : "",
+    col <= 1 ? "is-left-edge" : "",
+    col >= 5 ? "is-right-edge" : "",
+    row >= 4 ? "is-bottom-row" : ""
+  ].filter(Boolean).join(" ");
+  const visibleEvents = events.slice(0, 7);
+  const dots = visibleEvents.map(renderCalendarDot).join("");
+  return `
+    <div class="${escapeHtml(classes)}" tabindex="0" data-serr-calendar-day="${escapeHtml(key)}">
+      <div class="monwui-serr-calendar-number">${escapeHtml(String(day.getDate()))}</div>
+      ${events.length ? `<div class="monwui-serr-calendar-dots">${dots}${events.length > visibleEvents.length ? `<span class="monwui-serr-calendar-more">+${events.length - visibleEvents.length}</span>` : ""}</div>` : ""}
+    </div>
+  `;
+}
+
+function ensureSerrCalendarModal() {
+  ensureSerrCalendarStyles();
+  let modal = document.getElementById("monwuiSerrCalendarModal");
+  if (modal) return modal;
+
+  modal = document.createElement("div");
+  modal.id = "monwuiSerrCalendarModal";
+  modal.className = "monwui-serr-calendar-modal";
+  modal.setAttribute("aria-hidden", "true");
+  modal.__calendarMonth = startOfMonth(new Date());
+  modal.innerHTML = `
+    <div class="monwui-serr-calendar-backdrop" data-serr-calendar-close></div>
+    <div class="monwui-serr-calendar-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(L("serrCalendarTitle", "Arr Takvimi"))}">
+      <div class="monwui-serr-calendar-head">
+        <button type="button" class="monwui-serr-calendar-nav" data-serr-calendar-prev aria-label="${escapeHtml(L("previous", "Önceki"))}"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
+        <button type="button" class="monwui-serr-calendar-nav" data-serr-calendar-today aria-label="${escapeHtml(L("today", "Bugün"))}"><i class="fas fa-calendar-day" aria-hidden="true"></i></button>
+        <div class="monwui-serr-calendar-title" data-serr-calendar-title></div>
+        <button type="button" class="monwui-serr-calendar-nav" data-serr-calendar-next aria-label="${escapeHtml(L("next", "Sonraki"))}"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
+        <button type="button" class="monwui-serr-calendar-close" data-serr-calendar-close aria-label="${escapeHtml(L("close", "Kapat"))}">×</button>
+      </div>
+      <div class="monwui-serr-calendar-body">
+        <div class="monwui-serr-calendar-legend">
+          ${calendarLegendHtml()}
+        </div>
+        <div class="monwui-serr-calendar-grid" data-serr-calendar-grid></div>
+      </div>
+    </div>
+  `;
+
+  modal.addEventListener("click", (event) => {
+    if (event.target?.closest?.(".monwui-serr-calendar-link")) {
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-calendar-close]")) {
+      closeSerrCalendarModal();
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-calendar-prev]")) {
+      modal.__calendarMonth = addMonths(modal.__calendarMonth || new Date(), -1);
+      void renderSerrCalendarModal(modal);
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-calendar-next]")) {
+      modal.__calendarMonth = addMonths(modal.__calendarMonth || new Date(), 1);
+      void renderSerrCalendarModal(modal);
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-calendar-today]")) {
+      modal.__calendarMonth = startOfMonth(new Date());
+      void renderSerrCalendarModal(modal);
+      return;
+    }
+    const dot = event.target?.closest?.("[data-serr-calendar-event-dot]");
+    if (dot) {
+      const day = dot.closest(".monwui-serr-calendar-day");
+      const willOpen = !dot.classList.contains("is-open");
+      if (!willOpen) {
+        dot.classList.remove("is-open", "is-open-pending");
+        dot.__monwuiCalendarOpenToken = "";
+        day?.classList?.remove?.("is-open");
+        return;
+      }
+      void openCalendarDotAfterImages(dot, modal);
+    }
+  });
+  modal.addEventListener("mouseover", (event) => {
+    const dot = event.target?.closest?.("[data-serr-calendar-event-dot]");
+    if (dot) void ensureCalendarDotImagesReady(dot);
+  });
+  modal.addEventListener("focusin", (event) => {
+    const dot = event.target?.closest?.("[data-serr-calendar-event-dot]");
+    if (dot) void ensureCalendarDotImagesReady(dot);
+  });
+  modal.addEventListener("keydown", (event) => {
+    const dot = event.target?.closest?.("[data-serr-calendar-event-dot]");
+    if (dot && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      dot.click();
+      return;
+    }
+    if (event.key === "Escape") {
+      closeSerrCalendarModal();
+    }
+  });
+  document.body.appendChild(modal);
+  return modal;
+}
+
+function closeSerrCalendarModal() {
+  const modal = document.getElementById("monwuiSerrCalendarModal");
+  if (!modal) return;
+  closeCalendarDots(modal);
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+async function openSerrCalendarModal() {
+  const modal = ensureSerrCalendarModal();
+  modal.__calendarMonth = modal.__calendarMonth || startOfMonth(new Date());
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+  await renderSerrCalendarModal(modal);
+}
+
+async function renderSerrCalendarModal(modal) {
+  const month = startOfMonth(modal.__calendarMonth || new Date());
+  modal.__calendarMonth = month;
+  const title = modal.querySelector("[data-serr-calendar-title]");
+  const grid = modal.querySelector("[data-serr-calendar-grid]");
+  if (title) title.textContent = monthTitle(month);
+  if (!grid) return;
+  grid.innerHTML = `<div class="monwui-serr-calendar-loading" style="grid-column:1/-1">${escapeHtml(L("loadingText", "Yükleniyor..."))}</div>`;
+
+  const range = calendarRange(month);
+  try {
+    const [data] = await Promise.all([
+      getArrCalendar({ start: dateKey(range.start), end: dateKey(range.end) }),
+      refresh({ render: false }).catch(() => null)
+    ]);
+    const events = Array.isArray(data?.events) ? data.events : [];
+    const byDay = new Map();
+    for (const event of events) {
+      const parsed = parseEventDate(event?.date);
+      if (!parsed) continue;
+      const key = dateKey(parsed);
+      if (!byDay.has(key)) byDay.set(key, []);
+      byDay.get(key).push(event);
+    }
+    const days = Array.from({ length: 42 }, (_, index) => addDays(range.start, index));
+    grid.innerHTML = [
+      ...weekdayLabels().map((label) => `<div class="monwui-serr-calendar-weekday">${escapeHtml(label)}</div>`),
+      ...days.map((day, index) => renderCalendarDay(day, month, byDay.get(dateKey(day)) || [], index))
+    ].join("");
+    if (!events.length) {
+      grid.insertAdjacentHTML("beforeend", `<div class="monwui-serr-calendar-empty" style="grid-column:1/-1">${escapeHtml(L("serrCalendarEmpty", "Bu aralıkta takvim kaydı yok."))}</div>`);
+    }
+  } catch (error) {
+    grid.innerHTML = `<div class="monwui-serr-calendar-error" style="grid-column:1/-1">${escapeHtml(error?.message || L("serrRequestFailed", "İşlem tamamlanamadı."))}</div>`;
+  }
+}
+
 function statusLabel(status) {
   switch (text(status).toLowerCase()) {
     case "pending": return L("serrStatusPending", "Onay bekliyor");
@@ -301,8 +1389,8 @@ function percentValue(value) {
 
 function serviceLabel(value) {
   const clean = text(value).toLowerCase();
-  if (clean === "radarr") return "Radarr";
-  if (clean === "sonarr") return "Sonarr";
+  if (clean === "radarr") return L("serrCalendarRadarr", "Radarr");
+  if (clean === "sonarr") return L("serrCalendarSonarr", "Sonarr");
   return clean ? clean : "Arr";
 }
 
@@ -584,12 +1672,23 @@ export function removeSerrNotificationsTab() {
   }
 }
 
+function serrToolsHtml() {
+  return `
+    <button type="button" class="monwui-serr-manage-btn" data-serr-open-manager>${escapeHtml(L("serrManageRequests", "İstekleri Yönet"))}</button>
+    <button type="button" class="monwui-serr-calendar-btn" data-serr-open-calendar title="${escapeHtml(L("serrCalendarTitle", "Arr Takvimi"))}">
+      <i class="fas fa-calendar-alt" aria-hidden="true"></i>
+      <span>${escapeHtml(L("serrCalendarButton", "Takvim"))}</span>
+    </button>
+  `;
+}
+
 export function ensureSerrNotificationsTab({ bindNotifTabButton } = {}) {
   if (!moduleEnabled()) {
     removeSerrNotificationsTab();
     return;
   }
   ensureSerrTabBadgeStyles();
+  ensureSerrCalendarStyles();
   const tabs = document.querySelector("#jfNotifModal .jf-notif-tabs");
   const contentHost = document.querySelector("#jfNotifModal .jf-notif-content");
   if (!tabs || !contentHost) return;
@@ -611,18 +1710,21 @@ export function ensureSerrNotificationsTab({ bindNotifTabButton } = {}) {
     pane.style.display = "none";
     pane.innerHTML = `
       <div class="monwui-serr-notif-tools">
-        <button type="button" class="monwui-serr-manage-btn" data-serr-open-manager>${escapeHtml(L("serrManageRequests", "İstekleri Yönet"))}</button>
+        ${serrToolsHtml()}
       </div>
       <div class="monwui-serr-notif-host" id="monwuiSerrNotifHost"></div>
     `;
     contentHost.appendChild(pane);
   }
 
-  if (!pane.querySelector("[data-serr-open-manager]")) {
-    const tools = document.createElement("div");
+  let tools = pane.querySelector(".monwui-serr-notif-tools");
+  if (!tools) {
+    tools = document.createElement("div");
     tools.className = "monwui-serr-notif-tools";
-    tools.innerHTML = `<button type="button" class="monwui-serr-manage-btn" data-serr-open-manager>${escapeHtml(L("serrManageRequests", "İstekleri Yönet"))}</button>`;
     pane.prepend(tools);
+  }
+  if (!tools.querySelector("[data-serr-open-manager]") || !tools.querySelector("[data-serr-open-calendar]")) {
+    tools.innerHTML = serrToolsHtml();
   }
 
   if (!pane.querySelector("#monwuiSerrNotifHost")) {
@@ -632,7 +1734,8 @@ export function ensureSerrNotificationsTab({ bindNotifTabButton } = {}) {
     pane.appendChild(host);
   }
 
-  bindSerrManagerButtons();
+  bindSerrManagerButtons(pane);
+  bindSerrCalendarButtons(pane);
 }
 
 export function renderSerrNotifications() {
@@ -678,6 +1781,18 @@ function bindSerrManagerButtons(scope = document) {
       event.preventDefault();
       event.stopPropagation();
       void openSerrRequestsModal();
+    });
+  });
+}
+
+function bindSerrCalendarButtons(scope = document) {
+  scope.querySelectorAll?.("[data-serr-open-calendar]").forEach((button) => {
+    if (button.__monwuiSerrCalendarBound) return;
+    button.__monwuiSerrCalendarBound = true;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void openSerrCalendarModal();
     });
   });
 }

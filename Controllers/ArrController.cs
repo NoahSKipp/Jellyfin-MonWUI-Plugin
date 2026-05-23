@@ -210,6 +210,86 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return Ok(new { ok = true, options });
         }
 
+        [HttpGet("calendar")]
+        public async Task<IActionResult> GetCalendar([FromQuery] string? start = null, [FromQuery] string? end = null, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null)
+            {
+                return userCheck.Result;
+            }
+
+            var cfg = GetConfig();
+            if (!cfg.EnableArrIntegration || (!cfg.ArrSonarrEnabled && !cfg.ArrRadarrEnabled))
+            {
+                return StatusCode(403, new { ok = false, error = "Arr integration is disabled." });
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var todayUtc = new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero);
+            var startDate = ParseCalendarDate(start) ?? todayUtc.AddDays(-7);
+            var endDate = ParseCalendarDate(end) ?? startDate.AddDays(75);
+            if (endDate < startDate)
+            {
+                (startDate, endDate) = (endDate, startDate);
+            }
+
+            if ((endDate - startDate).TotalDays > 180)
+            {
+                endDate = startDate.AddDays(180);
+            }
+
+            var events = new List<ArrCalendarItem>();
+            if (cfg.ArrSonarrEnabled && EnsureSonarrConnectionConfigured(cfg) is null)
+            {
+                await AppendSonarrCalendar(events, cfg, startDate, endDate, cancellationToken);
+            }
+            if (cfg.ArrRadarrEnabled && EnsureRadarrConnectionConfigured(cfg) is null)
+            {
+                await AppendRadarrCalendar(events, cfg, startDate, endDate, cancellationToken);
+            }
+
+            var requests = cfg.SerrRequests ?? new List<SerrRequestEntry>();
+            var payload = events
+                .OrderBy(item => item.SortDate)
+                .ThenBy(item => item.Title, StringComparer.OrdinalIgnoreCase)
+                .Select(item =>
+                {
+                    var request = FindCalendarRequest(requests, item);
+                    return new
+                    {
+                        id = item.Id,
+                        service = item.Service,
+                        mediaType = item.MediaType,
+                        title = item.Title,
+                        subtitle = item.Subtitle,
+                        date = item.Date,
+                        status = item.Status,
+                        releaseType = item.ReleaseType,
+                        monitored = item.Monitored,
+                        hasFile = item.HasFile,
+                        tmdbId = item.TmdbId,
+                        tvdbId = ResolveCalendarTvdbId(request, item),
+                        imdbId = item.ImdbId,
+                        overview = item.Overview,
+                        posterUrl = item.PosterUrl,
+                        arrUrl = item.ArrUrl,
+                        serrUrl = BuildSerrMediaWebUrl(cfg, item),
+                        requestStatus = request?.Status ?? string.Empty
+                    };
+                })
+                .ToList();
+
+            NoCache();
+            return Ok(new
+            {
+                ok = true,
+                start = startDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                end = endDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                events = payload
+            });
+        }
+
         [HttpPost("episode")]
         public async Task<IActionResult> RequestEpisode([FromBody] ArrEpisodeRequest? request, CancellationToken cancellationToken)
         {
@@ -385,6 +465,174 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 .Where(item => item.ValueKind == JsonValueKind.Object)
                 .Select(map)
                 .ToList();
+        }
+
+        private async Task AppendSonarrCalendar(List<ArrCalendarItem> output, JMSFusionConfiguration cfg, DateTimeOffset startDate, DateTimeOffset endDate, CancellationToken cancellationToken)
+        {
+            var path = "/calendar?" + BuildQueryString(new Dictionary<string, string>
+            {
+                ["start"] = CalendarDate(startDate),
+                ["end"] = CalendarDate(endDate),
+                ["includeSeries"] = "true",
+                ["includeEpisodeFile"] = "true",
+                ["includeEpisodeImages"] = "true"
+            });
+            var response = await SendSonarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken);
+            if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return;
+
+            foreach (var item in response.Payload.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                if (!TryReadDateAny(item, out var date, "airDateUtc", "airDate")) continue;
+                if (!DateInRange(date, startDate, endDate)) continue;
+
+                var series = TryReadObject(item, "series", out var seriesObject) ? seriesObject : default;
+                var seriesTitle = ReadStringAny(series, "title", "sortTitle");
+                var episodeTitle = ReadStringAny(item, "title");
+                var season = ReadIntValue(item, "seasonNumber");
+                var episode = ReadIntValue(item, "episodeNumber");
+                var code = season > 0 || episode > 0
+                    ? "S" + season.ToString("00", CultureInfo.InvariantCulture) + "E" + episode.ToString("00", CultureInfo.InvariantCulture)
+                    : string.Empty;
+                var title = string.Join(" - ", new[] { seriesTitle, code, episodeTitle }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                var hasFile = TryReadObject(item, "episodeFile", out _) || ReadBool(item, "hasFile");
+                var monitored = ReadBool(item, "monitored") || ReadBool(series, "monitored");
+                var tmdbId = ReadIntValue(series, "tmdbId");
+                var tvdbId = ReadIntValue(series, "tvdbId");
+                var imdbId = ReadStringAny(series, "imdbId");
+
+                output.Add(new ArrCalendarItem
+                {
+                    Id = "sonarr:" + ReadIntValue(item, "id").ToString(CultureInfo.InvariantCulture),
+                    Service = "sonarr",
+                    MediaType = "tv",
+                    Title = string.IsNullOrWhiteSpace(title) ? (seriesTitle.Length > 0 ? seriesTitle : "Episode") : title,
+                    Subtitle = "Sonarr" + (seriesTitle.Length > 0 ? " • " + seriesTitle : string.Empty),
+                    SortDate = date,
+                    Date = date.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
+                    Status = CalendarStatus(date, hasFile, monitored),
+                    ReleaseType = "air",
+                    Monitored = monitored,
+                    HasFile = hasFile,
+                    TmdbId = tmdbId,
+                    TvdbId = tvdbId,
+                    ImdbId = imdbId,
+                    Overview = ReadStringAny(item, "overview"),
+                    PosterUrl = ReadArrImageUrl(series),
+                    ArrUrl = BuildArrItemWebUrl(cfg.ArrSonarrBaseUrl, "series", ReadStringAny(series, "titleSlug"))
+                });
+            }
+        }
+
+        private async Task AppendRadarrCalendar(List<ArrCalendarItem> output, JMSFusionConfiguration cfg, DateTimeOffset startDate, DateTimeOffset endDate, CancellationToken cancellationToken)
+        {
+            var path = "/calendar?" + BuildQueryString(new Dictionary<string, string>
+            {
+                ["start"] = CalendarDate(startDate),
+                ["end"] = CalendarDate(endDate),
+                ["unmonitored"] = "true"
+            });
+            var response = await SendRadarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken);
+            if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return;
+
+            foreach (var item in response.Payload.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object) continue;
+                var tmdbId = ReadIntValue(item, "tmdbId");
+                var title = ReadStringAny(item, "title", "originalTitle");
+                var imdbId = ReadStringAny(item, "imdbId");
+                var hasFile = ReadBool(item, "hasFile") || TryReadObject(item, "movieFile", out _);
+                var monitored = ReadBool(item, "monitored");
+                var dates = new[]
+                {
+                    ("inCinemas", "cinema"),
+                    ("digitalRelease", "digital"),
+                    ("physicalRelease", "physical"),
+                    ("releaseDate", "release")
+                };
+                var seenDates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var (property, releaseType) in dates)
+                {
+                    if (!TryReadDateAny(item, out var date, property)) continue;
+                    if (!DateInRange(date, startDate, endDate)) continue;
+                    var dayKey = date.ToUniversalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                    if (!seenDates.Add(dayKey)) continue;
+
+                    output.Add(new ArrCalendarItem
+                    {
+                        Id = "radarr:" + (tmdbId > 0 ? tmdbId.ToString(CultureInfo.InvariantCulture) : ReadIntValue(item, "id").ToString(CultureInfo.InvariantCulture)) + ":" + releaseType,
+                        Service = "radarr",
+                        MediaType = "movie",
+                        Title = string.IsNullOrWhiteSpace(title) ? "Movie" : title,
+                        Subtitle = "Radarr",
+                        SortDate = date,
+                        Date = date.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture),
+                        Status = CalendarStatus(date, hasFile, monitored),
+                        ReleaseType = releaseType,
+                        Monitored = monitored,
+                        HasFile = hasFile,
+                        TmdbId = tmdbId,
+                        TvdbId = null,
+                        ImdbId = imdbId,
+                        Overview = ReadStringAny(item, "overview"),
+                        PosterUrl = ReadArrImageUrl(item),
+                        ArrUrl = BuildArrItemWebUrl(cfg.ArrRadarrBaseUrl, "movie", ReadStringAny(item, "titleSlug"))
+                    });
+                }
+            }
+        }
+
+        private static DateTimeOffset? ParseCalendarDate(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dto))
+            {
+                return new DateTimeOffset(dto.UtcDateTime.Date, TimeSpan.Zero);
+            }
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+            {
+                return new DateTimeOffset(DateTime.SpecifyKind(dt.Date, DateTimeKind.Utc));
+            }
+            return null;
+        }
+
+        private static string CalendarDate(DateTimeOffset value)
+            => value.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        private static bool DateInRange(DateTimeOffset value, DateTimeOffset startDate, DateTimeOffset endDate)
+        {
+            var day = new DateTimeOffset(value.UtcDateTime.Date, TimeSpan.Zero);
+            return day >= startDate && day <= endDate;
+        }
+
+        private static string CalendarStatus(DateTimeOffset date, bool hasFile, bool monitored)
+        {
+            if (hasFile) return "available";
+            if (!monitored) return "unmonitored";
+            return date > DateTimeOffset.UtcNow ? "upcoming" : "missing";
+        }
+
+        private static SerrRequestEntry? FindCalendarRequest(IEnumerable<SerrRequestEntry> requests, ArrCalendarItem item)
+        {
+            foreach (var req in requests ?? Array.Empty<SerrRequestEntry>())
+            {
+                if (!Same(req.MediaType, item.MediaType)) continue;
+                if (Same(req.Status, "declined") || Same(req.Status, "withdrawn")) continue;
+                if (item.MediaType == "movie" && item.TmdbId > 0 && req.MediaId == item.TmdbId) return req;
+                if (item.MediaType == "tv")
+                {
+                    if (item.TvdbId.HasValue && req.TvdbId.HasValue && req.TvdbId.Value == item.TvdbId.Value) return req;
+                    if (item.TmdbId > 0 && req.MediaId == item.TmdbId) return req;
+                }
+            }
+
+            return null;
+        }
+
+        private static int? ResolveCalendarTvdbId(SerrRequestEntry? request, ArrCalendarItem item)
+        {
+            if (request?.TvdbId.HasValue == true && request.TvdbId.Value > 0) return request.TvdbId.Value;
+            return item.TvdbId.HasValue && item.TvdbId.Value > 0 ? item.TvdbId.Value : null;
         }
 
         private async Task<SonarrEpisodeResult> RequestSonarrEpisode(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken)
@@ -927,6 +1175,37 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return Uri.TryCreate(raw.TrimEnd('/') + "/", UriKind.Absolute, out var api) ? api : null;
         }
 
+        private static string BuildArrItemWebUrl(string baseUrl, string section, string slug)
+        {
+            var webBase = BuildWebBaseUrl(baseUrl, "/api/v3");
+            if (string.IsNullOrWhiteSpace(webBase)) return string.Empty;
+            var cleanSection = (section ?? string.Empty).Trim().Trim('/');
+            var cleanSlug = (slug ?? string.Empty).Trim().Trim('/');
+            if (string.IsNullOrWhiteSpace(cleanSection) || string.IsNullOrWhiteSpace(cleanSlug)) return webBase;
+            return webBase + "/" + Uri.EscapeDataString(cleanSection) + "/" + Uri.EscapeDataString(cleanSlug);
+        }
+
+        private static string BuildSerrMediaWebUrl(JMSFusionConfiguration cfg, ArrCalendarItem item)
+        {
+            if (!cfg.EnableSerrIntegration || string.IsNullOrWhiteSpace(cfg.SerrBaseUrl) || item.TmdbId <= 0) return string.Empty;
+            var webBase = BuildWebBaseUrl(cfg.SerrBaseUrl, "/api/v1");
+            if (string.IsNullOrWhiteSpace(webBase)) return string.Empty;
+            var section = Same(item.MediaType, "tv") ? "tv" : "movie";
+            return webBase + "/" + section + "/" + item.TmdbId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildWebBaseUrl(string baseUrl, string apiSuffix)
+        {
+            var clean = NormalizeBaseUrlForStorage(baseUrl);
+            if (!Uri.TryCreate(clean, UriKind.Absolute, out var uri)) return string.Empty;
+            var raw = uri.ToString().TrimEnd('/');
+            if (!string.IsNullOrWhiteSpace(apiSuffix) && raw.EndsWith(apiSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                raw = raw[..^apiSuffix.Length].TrimEnd('/');
+            }
+            return raw;
+        }
+
         private static object BuildSettingsPayload(JMSFusionConfiguration cfg, bool includeSensitive)
             => new
             {
@@ -1028,6 +1307,12 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
         private static string NormalizeArrPath(string? value)
             => (value ?? string.Empty).Trim().TrimEnd('/', '\\');
 
+        private static bool Same(string? left, string? right)
+            => string.Equals(left ?? string.Empty, right ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        private static string BuildQueryString(Dictionary<string, string> values)
+            => string.Join("&", values.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+
         private static bool IsRadarrSequenceError(string? value)
             => (value ?? string.Empty).Contains("Sequence contains no matching element", StringComparison.OrdinalIgnoreCase);
 
@@ -1071,6 +1356,67 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return el.ValueKind == JsonValueKind.String && bool.TryParse(el.GetString(), out var value) && value;
         }
 
+        private static bool TryReadObject(JsonElement source, string property, out JsonElement value)
+        {
+            value = default;
+            return source.ValueKind == JsonValueKind.Object &&
+                   source.TryGetProperty(property, out value) &&
+                   value.ValueKind == JsonValueKind.Object;
+        }
+
+        private static bool TryReadDateAny(JsonElement source, out DateTimeOffset value, params string[] properties)
+        {
+            value = default;
+            if (source.ValueKind != JsonValueKind.Object) return false;
+            foreach (var property in properties)
+            {
+                if (!source.TryGetProperty(property, out var el)) continue;
+                if (el.ValueKind == JsonValueKind.String)
+                {
+                    var raw = el.GetString();
+                    if (string.IsNullOrWhiteSpace(raw)) continue;
+                    if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out value))
+                    {
+                        return true;
+                    }
+                    if (DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
+                    {
+                        value = new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc));
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static string ReadStringAny(JsonElement source, params string[] properties)
+        {
+            foreach (var property in properties)
+            {
+                var value = ReadString(source, property);
+                if (!string.IsNullOrWhiteSpace(value)) return value;
+            }
+
+            return string.Empty;
+        }
+
+        private static string ReadArrImageUrl(JsonElement item)
+        {
+            if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("images", out var images) || images.ValueKind != JsonValueKind.Array) return string.Empty;
+            var fallback = string.Empty;
+            foreach (var image in images.EnumerateArray())
+            {
+                if (image.ValueKind != JsonValueKind.Object) continue;
+                var url = ReadStringAny(image, "remoteUrl", "url");
+                if (string.IsNullOrWhiteSpace(url)) continue;
+                if (string.IsNullOrWhiteSpace(fallback)) fallback = url;
+                if (Same(ReadStringAny(image, "coverType"), "poster")) return url;
+            }
+
+            return fallback;
+        }
+
         private static string? ExtractError(string raw)
         {
             if (string.IsNullOrWhiteSpace(raw)) return null;
@@ -1099,6 +1445,27 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             catch {}
 
             return raw.Length > 500 ? raw[..500] : raw;
+        }
+
+        private sealed class ArrCalendarItem
+        {
+            public string Id { get; init; } = string.Empty;
+            public string Service { get; init; } = string.Empty;
+            public string MediaType { get; init; } = string.Empty;
+            public string Title { get; init; } = string.Empty;
+            public string Subtitle { get; init; } = string.Empty;
+            public DateTimeOffset SortDate { get; init; }
+            public string Date { get; init; } = string.Empty;
+            public string Status { get; init; } = string.Empty;
+            public string ReleaseType { get; init; } = string.Empty;
+            public bool Monitored { get; init; }
+            public bool HasFile { get; init; }
+            public int TmdbId { get; init; }
+            public int? TvdbId { get; init; }
+            public string ImdbId { get; init; } = string.Empty;
+            public string Overview { get; init; } = string.Empty;
+            public string PosterUrl { get; init; } = string.Empty;
+            public string ArrUrl { get; init; } = string.Empty;
         }
 
         private readonly struct ArrCallResult

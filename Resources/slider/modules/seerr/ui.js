@@ -2,7 +2,8 @@ import { getConfig } from "../config.js";
 import { getEffectiveLanguage, getLanguageLabels } from "../../language/index.js";
 import { showNotification } from "../player/ui/notification.js";
 import { requestMovieFromArr } from "../arr/requestFallback.js";
-import { createSerrRequest, getSerrAccess, getSerrMovieDetails, getSerrTvDetails, listSerrRequests, searchSerr } from "./api.js";
+import { createSerrRequest, getSerrAccess, getSerrCollectionDetails, getSerrMovieDetails, getSerrTvDetails, listSerrRequests, searchSerr, searchSerrCollections } from "./api.js";
+import { openSerrCollectionRequestModal } from "./itemPageBridge.js";
 import { ensureSerrStyles } from "./styles.js";
 
 let modalSearchAbort = null;
@@ -545,7 +546,7 @@ function resultTitle(result) {
 
 function resultMediaType(result) {
   const type = text(result?.mediaType || result?.media_type).toLowerCase();
-  return type === "tv" || type === "movie" ? type : "";
+  return type === "tv" || type === "movie" || type === "collection" ? type : "";
 }
 
 function resultYear(result) {
@@ -556,7 +557,10 @@ function resultYear(result) {
 }
 
 function resultMeta(result) {
-  const type = resultMediaType(result) === "tv" ? L("serrTv", "Dizi") : L("serrMovie", "Film");
+  const mediaType = resultMediaType(result);
+  const type = mediaType === "tv"
+    ? L("serrTv", "Dizi")
+    : (mediaType === "collection" ? L("boxset", "Koleksiyon") : L("serrMovie", "Film"));
   const tmdbId = Number(result?.id);
   return [type, resultYear(result), Number.isFinite(tmdbId) && tmdbId > 0 ? `TMDb ${tmdbId}` : ""].filter(Boolean).join(" • ");
 }
@@ -567,7 +571,12 @@ function parseTmdbSearch(value) {
   let type = "";
   if (/\/movie\//i.test(clean) || /\b(movie|film)\b/i.test(clean)) type = "movie";
   if (/\/tv\//i.test(clean) || /\b(tv|series|show|dizi)\b/i.test(clean)) type = "tv";
-  const match = clean.match(/^(?:https?:\/\/(?:www\.)?themoviedb\.org\/(?:movie|tv)\/|tmdb\s*[:#-]?\s*)?(\d{1,10})(?:[-/?#].*)?$/i);
+  if (/\/collection\//i.test(clean) || /\b(collection|boxset|box\s*set|koleksiyon)\b/i.test(clean)) type = "collection";
+  let match = clean.match(/^(?:https?:\/\/(?:www\.)?themoviedb\.org\/(?:movie|tv|collection)\/|tmdb\s*[:#-]?\s*)?(\d{1,10})(?:[-/?#].*)?$/i);
+  if (!match && type === "collection") {
+    const ids = clean.match(/\b\d{1,10}\b/g) || [];
+    if (ids.length === 1) match = [ids[0], ids[0]];
+  }
   if (!match) return null;
   const id = Number(match[1]);
   return Number.isFinite(id) && id > 0 ? { id: Math.floor(id), type } : null;
@@ -575,7 +584,7 @@ function parseTmdbSearch(value) {
 
 function normalizeTmdbDetail(raw, mediaType, id) {
   if (!raw || typeof raw !== "object") return null;
-  const title = text(raw?.title || raw?.name || raw?.originalTitle || raw?.originalName);
+  const title = text(raw?.title || raw?.name || raw?.originalTitle || raw?.originalName || raw?.original_name);
   const resolvedId = Number(raw?.id) || id;
   if (!title || !Number.isFinite(resolvedId) || resolvedId <= 0) return null;
   return {
@@ -593,6 +602,9 @@ async function searchSerrByTmdbId({ id, type, language }) {
   }
   if (!type || type === "tv") {
     jobs.push(getSerrTvDetails(id, { language }).then((raw) => normalizeTmdbDetail(raw, "tv", id)).catch(() => null));
+  }
+  if (!type || type === "collection") {
+    jobs.push(getSerrCollectionDetails(id, { language }).then((raw) => normalizeTmdbDetail(raw, "collection", id)).catch(() => null));
   }
   const rows = (await Promise.all(jobs)).filter(Boolean);
   const seen = new Set();
@@ -625,16 +637,20 @@ function mergeSearchResults(...lists) {
 function balancedSearchResults(results = [], limit = 30) {
   const movies = [];
   const tv = [];
+  const collections = [];
   const other = [];
   for (const row of Array.isArray(results) ? results : []) {
     const type = resultMediaType(row);
     if (type === "movie") movies.push(row);
     else if (type === "tv") tv.push(row);
+    else if (type === "collection") collections.push(row);
     else other.push(row);
   }
 
   const output = [];
-  while (output.length < limit && (movies.length || tv.length)) {
+  while (output.length < limit && (movies.length || tv.length || collections.length)) {
+    if (collections.length) output.push(collections.shift());
+    if (output.length >= limit) break;
     if (movies.length) output.push(movies.shift());
     if (output.length >= limit) break;
     if (tv.length) output.push(tv.shift());
@@ -734,23 +750,27 @@ async function runModalSearch(modal) {
     }
     const language = access?.settings?.defaultLanguage || cfg()?.defaultLanguage || "";
     const tmdbSearch = parseTmdbSearch(query);
-    if (tmdbSearch && accessHasSerr(access)) {
-      const [tmdbResults, textData] = await Promise.all([
+    if (tmdbSearch) {
+      const [tmdbResults, textData, collectionData] = await Promise.all([
         searchSerrByTmdbId({ ...tmdbSearch, language }),
-        searchSerr(query, { language }).catch(() => null)
+        searchSerr(query, { language }).catch(() => null),
+        searchSerrCollections(query, { language }).catch(() => null)
       ]);
       const textResults = Array.isArray(textData?.results) ? textData.results : [];
-      renderSearchResults(host, mergeSearchResults(tmdbResults, textResults), { ...(modal.__serrOptions || {}), access });
+      const collectionResults = Array.isArray(collectionData?.results) ? collectionData.results : [];
+      renderSearchResults(host, mergeSearchResults(tmdbResults, collectionResults, textResults), { ...(modal.__serrOptions || {}), access });
       return;
     }
     const searchQuery = tmdbSearch ? `tmdb:${tmdbSearch.id}` : query;
 
-    const [page1, page2] = await Promise.all([
+    const [page1, page2, collections] = await Promise.all([
       searchSerr(searchQuery, { page: 1, language }),
-      searchSerr(searchQuery, { page: 2, language })
+      searchSerr(searchQuery, { page: 2, language }),
+      searchSerrCollections(query, { language }).catch(() => null)
     ]);
 
     const results = mergeSearchResults(
+      Array.isArray(collections?.results) ? collections.results : [],
       Array.isArray(page1?.results) ? page1.results : [],
       Array.isArray(page2?.results) ? page2.results : []
     );
@@ -794,6 +814,11 @@ function renderSearchResults(host, results, options = {}) {
       const old = btn.innerHTML;
       try {
         btn.disabled = true;
+        if (mediaType === "collection") {
+          btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span>${escapeHtml(L("loadingText", "Yükleniyor..."))}</span>`;
+          await openSerrCollectionRequestModal(result, { source: text(options.source, "search") });
+          return;
+        }
         const payload = {
           mediaType,
           mediaId: id,

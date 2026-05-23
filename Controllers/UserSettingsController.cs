@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace Jellyfin.Plugin.JMSFusion.Controllers
@@ -20,6 +21,128 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
         {
             p = (p ?? "").Trim().ToLowerInvariant();
             return (p == "mobile" || p == "m") ? "mobile" : "desktop";
+        }
+
+        private static readonly HashSet<string> DeniedSnapshotKeys = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "json-credentials",
+            "api-key",
+            "accessToken",
+            "serverId",
+            "userId",
+            "deviceId",
+            "sessionId",
+            "jf_serverAddress",
+            "jf_userId",
+            "jf_api_deviceId",
+            "jf_api_deviceName",
+            "persist_user_id",
+            "persist_device_id",
+            "persist_device_name",
+            "persist_server_id",
+            "serverAddress",
+            "currentUserIsAdmin",
+            "currentUserId",
+            "currentUserName",
+            "emby.device.id",
+            "emby.session.id",
+            "jellyfin_credentials",
+            "emby_credentials",
+            "jf_debug_api",
+            "jms:lastPlayNowDebug",
+            "jms_backdrop_index",
+            "userTopGenresCache",
+            "userTopGenres_v2"
+        };
+
+        private static readonly string[] DeniedSnapshotPrefixes =
+        {
+            "persist_",
+            "jf:",
+            "emby.",
+            "jms:debug:",
+            "jms:trace:",
+            "jms:focusedUserDataSync:",
+            "jms:last",
+            "jms_indexer_",
+            "studioHub_",
+            "avatar-"
+        };
+
+        private static bool ShouldPersistSnapshotKey(string? key)
+        {
+            var normalized = (key ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized)) return false;
+            if (DeniedSnapshotKeys.Contains(normalized)) return false;
+
+            foreach (var prefix in DeniedSnapshotPrefixes)
+            {
+                if (normalized.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return !normalized.Contains("token", StringComparison.OrdinalIgnoreCase)
+                && !normalized.Contains("credential", StringComparison.OrdinalIgnoreCase)
+                && !normalized.Contains("session", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string SerializeSanitizedSnapshot(JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object)
+            {
+                return "{}";
+            }
+
+            var filtered = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (!ShouldPersistSnapshotKey(prop.Name)) continue;
+                filtered[prop.Name] = prop.Value.Clone();
+            }
+
+            return JsonSerializer.Serialize(filtered);
+        }
+
+        private static string SanitizeSnapshotJson(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return "{}";
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                return SerializeSanitizedSnapshot(doc.RootElement);
+            }
+            catch
+            {
+                return "{}";
+            }
+        }
+
+        private static string SerializeSanitizedSnapshot(object? snapshot)
+        {
+            if (snapshot is JsonElement element)
+            {
+                return SerializeSanitizedSnapshot(element);
+            }
+
+            if (snapshot is null)
+            {
+                return "{}";
+            }
+
+            try
+            {
+                return SanitizeSnapshotJson(JsonSerializer.Serialize(snapshot));
+            }
+            catch
+            {
+                return "{}";
+            }
         }
 
         private static void EnsureMigrated(JMSFusionConfiguration cfg, JMSFusionPlugin plugin)
@@ -55,6 +178,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             var json = prof == "mobile"
                 ? (cfg.GlobalUserSettingsJsonMobile ?? "{}")
                 : (cfg.GlobalUserSettingsJsonDesktop ?? "{}");
+            var sanitizedJson = SanitizeSnapshotJson(json);
             var rev = prof == "mobile"
                 ? cfg.GlobalUserSettingsRevisionMobile
                 : cfg.GlobalUserSettingsRevisionDesktop;
@@ -62,7 +186,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             object globalObj;
             try
             {
-                globalObj = JsonSerializer.Deserialize<object>(json) ?? new();
+                globalObj = JsonSerializer.Deserialize<object>(sanitizedJson) ?? new();
             }
             catch
             {
@@ -94,16 +218,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             EnsureMigrated(cfg, plugin);
 
             var prof = NormalizeProfile(req.Profile ?? profile);
-            var json = JsonSerializer.Serialize(req.Global ?? new());
+            var json = SerializeSanitizedSnapshot(req.Global);
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             if (prof == "mobile")
             {
+                if (string.Equals(cfg.GlobalUserSettingsJsonMobile ?? "{}", json, StringComparison.Ordinal))
+                {
+                    NoCache();
+                    return Ok(new { ok = true, profile = prof, rev = cfg.GlobalUserSettingsRevisionMobile, skipped = true });
+                }
+
                 cfg.GlobalUserSettingsJsonMobile = json;
                 cfg.GlobalUserSettingsRevisionMobile = now;
             }
             else
             {
+                if (string.Equals(cfg.GlobalUserSettingsJsonDesktop ?? "{}", json, StringComparison.Ordinal))
+                {
+                    NoCache();
+                    return Ok(new { ok = true, profile = prof, rev = cfg.GlobalUserSettingsRevisionDesktop, skipped = true });
+                }
+
                 cfg.GlobalUserSettingsJsonDesktop = json;
                 cfg.GlobalUserSettingsRevisionDesktop = now;
             }

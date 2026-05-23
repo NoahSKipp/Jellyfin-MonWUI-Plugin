@@ -26,10 +26,12 @@ public class CinemaPreRollController : ControllerBase
         [FromQuery] string? language,
         [FromQuery] string? region,
         [FromQuery] string? regionMode,
+        [FromQuery] string? fallbackMode,
+        [FromQuery] string? fallbackRegion,
         [FromQuery] bool force,
         CancellationToken ct)
     {
-        var snapshot = await _cacheService.GetSnapshotAsync(language, region, regionMode, force, ct).ConfigureAwait(false);
+        var snapshot = await _cacheService.GetSnapshotAsync(language, region, regionMode, fallbackMode, fallbackRegion, force, ct).ConfigureAwait(false);
         ApplyUserParentalRatingFilter(snapshot);
         NoCache();
         return Ok(snapshot);

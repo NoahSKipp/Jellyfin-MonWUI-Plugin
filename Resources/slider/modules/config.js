@@ -737,7 +737,7 @@ export function getConfig() {
     useRandomContent: localStorage.getItem('useRandomContent') !== 'false',
     fullscreenMode: localStorage.getItem('fullscreenMode') === 'true' ? true : false,
     listLimit: 20,
-    version: "v3.1.0",
+    version: "v3.2.0",
     historySize: 20,
     updateInterval: 300000,
     nextTracksSource: localStorage.getItem('nextTracksSource') || 'playlist',
@@ -855,10 +855,10 @@ export function getConfig() {
       const storedValue = localStorage.getItem('cinemaPreRollRegionMode');
       const value = String(
         storedValue === null || storedValue === ''
-          ? (__globalOverride?.cinemaPreRollRegionMode || 'auto')
+          ? (__globalOverride?.cinemaPreRollRegionMode || 'custom')
           : storedValue
       ).trim().toLowerCase();
-      return value === 'global' || value === 'custom' ? value : 'auto';
+      return value === 'global' ? 'global' : 'custom';
     })(),
     cinemaPreRollCustomRegion: (() => {
       const storedValue = localStorage.getItem('cinemaPreRollCustomRegion');
@@ -872,6 +872,29 @@ export function getConfig() {
         .replace(/[^A-Z]/g, '')
         .slice(0, 2);
       return value.length === 2 ? value : '';
+    })(),
+    cinemaPreRollFallbackMode: (() => {
+      const storedValue = localStorage.getItem('cinemaPreRollFallbackMode');
+      const value = String(
+        storedValue === null || storedValue === ''
+          ? (__globalOverride?.cinemaPreRollFallbackMode || 'custom')
+          : storedValue
+      ).trim().toLowerCase();
+      if (value === 'none' || value === 'global') return value;
+      return 'custom';
+    })(),
+    cinemaPreRollFallbackRegion: (() => {
+      const storedValue = localStorage.getItem('cinemaPreRollFallbackRegion');
+      const value = String(
+        storedValue === null || storedValue === ''
+          ? (__globalOverride?.cinemaPreRollFallbackRegion || 'US')
+          : storedValue
+      )
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z]/g, '')
+        .slice(0, 2);
+      return value.length === 2 ? value : 'US';
     })(),
     enabledGmmp: localStorage.getItem('enabledGmmp') !== 'false',
     enableQualityBadges: localStorage.getItem('enableQualityBadges') !== 'false',
