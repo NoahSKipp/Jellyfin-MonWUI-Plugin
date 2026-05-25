@@ -18,6 +18,7 @@ const MAX_PREVIEW_CACHE = 200;
 const MAX_TOMBSTONES = 2000;
 export const AUTH_PROFILE_CHANGED_EVENT = "jms:auth-profile-changed";
 export const USERDATA_CHANGED_EVENT = "jms:userdata-changed";
+const PLAYBACK_START_REQUESTED_EVENT = "jms:playback-start-requested";
 const AUTH_SNAPSHOT_WARMUP_POLL_MS = 2000;
 const AUTH_SNAPSHOT_DEBUG_KEY = "jms_debug_auth_snapshot";
 
@@ -29,6 +30,18 @@ function normalizeServerBase(s) {
 function setLastPlayNowBlockReason(reason = "") {
   try {
     window.__jmsLastPlayNowBlockReason = String(reason || "");
+  } catch {}
+}
+
+function notifyPlaybackStartRequested(detail = {}) {
+  try {
+    if (typeof window === "undefined" || typeof CustomEvent !== "function") return;
+    window.dispatchEvent(new CustomEvent(PLAYBACK_START_REQUESTED_EVENT, {
+      detail: {
+        at: Date.now(),
+        ...detail
+      }
+    }));
   } catch {}
 }
 
@@ -76,6 +89,43 @@ function showPlayNowSuccessNotification(duration = 3000) {
       }, 300);
     }, duration);
   } catch {}
+}
+
+function normalizePlaybackToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvPlaybackItem(item) {
+  if (!item || typeof item !== "object") return false;
+
+  const type = normalizePlaybackToken(item?.Type || item?.ItemType || item?.itemType);
+  const mediaType = normalizePlaybackToken(item?.MediaType || item?.mediaType);
+  const sourceType = normalizePlaybackToken(item?.SourceType || item?.sourceType);
+  const mediaSourceType = normalizePlaybackToken(item?.MediaSourceType || item?.mediaSourceType);
+  const collectionType = normalizePlaybackToken(item?.CollectionType || item?.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+
+  const isAudio = type === "audio" || mediaType === "audio";
+  if (isAudio) return false;
+
+  if (sourceType === "livetv" || mediaSourceType === "livetv" || collectionType === "livetv") return true;
+  if (item?.IsLiveStream === true || item?.isLiveStream === true) return true;
+  return false;
 }
 
 let __parentalPinRuntimePromise = null;
@@ -260,6 +310,23 @@ async function __destroyGmmpBeforeVideoPlayNow() {
 
 async function startResolvedVideoPlayback({ itemId, item, requesterUserId, persistDebug }) {
   const normalizedItemId = String(itemId || "");
+  if (isLiveTvPlaybackItem(item)) {
+    persistDebug?.({
+      at: Date.now(),
+      stage: "native-live-tv-bypass",
+      itemId: normalizedItemId,
+      requesterUserId,
+      itemType: item?.Type || "",
+      mediaType: item?.MediaType || ""
+    });
+    console.warn("[JMSFusion] Live TV playback is left to Jellyfin native player.", {
+      itemId: normalizedItemId,
+      type: item?.Type,
+      mediaType: item?.MediaType
+    });
+    return false;
+  }
+
   const resumeTicks = Math.max(0, Math.floor(Number(item?.UserData?.PlaybackPositionTicks) || 0));
 
   const localKick = await tryLocalPlaybackStart(normalizedItemId, {
@@ -906,13 +973,29 @@ function markTombstone(id) {
 }
 
 function isAbortError(err, signal) {
+  const message = typeof err === "string" ? err : String(err?.message || "");
+  const reason = typeof signal?.reason === "string" ? signal.reason : "";
   return (
     err?.name === 'AbortError' ||
-    (typeof err?.message === 'string' && /aborted|user aborted/i.test(err.message)) ||
+    /aborted|user aborted|hover-cancel/i.test(message) ||
+    /aborted|user aborted|hover-cancel/i.test(reason) ||
     signal?.aborted === true ||
     err?.isAbort === true ||
     err?.status === 0
   );
+}
+
+function markAbortError(error) {
+  if (error && (typeof error === "object" || typeof error === "function")) {
+    try { error.isAbort = true; } catch {}
+    return error;
+  }
+
+  const err = new Error(String(error || "Request aborted"));
+  err.name = "AbortError";
+  err.isAbort = true;
+  err.reason = error;
+  return err;
 }
 
 function safeGet(k) {
@@ -1535,6 +1618,12 @@ async function resolveAndPersistUserId({ signal } = {}) {
 }
 
 async function makeApiRequest(url, options = {}) {
+  if (!options || (typeof options !== "object" && typeof options !== "function")) {
+    options = {};
+  } else if (typeof AbortSignal !== "undefined" && options instanceof AbortSignal) {
+    options = { signal: options };
+  }
+
   dbgAuth("makeApiRequest:begin", url);
   try {
     if (!(await ensureAuthReadyFor(url, 2500))) {
@@ -1653,8 +1742,7 @@ async function makeApiRequest(url, options = {}) {
     return data;
       } catch (error) {
         if (isAbortError(error, options?.signal)) {
-          error.isAbort = true;
-          throw error;
+          throw markAbortError(error);
         }
 
     const msg = String(error?.message || "");
@@ -1830,6 +1918,11 @@ export async function updateFavoriteStatus(itemId, isFavorite, options = {}) {
   const watchlistModule = await import("../../../slider/modules/watchlist.js");
   const cleanItemId = String(itemId || "").trim();
   if (!cleanItemId) throw new Error("itemId gerekli");
+  if (isLiveTvPlaybackItem(options?.item)) {
+    watchlistModule?.suppressFavoriteMirrorOnce?.(cleanItemId, isFavorite);
+    return setJellyfinFavoriteStatus(cleanItemId, isFavorite, { signal: options?.signal });
+  }
+
   const localOptions = {
     ...(options || {}),
     __skipNativeFavoriteSync: true
@@ -2462,6 +2555,10 @@ function getActivePlayNowInFlight(itemId) {
 
 export async function playNow(itemId) {
   const playNowRequestId = String(itemId || "").trim();
+  notifyPlaybackStartRequested({
+    source: "api.playNow",
+    itemId: playNowRequestId
+  });
   const existingPlayNow = getActivePlayNowInFlight(playNowRequestId);
   if (existingPlayNow) return existingPlayNow;
 
@@ -2497,6 +2594,16 @@ export async function playNow(itemId) {
       itemId: String(itemId || ""),
       isAndroidWebView
     });
+
+    if (isLiveTvRouteActive()) {
+      persistDebug({
+        at: Date.now(),
+        stage: "native-live-tv-route-bypass",
+        itemId: String(itemId || ""),
+        isAndroidWebView
+      });
+      return false;
+    }
 
     const requesterUserId = pickFirstString(
       self?.userId,
@@ -2567,6 +2674,22 @@ export async function playNow(itemId) {
         }
       }
       console.warn("playNow(music): GMMP handler yok", { type });
+      return false;
+    }
+    if (isLiveTvPlaybackItem(item)) {
+      persistDebug({
+        at: Date.now(),
+        stage: "native-live-tv-bypass",
+        itemId: String(itemId || ""),
+        requesterUserId,
+        itemType: item?.Type || "",
+        mediaType: item?.MediaType || ""
+      });
+      console.warn("[JMSFusion] Live TV playNow bypassed; native Jellyfin must handle channel playback.", {
+        itemId,
+        type: item?.Type,
+        mediaType: item?.MediaType
+      });
       return false;
     }
     if (item.Type === "Series") {
@@ -2727,6 +2850,10 @@ export async function getVideoStreamUrl(
   forceDirectPlay = false,
   { signal } = {}
 ) {
+  if (isLiveTvRouteActive()) {
+    return null;
+  }
+
   if (!isAuthReadyStrict()) {
     await waitForAuthReadyStrict(3000);
   }
@@ -2739,23 +2866,27 @@ export async function getVideoStreamUrl(
       .join("&");
 
   try {
-    let item = await fetchItemDetails(itemId);
+    let item = await fetchItemDetails(itemId, { signal });
     if (!item) {
+      return null;
+    }
+    if (isLiveTvPlaybackItem(item)) {
       return null;
     }
     if (item.Type === "Series") {
       itemId = await getRandomEpisodeId(itemId).catch(() => null);
       if (!itemId) return null;
-      item = await fetchItemDetails(itemId);
+      item = await fetchItemDetails(itemId, { signal });
       if (!item) return null;
     }
 
     if (item.Type === "Season") {
-      const episodes = await makeApiRequest(`/Shows/${item.SeriesId}/Episodes?SeasonId=${itemId}&Fields=Id`);
+      const episodes = await makeApiRequest(`/Shows/${item.SeriesId}/Episodes?SeasonId=${itemId}&Fields=Id`, { signal });
       if (!episodes?.Items?.length) throw new Error("Bu sezonda hiç bölüm yok!");
       const episode = episodes.Items[Math.floor(Math.random() * episodes.Items.length)];
       itemId = episode.Id;
-      item = await fetchItemDetails(itemId);
+      item = await fetchItemDetails(itemId, { signal });
+      if (!item || isLiveTvPlaybackItem(item)) return null;
     }
 
     if (

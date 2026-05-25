@@ -1135,6 +1135,7 @@ function createMainSettingsPanel(labels, panels) {
     const config = getConfig();
     const basicsSection = createSection(labels.mainCoreSettings || 'Temel Ayarlar');
     const enablesSection = createSection(labels.mainEnableSettings || 'Ana Etkinleştirmeler');
+    const trailerAudioSection = createSection(labels.trailerAudioSettings || 'Fragman Ses Ayarları');
     const hotkeySection = createSection(labels.settingsHotkeySection || 'Ayarlar Kısayolu');
 
     [
@@ -1242,9 +1243,40 @@ function createMainSettingsPanel(labels, panels) {
         enablesSection.appendChild(node);
     });
 
+    const startMutedControl = createCheckbox(
+        'previewTrailerStartMuted',
+        labels.previewTrailerStartMuted || 'Fragmanları sessiz başlat',
+        config.previewTrailerStartMuted === true
+    );
+    const volumeLimitControl = createCheckbox(
+        'previewTrailerVolumeLimit',
+        labels.previewTrailerVolumeLimit || 'Fragman başlangıç ses seviyesini sınırla',
+        config.previewTrailerVolumeLimit === true
+    );
+    const volumePercentControl = createNumberInput(
+        'previewTrailerVolumePercent',
+        labels.previewTrailerVolumePercent || 'Fragman başlangıç ses seviyesi (%)',
+        config.previewTrailerVolumePercent ?? 50,
+        0,
+        100,
+        1
+    );
+    volumePercentControl.classList.add('preview-trailer-volume-percent-container');
+
+    const syncTrailerVolumeField = () => {
+        const enabled = volumeLimitControl.querySelector('input')?.checked === true;
+        const input = volumePercentControl.querySelector('input');
+        volumePercentControl.style.opacity = enabled ? '1' : '0.55';
+        volumePercentControl.classList.toggle('disabled', !enabled);
+        if (input) input.readOnly = !enabled;
+    };
+    volumeLimitControl.querySelector('input')?.addEventListener('change', syncTrailerVolumeField);
+    syncTrailerVolumeField();
+    trailerAudioSection.append(startMutedControl, volumeLimitControl, volumePercentControl);
+
     hotkeySection.appendChild(createSettingsHotkeyField(labels, config.settingsHotkey));
 
-    panel.append(basicsSection, enablesSection, hotkeySection);
+    panel.append(basicsSection, enablesSection, trailerAudioSection, hotkeySection);
     return panel;
 }
 

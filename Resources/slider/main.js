@@ -1089,6 +1089,24 @@ function getCustomSplashGreetingFallback(lang = "tur", part = "Morning") {
       Evening: "Bonsoir",
       Night: "Bonsoir"
     },
+    ita: {
+      Morning: "Buongiorno",
+      Afternoon: "Buon pomeriggio",
+      Evening: "Buonasera",
+      Night: "Buonanotte"
+    },
+    jpn: {
+      Morning: "おはようございます",
+      Afternoon: "こんにちは",
+      Evening: "こんばんは",
+      Night: "こんばんは"
+    },
+    por: {
+      Morning: "Bom dia",
+      Afternoon: "Boa tarde",
+      Evening: "Boa noite",
+      Night: "Boa noite"
+    },
     spa: {
       Morning: "Buenos días",
       Afternoon: "Buenas tardes",
@@ -1144,6 +1162,12 @@ function getCustomSplashLoadingFallback(title) {
       return `${safeTitle} wird vorbereitet`;
     case "fre":
       return `${safeTitle} se prepare`;
+    case "ita":
+      return `${safeTitle} si sta avviando`;
+    case "jpn":
+      return `${safeTitle} を準備しています`;
+    case "por":
+      return `${safeTitle} está iniciando`;
     case "spa":
       return `${safeTitle} se esta preparando`;
     case "rus":
@@ -1717,9 +1741,12 @@ function loadHoverTrailerModule() {
 }
 
 function queueHoverModuleBoot() {
+  if (isLiveTvRouteActive()) return;
   idle(() => {
+    if (isLiveTvRouteActive()) return;
     loadHoverTrailerModule()
       .then(({ setupHoverForAllItems }) => {
+        if (isLiveTvRouteActive()) return;
         try { setupHoverForAllItems?.(); } catch {}
       })
       .catch(() => {});
@@ -3384,6 +3411,7 @@ function getPauseRuntimeConfig(cfg = getMainConfig()) {
 }
 
 function shouldBootPauseModule(cfg = getMainConfig()) {
+  if (isLiveTvRouteActive()) return false;
   const pauseConfig = getPauseRuntimeConfig(cfg);
   return !!(pauseConfig.enablePauseOverlay || pauseConfig.enableSmartAutoPause);
 }
@@ -3584,8 +3612,22 @@ const shuffleArray = (array) => {
 };
 
 function isHomeRouteActive() {
+  if (isLiveTvRouteActive()) return false;
   const hash = String(window.location.hash || "").toLowerCase().trim();
   return hash.startsWith("#/home") || hash.startsWith("#/index") || hash === "" || hash === "#";
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
 }
 
 function getVisibleHomePageEl() {
@@ -3971,16 +4013,19 @@ function filterByStrictImageTypes(items, query) {
 function observeDOMChanges() {
   let scheduled = false;
   const scheduleHoverRefresh = () => {
+    if (isLiveTvRouteActive()) return;
     if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(() => {
       scheduled = false;
+      if (isLiveTvRouteActive()) return;
       queueHoverModuleBoot();
     });
   };
 
   const observer = new MutationObserver((mutations) => {
     if (document.documentElement.dataset.jmsSoftBlock === "1") return;
+    if (isLiveTvRouteActive()) return;
     const hasRelevantAddition = mutations.some((mutation) => {
       if (!mutation.addedNodes.length) return false;
       return Array.from(mutation.addedNodes).some((node) => {
@@ -5903,6 +5948,14 @@ function queueHomeSectionsBoot({
 function initializeSliderOnHome({ forceManagedSectionsBoot = false } = {}) {
   const start = async () => {
     try {
+      if (!isHomeRouteActive() || !isHomeVisible()) {
+        homeSectionLog("initializeSliderOnHome:skip:not-home-route", {
+          forceManagedSectionsBoot,
+          hash: String(window.location.hash || "")
+        });
+        return;
+      }
+
       try { window.__jmsHomeTabPaused = false; } catch {}
       homeSectionLog("initializeSliderOnHome:start", {
         forceManagedSectionsBoot,
@@ -6575,12 +6628,15 @@ function observeWhenHomeReady(cb, maxMs = 20000) {
       }, { passive: true });
     }
 
-    const fastIndex = document.querySelector("#indexPage:not(.hide), #homePage:not(.hide)");
-    if (fastIndex) {
+    const fastIndex = isHomeRouteActive()
+      ? document.querySelector("#indexPage:not(.hide), #homePage:not(.hide)")
+      : null;
+    if (fastIndex && isHomeVisible()) {
       startPauseOverlayOnce();
       initializeSliderOnHome({ forceManagedSectionsBoot: true });
     } else {
       const stop = observeWhenHomeReady(() => {
+        if (!isHomeRouteActive() || !isHomeVisible()) return;
         startPauseOverlayOnce();
         initializeSliderOnHome({ forceManagedSectionsBoot: true });
         stop();

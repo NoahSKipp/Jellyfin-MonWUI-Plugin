@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
     {
+        "version": "3.3.0.0",
+        "changelog": "v3.3.0\n\nChanges:\n- Added auto-play for active slider trailers with pause/resume controls and playback interruption on manual start (#58)\n- Added trailer audio controls: mute on start, initial volume limit, and percentage-based volume settings (#58)\n- Unified audio behavior across slider, hover, studio popover, YouTube iframe, and local video trailers (#58)\n- Implemented full Live TV and TV Guide bypass for MonWUI features (hover trailers, pause overlay, parental PIN, cinema pre-roll, GMMP/player, studio popover, watchlist) (#57)\n- Delegated Live TV playback entirely to Jellyfin native player (#57)\n- Added Italian, Japanese, and Portuguese language support with detection and selection integration\n- Translation files were sourced from MonWUI forks — thanks to the contributors\n- Added new translation keys for auto slider trailers and trailer audio settings\n- Improved watchlist behavior: favorites mirroring, Live TV exclusion, and auto-removal of watched series/seasons\n- Improved API handling: AbortSignal support, hover-cancel logic, and playback-start event\n- Added fallback layer for Jellyfin scroll event listener compatibility\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/download/v3.3.0/JMSFusion-3.3.0.0-server.zip",
+        "checksum": "6c2a65f985fa28f0d6089ac365f3e4e5",
+        "timestamp": "2026-05-25T20:26:28.2939629Z"
+      },
+    {
         "version": "3.2.0.0",
         "changelog": "v3.2.0\n\nChanges:\n- Added Arr calendar integration: backend endpoint and notification panel calendar view\n- Expanded Seerr requests: boxset/collection search, missing item selection, and bulk request flow\n- Added fallback country selection for missing trailers in Cinema Pre-Roll settings\n- Improved user settings synchronization: filtered sensitive snapshot keys and reduced redundant writes via idempotent storage and deduplication (#56)\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",

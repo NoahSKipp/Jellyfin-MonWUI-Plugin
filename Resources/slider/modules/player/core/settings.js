@@ -34,6 +34,9 @@ export function createSettingsModal() {
         { value: 'deu', label: '🇩🇪 Deutsch' },
         { value: 'fre', label: '🇫🇷 Français' },
         { value: 'rus', label: '🇷🇺 Русский' },
+        { value: 'ita', label: '🇮🇹 Italiano' },
+        { value: 'jpn', label: '🇯🇵 日本語' },
+        { value: 'por', label: '🇧🇷 Português' },
     ];
 
     languages.forEach(lang => {

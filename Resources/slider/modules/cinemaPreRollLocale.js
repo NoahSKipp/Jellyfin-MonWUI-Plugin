@@ -13,6 +13,9 @@ export function normalizeCinemaPreRollLanguage(raw) {
   if (lower === "fr" || lower === "fre" || lower === "fra") return "fr-FR";
   if (lower === "ru" || lower === "rus") return "ru-RU";
   if (lower === "es" || lower === "spa") return "es-ES";
+  if (lower === "it" || lower === "ita") return "it-IT";
+  if (lower === "ja" || lower === "jp" || lower === "jpn") return "ja-JP";
+  if (lower === "pt" || lower === "por") return "pt-BR";
   return "tr-TR";
 }
 

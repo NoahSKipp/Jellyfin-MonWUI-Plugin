@@ -162,6 +162,46 @@ function text(value, fallback = "") {
   return out || fallback;
 }
 
+function normalizePlaybackToken(value) {
+  return text(value).toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvItemLike(item) {
+  if (!item || typeof item !== "object") return false;
+
+  const type = normalizePlaybackToken(item?.Type || item?.ItemType || item?.itemType);
+  const mediaType = normalizePlaybackToken(item?.MediaType || item?.mediaType);
+  const sourceType = normalizePlaybackToken(item?.SourceType || item?.sourceType);
+  const mediaSourceType = normalizePlaybackToken(item?.MediaSourceType || item?.mediaSourceType);
+  const collectionType = normalizePlaybackToken(item?.CollectionType || item?.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+  if (type === "audio" || mediaType === "audio") return false;
+  return sourceType === "livetv"
+    || mediaSourceType === "livetv"
+    || collectionType === "livetv"
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
+function isWatchlistEligibleItem(item) {
+  return !isLiveTvItemLike(item);
+}
+
 function notifyStudioHubResult(message, type = "success", icon = "building", duration = 2600) {
   const cleanMessage = text(message);
   if (!cleanMessage) return;
@@ -460,21 +500,29 @@ function getLastPlayedTimestamp(itemLike) {
   return Math.max(
     toTimestampMs(userData?.LastPlayedDate),
     toTimestampMs(userData?.LastPlayedDateUtc),
-    toTimestampMs(itemLike?.DatePlayed)
+    toTimestampMs(userData?.lastPlayedDate),
+    toTimestampMs(userData?.lastPlayedDateUtc),
+    toTimestampMs(itemLike?.DatePlayed),
+    toTimestampMs(itemLike?.datePlayed),
+    toTimestampMs(itemLike?.LastPlayedDate),
+    toTimestampMs(itemLike?.LastPlayedDateUtc)
   );
 }
 
 function wasPlayedAfterWatchlistTimestamp(itemLike, watchlistTs) {
   if (!isMarkedPlayed(itemLike)) return false;
+  const playedAt = getLastPlayedTimestamp(itemLike);
+  if (playedAt <= 0) return true;
   const threshold = toTimestampMs(watchlistTs);
-  if (threshold <= 0) return false;
-  return getLastPlayedTimestamp(itemLike) > threshold;
+  if (threshold <= 0) return true;
+  return playedAt > threshold;
 }
 
 function getCompletedContainerPlayedAt(items = []) {
   const list = Array.isArray(items) ? items : [];
   if (!list.length || !list.every((item) => isMarkedPlayed(item))) return 0;
-  return Math.max(...list.map((item) => getLastPlayedTimestamp(item)));
+  const playedAt = Math.max(...list.map((item) => getLastPlayedTimestamp(item)));
+  return playedAt > 0 ? playedAt : Date.now();
 }
 
 function wasContainerCompletedAfterWatchlistTimestamp(items = [], watchlistTs) {
@@ -884,10 +932,23 @@ function queueFavoriteMirror(mutation) {
       favoriteMirrorPending.add(pendingKey);
 
       try {
+        const item = await fetchItemDetailsFull(itemId).catch(() => null);
+        if (item && !isWatchlistEligibleItem(item)) {
+          if (!isFavorite) {
+            await removeFromWatchlist(itemId, {
+              item,
+              __favoriteMirror: true,
+              syncJellyfinFavorite: false
+            });
+          }
+          continue;
+        }
+        if (!item && isFavorite && isLiveTvRouteActive()) continue;
+
         if (isFavorite) {
-          await addToWatchlist(itemId, { __favoriteMirror: true });
+          await addToWatchlist(itemId, { item, __favoriteMirror: true });
         } else {
-          await removeFromWatchlist(itemId, { __favoriteMirror: true });
+          await removeFromWatchlist(itemId, { item, __favoriteMirror: true });
         }
       } catch (error) {
         console.debug("watchlist favorite mirror failed:", itemId, isFavorite, error);
@@ -950,6 +1011,7 @@ async function syncFavoritesOnStartup() {
     for (const item of favoriteItems) {
       const itemId = text(item?.Id);
       if (!itemId) continue;
+      if (!isWatchlistEligibleItem(item)) continue;
       if (getCachedWatchlistMembership(itemId, false)) continue;
 
       try {
@@ -981,11 +1043,14 @@ function installJellyfinFavoriteMirror() {
     window.fetch = function patchedWatchlistFavoriteMirror(input, init) {
       const method = text(init?.method || input?.method || "GET");
       const requestUrl = extractRequestUrl(input);
+      const mutation = parseFavoriteMutationRequest(method, requestUrl);
+      if (!mutation?.itemIds?.length) {
+        return nativeFetch(input, init);
+      }
 
       return nativeFetch(input, init).then((response) => {
         if (response?.ok) {
-          const mutation = parseFavoriteMutationRequest(method, requestUrl);
-          if (mutation?.itemIds?.length) queueFavoriteMirror(mutation);
+          queueFavoriteMirror(mutation);
         }
         return response;
       });
@@ -998,22 +1063,25 @@ function installJellyfinFavoriteMirror() {
     const nativeSend = proto.send;
 
     proto.open = function patchedWatchlistFavoriteMirrorOpen(method, url, ...rest) {
+      const mutation = parseFavoriteMutationRequest(method, url);
       this.__monwuiFavoriteMirror = {
-        method: text(method),
-        url: extractRequestUrl(url)
+        mutation
       };
       this.__monwuiFavoriteMirrorListenerAttached = false;
       return nativeOpen.call(this, method, url, ...rest);
     };
 
     proto.send = function patchedWatchlistFavoriteMirrorSend(body) {
+      const pendingMutation = this.__monwuiFavoriteMirror?.mutation || null;
+      if (!pendingMutation?.itemIds?.length) {
+        return nativeSend.call(this, body);
+      }
+
       if (!this.__monwuiFavoriteMirrorListenerAttached) {
         this.__monwuiFavoriteMirrorListenerAttached = true;
         this.addEventListener("loadend", () => {
           if (this.status < 200 || this.status >= 300) return;
-          const details = this.__monwuiFavoriteMirror || {};
-          const mutation = parseFavoriteMutationRequest(details.method, details.url);
-          if (mutation?.itemIds?.length) queueFavoriteMirror(mutation);
+          queueFavoriteMirror(pendingMutation);
         }, { once: true });
       }
 
@@ -1513,12 +1581,15 @@ export async function addToWatchlist(itemId, options = {}) {
   const id = text(itemId);
   if (!id) throw new Error("itemId gerekli");
 
-  const syncedFavorite = await syncJellyfinFavoriteFromWatchlist(id, true, options);
-
   let item = options?.item || null;
   if (!item || text(item?.Id) !== id) {
     item = await fetchItemDetailsFull(id).catch(() => null);
   }
+  if ((item && !isWatchlistEligibleItem(item)) || (options?.__favoriteMirror && isLiveTvRouteActive())) {
+    return { skipped: true, reason: "live-tv", item: item || { Id: id } };
+  }
+
+  const syncedFavorite = await syncJellyfinFavoriteFromWatchlist(id, true, options);
 
   const payload = snapshotFromItem(item, id);
   let result;
@@ -1550,8 +1621,11 @@ export async function removeFromWatchlist(itemId, options = {}) {
   const id = text(itemId);
   if (!id) throw new Error("itemId gerekli");
   const wasPlayed = options?.played === true || isMarkedPlayed(options?.item);
+  const liveTvItem = isLiveTvItemLike(options?.item);
 
-  const syncedFavorite = await syncJellyfinFavoriteFromWatchlist(id, false, options);
+  const syncedFavorite = liveTvItem
+    ? false
+    : await syncJellyfinFavoriteFromWatchlist(id, false, options);
 
   let result;
   try {
@@ -1688,12 +1762,59 @@ function getSeriesSeasonAutoRemoveMode(itemLike) {
   return "";
 }
 
-async function fetchSeriesSeasonAutoRemoveItems(containerItem, { signal } = {}) {
-  const mode = getSeriesSeasonAutoRemoveMode(containerItem);
-  const itemId = text(containerItem?.Id || containerItem?.itemId);
-  const userId = getCurrentUserIdSafe();
-  if (!userId || !itemId || !mode) return [];
+function getSeriesSeasonAutoRemoveSeriesId(containerItem, mode, itemId) {
+  if (mode === "series") return itemId;
+  if (mode !== "season") return "";
+  return text(
+    containerItem?.SeriesId ||
+    containerItem?.seriesId ||
+    containerItem?.Series?.Id ||
+    containerItem?.series?.Id ||
+    containerItem?.ParentId ||
+    containerItem?.parentId
+  );
+}
 
+function appendUniqueAutoRemoveItems(target, seen, items) {
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = text(item?.Id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    target.push(item);
+  }
+}
+
+async function fetchSeriesSeasonAutoRemoveItemsFromShows(containerItem, mode, itemId, userId, { signal } = {}) {
+  const seriesId = getSeriesSeasonAutoRemoveSeriesId(containerItem, mode, itemId);
+  if (!seriesId) return null;
+
+  const out = [];
+  const seen = new Set();
+  let startIndex = 0;
+
+  while (true) {
+    const qp = new URLSearchParams();
+    qp.set("UserId", userId);
+    qp.set("Fields", "Id,UserData");
+    qp.set("Limit", String(WATCHLIST_COLLECTION_PAGE_SIZE));
+    qp.set("StartIndex", String(startIndex));
+    if (mode === "season") qp.set("SeasonId", itemId);
+
+    const response = await makeApiRequest(
+      `/Shows/${encodeURIComponent(seriesId)}/Episodes?${qp.toString()}`,
+      { signal, __quiet: true }
+    );
+    const pageItems = Array.isArray(response?.Items) ? response.Items : [];
+    appendUniqueAutoRemoveItems(out, seen, pageItems);
+
+    if (pageItems.length < WATCHLIST_COLLECTION_PAGE_SIZE) break;
+    startIndex += WATCHLIST_COLLECTION_PAGE_SIZE;
+  }
+
+  return out;
+}
+
+async function fetchSeriesSeasonAutoRemoveItemsFromParent(containerItem, mode, itemId, userId, { signal } = {}) {
   const out = [];
   const seen = new Set();
   let startIndex = 0;
@@ -1710,21 +1831,28 @@ async function fetchSeriesSeasonAutoRemoveItems(containerItem, { signal } = {}) 
     qp.set("Limit", String(WATCHLIST_COLLECTION_PAGE_SIZE));
     qp.set("StartIndex", String(startIndex));
 
-    const response = await makeApiRequest(`/Items?${qp.toString()}`, { signal });
+    const response = await makeApiRequest(`/Items?${qp.toString()}`, { signal, __quiet: true });
     const pageItems = Array.isArray(response?.Items) ? response.Items : [];
-
-    for (const item of pageItems) {
-      const id = text(item?.Id);
-      if (!id || seen.has(id)) continue;
-      seen.add(id);
-      out.push(item);
-    }
+    appendUniqueAutoRemoveItems(out, seen, pageItems);
 
     if (pageItems.length < WATCHLIST_COLLECTION_PAGE_SIZE) break;
     startIndex += WATCHLIST_COLLECTION_PAGE_SIZE;
   }
 
   return out;
+}
+
+async function fetchSeriesSeasonAutoRemoveItems(containerItem, { signal } = {}) {
+  const mode = getSeriesSeasonAutoRemoveMode(containerItem);
+  const itemId = text(containerItem?.Id || containerItem?.itemId);
+  const userId = getCurrentUserIdSafe();
+  if (!userId || !itemId || !mode) return [];
+
+  const showsItems = await fetchSeriesSeasonAutoRemoveItemsFromShows(containerItem, mode, itemId, userId, { signal })
+    .catch(() => null);
+  if (Array.isArray(showsItems)) return showsItems;
+
+  return fetchSeriesSeasonAutoRemoveItemsFromParent(containerItem, mode, itemId, userId, { signal });
 }
 
 async function isSeriesSeasonWatchlistItemComplete(containerItem, { signal } = {}) {
@@ -1750,7 +1878,9 @@ async function getCompletedSeriesSeasonWatchlistItemPlayedAt(dashboard, found) {
 
     candidates.set(itemId, {
       Id: itemId,
-      Type: mode === "series" ? "Series" : "Season"
+      Type: mode === "series" ? "Series" : "Season",
+      SeriesId: text(liveItem?.SeriesId || entryLike?.SeriesId || entryLike?.seriesId || liveItem?.Series?.Id || entryLike?.Series?.Id),
+      ParentId: text(liveItem?.ParentId || entryLike?.ParentId || entryLike?.parentId)
     });
   };
 
@@ -1792,7 +1922,7 @@ async function collectParentContainerAutoRemovalTasks(itemId, dashboard = dashbo
   if (type === "episode") {
     const seasonId = text(details?.SeasonId);
     const seriesId = text(details?.SeriesId || details?.Series?.Id);
-    if (seasonId) candidates.push({ Id: seasonId, Type: "Season" });
+    if (seasonId) candidates.push({ Id: seasonId, Type: "Season", SeriesId: seriesId });
     if (seriesId) candidates.push({ Id: seriesId, Type: "Series" });
   } else if (type === "season") {
     const seriesId = text(details?.SeriesId || details?.Series?.Id);
@@ -1834,10 +1964,12 @@ async function processAutoRemovalTasks(tasks = []) {
           if (task.kind === "shared" && task.shareId) {
             await removeWatchlistShare(task.shareId);
           } else if (task.itemId) {
+            await removeFromWatchlist(task.itemId, { syncJellyfinFavorite: false, played: true });
             if (shouldAutoRemovePlayedFromFavorites()) {
-              await updateFavoriteStatus(task.itemId, false, { played: true });
-            } else {
-              await removeFromWatchlist(task.itemId, { syncJellyfinFavorite: false, played: true });
+              try {
+                suppressFavoriteMirrorOnce(task.itemId, false);
+                await setJellyfinFavoriteStatus(task.itemId, false);
+              } catch {}
             }
           }
         } catch {} finally {
@@ -1860,8 +1992,14 @@ export async function removePlayedItemFromWatchlist(itemId) {
   const id = text(itemId);
   if (!id) return false;
 
-  const dashboard = dashboardCache || await ensureWatchlistLoaded().catch(() => null);
-  const directTasks = collectAutoRemovalTasksByItemId(id, dashboard);
+  let dashboard = dashboardCache || await ensureWatchlistLoaded().catch(() => null);
+  let directTasks = collectAutoRemovalTasksByItemId(id, dashboard);
+
+  if (!directTasks.length && !dashboard?._membership?.has?.(id)) {
+    dashboard = await ensureWatchlistLoaded({ force: true }).catch(() => dashboard);
+    directTasks = collectAutoRemovalTasksByItemId(id, dashboard);
+  }
+
   const parentTasks = await collectParentContainerAutoRemovalTasks(id, dashboard).catch(() => []);
   const tasks = dedupeAutoRemovalTasks([...directTasks, ...parentTasks]);
   if (!tasks.length) return false;

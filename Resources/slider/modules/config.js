@@ -737,7 +737,7 @@ export function getConfig() {
     useRandomContent: localStorage.getItem('useRandomContent') !== 'false',
     fullscreenMode: localStorage.getItem('fullscreenMode') === 'true' ? true : false,
     listLimit: 20,
-    version: "v3.2.0",
+    version: "v3.3.0",
     historySize: 20,
     updateInterval: 300000,
     nextTracksSource: localStorage.getItem('nextTracksSource') || 'playlist',
@@ -746,6 +746,7 @@ export function getConfig() {
     sliderDuration: parseInt(localStorage.getItem('sliderDuration'), 10) || 15000,
     artistLimit: parseInt(localStorage.getItem('artistLimit'), 10) || 10,
     gecikmeSure: parseInt(localStorage.getItem('gecikmeSure'), 10) || 500,
+    sliderAutoTrailerPlayback: localStorage.getItem('sliderAutoTrailerPlayback') === 'true',
     limit: parseInt(localStorage.getItem('limit'), 10) || 15,
     onlyUnwatchedRandom: localStorage.getItem('onlyUnwatchedRandom') === 'true',
     maxShufflingLimit: parseInt(localStorage.getItem('maxShufflingLimit'), 10) || 10000,
@@ -790,6 +791,12 @@ export function getConfig() {
     randomDicebearAvatar: localStorage.getItem('randomDicebearAvatar') !== 'false',
     previewModal: localStorage.getItem('previewModal') !== 'false',
     allPreviewModal: localStorage.getItem('allPreviewModal') !== 'false',
+    previewTrailerStartMuted: localStorage.getItem('previewTrailerStartMuted') === 'true',
+    previewTrailerVolumeLimit: localStorage.getItem('previewTrailerVolumeLimit') === 'true',
+    previewTrailerVolumePercent: (() => {
+      const n = parseFloat(String(localStorage.getItem('previewTrailerVolumePercent') ?? '50').replace(',', '.'));
+      return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 50;
+    })(),
     globalPreviewMode: localStorage.getItem('globalPreviewMode') || 'modal',
     dotPreviewPlaybackMode: readDotPreviewMode(),
     preferTrailersInPreviewModal: localStorage.getItem('preferTrailersInPreviewModal') !== 'false',

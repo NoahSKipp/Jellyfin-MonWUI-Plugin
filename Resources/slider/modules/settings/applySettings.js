@@ -395,6 +395,7 @@ const USER_ONLY_KEYS = [
             showPlaybackProgress: formData.get('showPlaybackProgress') === 'on',
             playingLimit: parseFloat(formData.get('playingLimit')),
             gecikmeSure: parseInt(formData.get('gecikmeSure'), 10),
+            sliderAutoTrailerPlayback: formData.get('sliderAutoTrailerPlayback') === 'on',
             cssVariant: formData.get('cssVariant'),
             useAlbumArtAsBackground: formData.get('useAlbumArtAsBackground') === 'on',
             albumArtBackgroundBlur: parseInt(formData.get('albumArtBackgroundBlur')),
@@ -443,6 +444,12 @@ const USER_ONLY_KEYS = [
             dicebearParams: config.dicebearParams || {},
             previewModal: formData.get('previewModal') === 'on',
             allPreviewModal: formData.get('allPreviewModal') === 'on',
+            previewTrailerStartMuted: formData.get('previewTrailerStartMuted') === 'on',
+            previewTrailerVolumeLimit: formData.get('previewTrailerVolumeLimit') === 'on',
+            previewTrailerVolumePercent: Math.max(
+              0,
+              Math.min(100, _floatOr(formData.get('previewTrailerVolumePercent'), 50))
+            ),
             preferTrailersInPreviewModal: formData.get('preferTrailersInPreviewModal') === 'on',
             onlyTrailerInPreviewModal: formData.get('onlyTrailerInPreviewModal') === 'on',
             dotPreviewPlaybackMode: (() => {

@@ -173,7 +173,10 @@
       deu: "Deutsch",
       fre: "Francais",
       rus: "Русский",
-      spa: "Espanol"
+      spa: "Espanol",
+      ita: "Italiano",
+      jpn: "日本語",
+      por: "Português"
     };
     return map[code] || String(code || "").toUpperCase() || "Auto";
   }

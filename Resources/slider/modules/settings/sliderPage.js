@@ -66,6 +66,9 @@ export function createSliderPanel(config, labels) {
     { value: 'deu',  label: labels.optionGerman  || '🇩🇪 Deutsch' },
     { value: 'fre',  label: labels.optionFrench  || '🇫🇷 Français' },
     { value: 'rus',  label: labels.optionRussian || '🇷🇺 Русский' },
+    { value: 'ita',  label: '🇮🇹 Italiano' },
+    { value: 'jpn',  label: '🇯🇵 日本語' },
+    { value: 'por',  label: '🇧🇷 Português' },
   ];
 
   languages.forEach(lang => {
@@ -138,6 +141,9 @@ export function createSliderPanel(config, labels) {
       { value: 'de-DE', label: '🇩🇪 Deutsch (de-DE)' },
       { value: 'fr-FR', label: '🇫🇷 Français (fr-FR)' },
       { value: 'ru-RU', label: '🇷🇺 Русский (ru-RU)' },
+      { value: 'it-IT', label: '🇮🇹 Italiano (it-IT)' },
+      { value: 'ja-JP', label: '🇯🇵 日本語 (ja-JP)' },
+      { value: 'pt-BR', label: '🇧🇷 Português (pt-BR)' },
       { value: '', label: labels.noParam || '🌐 Otomatik (parametresiz)' },
     ]
   );
@@ -360,6 +366,12 @@ export function createSliderPanel(config, labels) {
     config.enableTrailerThenVideo
   );
 
+  const sliderAutoTrailerPlaybackCheckbox = createCheckbox(
+    'sliderAutoTrailerPlayback',
+    labels.sliderAutoTrailerPlayback || 'Aktif slider fragmanını otomatik oynat',
+    config.sliderAutoTrailerPlayback === true
+  );
+
   const disableAllPlaybackCheckbox = createCheckbox(
     'disableAllPlayback',
     labels.selectNone || 'Hiçbiri',
@@ -370,10 +382,12 @@ export function createSliderPanel(config, labels) {
     const trailerCheckbox = document.querySelector('#enableTrailerPlayback');
     const videoCheckbox = document.querySelector('#enableVideoPlayback');
     const trailerThenVideoCheckbox = document.querySelector('#enableTrailerThenVideo');
+    const autoTrailerCheckbox = document.querySelector('#sliderAutoTrailerPlayback');
 
     if (trailerCheckbox) trailerCheckbox.checked = false;
     if (videoCheckbox) videoCheckbox.checked = false;
     if (trailerThenVideoCheckbox) trailerThenVideoCheckbox.checked = false;
+    if (autoTrailerCheckbox) autoTrailerCheckbox.checked = false;
 
     localStorage.setItem('previewPlaybackMode', 'none');
     updateTrailerRelatedFields();
@@ -382,6 +396,7 @@ export function createSliderPanel(config, labels) {
   playbackCheckboxesDiv.appendChild(trailerPlaybackCheckbox);
   playbackCheckboxesDiv.appendChild(videoPlaybackCheckbox);
   playbackCheckboxesDiv.appendChild(trailerThenVideoCheckbox);
+  playbackCheckboxesDiv.appendChild(sliderAutoTrailerPlaybackCheckbox);
   playbackCheckboxesDiv.appendChild(disableAllPlaybackCheckbox);
 
   disableAllPlaybackCheckbox.querySelector('input').addEventListener('change', (e) => {
@@ -390,7 +405,7 @@ export function createSliderPanel(config, labels) {
     }
   });
 
-  [trailerPlaybackCheckbox, videoPlaybackCheckbox, trailerThenVideoCheckbox].forEach(checkbox => {
+  [trailerPlaybackCheckbox, videoPlaybackCheckbox, trailerThenVideoCheckbox, sliderAutoTrailerPlaybackCheckbox].forEach(checkbox => {
     checkbox.querySelector('input').addEventListener('change', () => {
       disableAllPlaybackCheckbox.querySelector('input').checked = false;
     });

@@ -13,6 +13,7 @@ import {
 import { showNotification } from "./player/ui/notification.js";
 
 const STYLE_ID = "jms-parental-pin-style";
+const PLAYBACK_START_REQUESTED_EVENT = "jms:playback-start-requested";
 const NATIVE_PLAY_CONTEXT_TTL_MS = 20_000;
 const NATIVE_PLAY_ACTIONS = new Set([
   "play",
@@ -127,6 +128,18 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function notifyPlaybackStartRequested(detail = {}) {
+  try {
+    if (typeof window === "undefined" || typeof CustomEvent !== "function") return;
+    window.dispatchEvent(new CustomEvent(PLAYBACK_START_REQUESTED_EVENT, {
+      detail: {
+        at: Date.now(),
+        ...detail
+      }
+    }));
+  } catch {}
 }
 
 function formatLabelTemplate(template, values = {}) {
@@ -1396,6 +1409,43 @@ function firstString(...values) {
   return "";
 }
 
+function normalizePlaybackToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvPlaybackItem(item) {
+  if (!item || typeof item !== "object") return false;
+
+  const type = normalizePlaybackToken(item?.Type || item?.ItemType || item?.itemType);
+  const mediaType = normalizePlaybackToken(item?.MediaType || item?.mediaType);
+  const sourceType = normalizePlaybackToken(item?.SourceType || item?.sourceType);
+  const mediaSourceType = normalizePlaybackToken(item?.MediaSourceType || item?.mediaSourceType);
+  const collectionType = normalizePlaybackToken(item?.CollectionType || item?.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+
+  const isAudio = type === "audio" || mediaType === "audio";
+  if (isAudio) return false;
+
+  if (sourceType === "livetv" || mediaSourceType === "livetv" || collectionType === "livetv") return true;
+  if (item?.IsLiveStream === true || item?.isLiveStream === true) return true;
+  return false;
+}
+
 function getPlaybackItemId(item) {
   return String(item?.Id || item?.id || item?.ItemId || item?.itemId || "").trim();
 }
@@ -1454,6 +1504,140 @@ function isKnownMusicPlaybackElement(element) {
     MediaType: hint.mediaType,
     CollectionType: hint.collectionType
   });
+}
+
+function isKnownVideoPlaybackElement(element) {
+  const hint = getElementPlaybackTypeHint(element);
+  if (isLiveTvPlaybackItem({
+    Type: hint.type,
+    MediaType: hint.mediaType,
+    CollectionType: hint.collectionType
+  })) {
+    return false;
+  }
+
+  const type = normalizePlaybackToken(hint.type);
+  const mediaType = normalizePlaybackToken(hint.mediaType);
+  if (type === "movie" || type === "episode" || type === "series" || type === "season" || type === "video") {
+    return true;
+  }
+  return mediaType === "video";
+}
+
+function elementHasAnyAttributeInLineage(element, names = []) {
+  let current = element;
+  let depth = 0;
+  while (current && depth < 12) {
+    for (const name of names) {
+      const value = current?.getAttribute?.(name) || "";
+      if (String(value || "").trim()) return true;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+  return false;
+}
+
+function textLooksLikeLiveTvSurface(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return false;
+  return /(?:live[\s_-]*tv|tv[\s_-]*guide|livetv|tvguide|canli[\s_-]*tv|canl[\u0131i][\s_-]*tv)/i.test(raw);
+}
+
+function elementLineageHasLiveTvHint(element) {
+  let current = element;
+  let depth = 0;
+  while (current && depth < 12) {
+    const values = [
+      current.id,
+      current.className,
+      current.getAttribute?.("href"),
+      current.getAttribute?.("data-href"),
+      current.getAttribute?.("data-url"),
+      current.getAttribute?.("data-route"),
+      current.getAttribute?.("aria-label"),
+      current.getAttribute?.("title"),
+      current.getAttribute?.("data-collectiontype"),
+      current.getAttribute?.("data-collection-type")
+    ];
+    if (values.some(textLooksLikeLiveTvSurface)) return true;
+    current = current.parentElement;
+    depth += 1;
+  }
+  return false;
+}
+
+function closestSectionLooksLikeLiveTv(element) {
+  try {
+    let current = element;
+    let depth = 0;
+    while (current && depth < 10) {
+      if (textLooksLikeLiveTvSurface(current.getAttribute?.("data-type"))) return true;
+      const header = current.querySelector?.([
+        "a[href*=\"livetv\" i]",
+        "a[href*=\"live-tv\" i]",
+        "a[href*=\"tvguide\" i]",
+        "a[href*=\"tv-guide\" i]",
+        ".sectionTitle",
+        ".sectionTitleText",
+        "h2",
+        "h3"
+      ].join(", "));
+      if (textLooksLikeLiveTvSurface(header?.getAttribute?.("href"))) return true;
+      if (textLooksLikeLiveTvSurface(header?.textContent)) return true;
+      current = current.parentElement;
+      depth += 1;
+    }
+  } catch {}
+  return false;
+}
+
+function isKnownLiveTvPlaybackElement(element) {
+  const hint = getElementPlaybackTypeHint(element);
+  if (isLiveTvPlaybackItem({
+    Type: hint.type,
+    MediaType: hint.mediaType,
+    CollectionType: hint.collectionType
+  })) {
+    return true;
+  }
+
+  if (elementHasAnyAttributeInLineage(element, [
+    "data-channelid",
+    "data-channel-id",
+    "data-channel",
+    "data-programid",
+    "data-program-id",
+    "data-program",
+    "data-tunerchannelid",
+    "data-tuner-channel-id"
+  ])) {
+    return true;
+  }
+
+  if (elementLineageHasLiveTvHint(element) || closestSectionLooksLikeLiveTv(element)) {
+    return true;
+  }
+
+  const liveSurface = element?.closest?.([
+    "#liveTvPage",
+    "#livetvPage",
+    "#liveTVPage",
+    "#tvGuidePage",
+    ".liveTvPage",
+    ".livetvPage",
+    ".live-tv-page",
+    ".tvGuidePage",
+    ".programGrid",
+    ".guideGrid",
+    ".guideProgram",
+    ".channelList",
+    ".channelsContainer",
+    "[data-livetv]",
+    "[data-live-tv]"
+  ].join(", "));
+
+  return !!liveSurface;
 }
 
 async function tryRouteMusicPlaybackToGmmp(item, itemId) {
@@ -1753,15 +1937,38 @@ async function runParentalPinBeforeNativePlay(original, target, args, label) {
     return callOriginalNativePlay(original, target, args);
   }
 
+  if (isLiveTvRouteActive()) {
+    return callOriginalNativePlay(original, target, args, {
+      chainBypassMs: NATIVE_PLAYBACK_CHAIN_BYPASS_MS
+    });
+  }
+
   const context = extractNativePlaybackContext(args);
+  if (isLiveTvPlaybackItem(context.item)) {
+    return callOriginalNativePlay(original, target, args, {
+      chainBypassMs: NATIVE_PLAYBACK_CHAIN_BYPASS_MS
+    });
+  }
+
   const itemId = context.itemId || getPlaybackItemId(context.item);
   if (!itemId) {
     return callOriginalNativePlay(original, target, args);
   }
+  notifyPlaybackStartRequested({
+    source: "parental-pin-native-play",
+    itemId,
+    label: String(label || "")
+  });
 
   let item = await resolveNativePlaybackItemForPin(context);
   if (!item) {
     return callOriginalNativePlay(original, target, args);
+  }
+
+  if (isLiveTvPlaybackItem(item)) {
+    return callOriginalNativePlay(original, target, args, {
+      chainBypassMs: NATIVE_PLAYBACK_CHAIN_BYPASS_MS
+    });
   }
 
   if (isMusicPlaybackItem(item)) {
@@ -1877,10 +2084,30 @@ function installNativePlayInterceptor() {
     const button = resolveNativePlayButtonFromEvent(event);
     if (!button) return false;
 
+    if (isLiveTvRouteActive() || isKnownLiveTvPlaybackElement(button)) {
+      return false;
+    }
+
+    const cfg = getConfig?.() || {};
+    const parentalPinEnabled = isParentalPinModuleEnabled(cfg);
+    const musicPlaybackHint = isKnownMusicPlaybackElement(button);
+    const videoPlaybackHint = isKnownVideoPlaybackElement(button);
+    const gmmpCanHandleMusic = cfg.enabledGmmp !== false;
+    if (!parentalPinEnabled && !(gmmpCanHandleMusic && musicPlaybackHint)) {
+      return false;
+    }
+    if (parentalPinEnabled && !musicPlaybackHint && !videoPlaybackHint) {
+      return false;
+    }
+
     const itemId = extractItemIdFromNativePlayButton(button);
     if (!itemId) return false;
+    notifyPlaybackStartRequested({
+      source: "parental-pin-native-click",
+      itemId
+    });
 
-    if ((getConfig?.() || {}).enabledGmmp === false && isKnownMusicPlaybackElement(button)) {
+    if (!gmmpCanHandleMusic && musicPlaybackHint) {
       return false;
     }
 

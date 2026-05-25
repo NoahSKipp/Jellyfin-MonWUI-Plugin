@@ -631,6 +631,42 @@ function getNativePlaybackItemId(item) {
   return String(item?.Id || item?.id || item?.ItemId || item?.itemId || "").trim();
 }
 
+function normalizeNativePlaybackToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvNativePlaybackItem(item) {
+  if (!item || typeof item !== "object") return false;
+
+  const type = normalizeNativePlaybackToken(item?.Type || item?.ItemType || item?.itemType);
+  const mediaType = normalizeNativePlaybackToken(item?.MediaType || item?.mediaType);
+  const sourceType = normalizeNativePlaybackToken(item?.SourceType || item?.sourceType);
+  const mediaSourceType = normalizeNativePlaybackToken(item?.MediaSourceType || item?.mediaSourceType);
+  const collectionType = normalizeNativePlaybackToken(item?.CollectionType || item?.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+  if (type === "audio" || mediaType === "audio") return false;
+  return sourceType === "livetv"
+    || mediaSourceType === "livetv"
+    || collectionType === "livetv"
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
 function getFirstNativePlaybackItem(payload) {
   if (!payload || typeof payload !== "object") return null;
   if (Array.isArray(payload)) {
@@ -776,14 +812,25 @@ async function runGmmpBeforeNativePlay(original, target, args, label) {
   if (gmmpNativePlaybackHookBypassDepth > 0) {
     return callOriginalGmmpNativePlay(original, target, args);
   }
+  if (isLiveTvRouteActive()) {
+    return callOriginalGmmpNativePlay(original, target, args);
+  }
 
   const context = extractGmmpNativePlaybackContext(args);
+  if (isLiveTvNativePlaybackItem(context.item)) {
+    return callOriginalGmmpNativePlay(original, target, args);
+  }
+
   const itemId = context.itemId || getNativePlaybackItemId(context.item);
   if (!itemId) {
     return callOriginalGmmpNativePlay(original, target, args);
   }
 
   const item = await resolveGmmpNativePlaybackItem(context);
+  if (isLiveTvNativePlaybackItem(item)) {
+    return callOriginalGmmpNativePlay(original, target, args);
+  }
+
   if (!isMusicNativePlaybackItem(item)) {
     return callOriginalGmmpNativePlay(original, target, args);
   }

@@ -728,7 +728,7 @@ async function createSlide(item, options = {}) {
 
   if (!slide.__trailerInit) {
    slide.__trailerInit = true;
-   createTrailerIframe({ config, RemoteTrailers, slide, backdropImg, itemId });
+   createTrailerIframe({ config, RemoteTrailers, slide, backdropImg, itemId, allowAutoTrailer: true });
  }
 
   const logoContainer = createLogoContainer();

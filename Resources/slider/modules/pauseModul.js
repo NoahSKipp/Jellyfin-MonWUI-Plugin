@@ -28,6 +28,55 @@ const DEBUG_PO = !!(getConfig()?.pauseOverlay?.debug);
 function dlog(...args) { if (DEBUG_PO) console.log(...args); }
 function ddbg(...args) { if (DEBUG_PO) console.debug(...args); }
 
+function normalizeLiveTvToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvItem(item) {
+  if (!item || typeof item !== "object") return false;
+  const type = normalizeLiveTvToken(item.Type || item.ItemType || item.itemType);
+  const mediaType = normalizeLiveTvToken(item.MediaType || item.mediaType);
+  const sourceType = normalizeLiveTvToken(item.SourceType || item.sourceType);
+  const mediaSourceType = normalizeLiveTvToken(item.MediaSourceType || item.mediaSourceType);
+  const collectionType = normalizeLiveTvToken(item.CollectionType || item.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+  if (type === "audio" || mediaType === "audio") return false;
+  return sourceType === "livetv"
+    || mediaSourceType === "livetv"
+    || collectionType === "livetv"
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
+function videoSrcLooksLikeLiveTv(videoEl) {
+  try {
+    const src = String(videoEl?.currentSrc || videoEl?.src || "").toLowerCase();
+    return /\/(?:live[-_]?tv|livestreams?|livetv)\//i.test(src)
+      || /[?&](?:livetv|islivestream|is-live-stream)=?(?:true|1)?(?:&|$)/i.test(src);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvPlaybackContext({ video = null, item = null } = {}) {
+  return isLiveTvRouteActive() || isLiveTvItem(item) || videoSrcLooksLikeLiveTv(video);
+}
+
 const config = getConfig();
 const currentLang = config.defaultLanguage || getDefaultLanguage();
 const labels = getLanguageLabels(currentLang) || {};
@@ -115,10 +164,12 @@ function _badgeDurationFor(ctx){
 
 async function fetchItemDetailsCached(id, { signal } = {}) {
   if (!id) return null;
+  if (isLiveTvRouteActive()) return null;
   const rec = _detailsLRU.get(id);
   const now = Date.now();
   if (rec && now - rec.t < DETAILS_TTL) return rec.v;
   const v = await fetchItemDetails(id, signal ? { signal } : undefined);
+  if (isLiveTvItem(v)) return null;
   _detailsLRU.set(id, { v, t: now });
   if (_detailsLRU.size > DETAILS_MAX) {
     const first = _detailsLRU.keys().next().value;
@@ -319,6 +370,9 @@ async function fetchNowPlayingFromSessions({ force = false } = {}){
       const list = Array.isArray(sessions)?sessions:[];
       const active = selectPauseOverlaySession(list);
       if (!active) return _cacheSessionSnapshot({ itemId:null,isPaused:null, sessionId:null, deviceId:null });
+      if (isLiveTvItem(active.NowPlayingItem)) {
+        return _cacheSessionSnapshot({ itemId:null,isPaused:null, sessionId:null, deviceId:null });
+      }
 
       const r = {
         itemId: active.NowPlayingItem?.Id || null,
@@ -1808,7 +1862,7 @@ function deriveKeywordDescriptors(item = {}) {
 
 export function setupPauseScreen() {
   const pauseRuntime = getPauseFeaturesRuntimeConfig();
-  if (!pauseRuntime.enablePauseOverlay && !pauseRuntime.enableSmartAutoPause) {
+  if (isLiveTvRouteActive() || (!pauseRuntime.enablePauseOverlay && !pauseRuntime.enableSmartAutoPause)) {
     try {
       window.__jmsPauseOverlay?.destroy?.();
     } catch {}
@@ -2694,6 +2748,7 @@ function hideOverlay(opts = {}) {
   }
 
   async function showBadgeForCurrentIfFresh() {
+    if (isLiveTvPlaybackContext({ video: activeVideo })) return false;
     if (Date.now() - _badgeShownAt < BADGE_LOCK_MS) return false;
     if (ratingGenreElement?.classList?.contains("visible")) return false;
     if (_iconEl?.classList?.contains("visible")) return false;
@@ -2713,6 +2768,7 @@ function hideOverlay(opts = {}) {
 
     const data = await fetchItemDetailsCached(itemId).catch(() => null);
     if (!data) { console.debug('[badge] no item data'); return false; }
+    if (isLiveTvItem(data)) return false;
     if (shouldIgnoreTheme({ video: activeVideo, item: data })) return false;
     const durMs = _badgeDurationFor(_badgeCtx);
 
@@ -2757,6 +2813,13 @@ function hideOverlay(opts = {}) {
 
   function bindVideo(video, why = '') {
     if (isPreviewPlaybackElement(video)) return false;
+    if (isLiveTvPlaybackContext({ video })) {
+      if (activeVideo === video) {
+        try { clearOverlayUi(); } catch {}
+        try { if (removeHandlers) removeHandlers(); } catch {}
+      }
+      return false;
+    }
     ddbg("[PO] bindVideo", why, "paused?", video?.paused, "src?", video?.currentSrc || video?.src);
     if (!video) return false;
     try {
@@ -2855,6 +2918,10 @@ function hideOverlay(opts = {}) {
     }
     const onPause = async () => {
       cancelBadgeTimer();
+      if (isLiveTvPlaybackContext({ video })) {
+        clearOverlayUi();
+        return;
+      }
       ddbg("[PO] onPause fired", { ct: video.currentTime, dur: video.duration, paused: video.paused });
       hideRatingGenre();
       try { hideIconBadges(); } catch {}
@@ -2888,6 +2955,7 @@ function hideOverlay(opts = {}) {
 
         let baseInfo = await fetchItemDetailsCached(itemId).catch(e => (console.warn('[pause] fetchItemDetails err', e), null));
         ddbg('[pause] baseInfo', baseInfo ? { Id: baseInfo.Id, Type: baseInfo.Type, SeriesId: baseInfo.SeriesId } : null);
+        if (isLiveTvItem(baseInfo)) return;
         if (shouldIgnoreTheme({ video, item: baseInfo })) return;
 
         let seriesId =
@@ -2897,6 +2965,7 @@ function hideOverlay(opts = {}) {
         currentMediaId = seriesId;
         const series = await fetchItemDetailsCached(seriesId);
         if (!video.paused || video.ended) return;
+        if (isLiveTvItem(series)) return;
         if (shouldIgnoreTheme({ video, item: series })) return;
         if (baseInfo?.Type === "Episode") {
           await refreshData({ ...series, _episodeData: baseInfo });
@@ -2911,6 +2980,10 @@ function hideOverlay(opts = {}) {
     hardResetBadgeOverlay();
 
     const onPlay = () => {
+      if (isLiveTvPlaybackContext({ video })) {
+        clearOverlayUi();
+        return;
+      }
       _badgeCtx = (_playCount === 0) ? "first" : "resume";
       _playCount++;
       _playEventAt = Date.now();
@@ -3618,6 +3691,10 @@ function hideOverlay(opts = {}) {
   }
   const mo = LC.trackMo(
     new MutationObserver((muts) => {
+      if (isLiveTvRouteActive()) {
+        if (overlayVisible) hideOverlay();
+        return;
+      }
       if (_moQueued) return;
       _moQueued = true;
 
@@ -3665,9 +3742,10 @@ function hideOverlay(opts = {}) {
   mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
   const initVid = findAnyVideoDeep(document);
-  if (initVid) bindVideo(initVid);
+  if (initVid && !isLiveTvRouteActive()) bindVideo(initVid);
   let _fallbackTries = 0;
   const _fallbackScan = setInterval(() => {
+    if (isLiveTvRouteActive()) return;
     if (!activeVideo) {
       const v = findBestPlayableVideoAnywhere(10);
       if (v) bindVideo(v);
@@ -3679,6 +3757,10 @@ function hideOverlay(opts = {}) {
 
   function startOverlayLogic() {
     const tick = () => {
+      if (isLiveTvRouteActive()) {
+        if (overlayVisible) hideOverlay();
+        return;
+      }
       const onValidPage = isVideoVisible(activeVideo);
       if (!onValidPage && overlayVisible) hideOverlay();
     };

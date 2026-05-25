@@ -6,6 +6,11 @@ import {
   getVideoStreamUrl
 } from "../../Plugins/JMSFusion/runtime/api.js";
 import { cleanupImageResourceRefs } from "./imageResourceCleanup.js";
+import {
+  applyPreviewTrailerAudioToVideo,
+  postPreviewTrailerAudioToYouTubeIframe,
+  setYouTubeUrlPreviewAudio
+} from "./utils.js";
 
 let __pop = null;
 let __timer = null;
@@ -265,18 +270,23 @@ function ytEmbed(url) {
 
     const params = new URLSearchParams({
       autoplay: "1",
-      mute: isMobileLike() ? "1" : "0",
+      mute: "0",
       controls: "0",
       playsinline: "1",
       rel: "0",
       modestbranding: "1",
     });
 
-    if (location.protocol === "https:") {
+    if (/^https?:\/\//i.test(location.origin || "")) {
       params.set("enablejsapi", "1");
       params.set("origin", location.origin);
+    } else {
+      params.set("enablejsapi", "0");
     }
-    return `https://www.youtube-nocookie.com/embed/${id}?${params.toString()}`;
+    return setYouTubeUrlPreviewAudio(
+      `https://www.youtube-nocookie.com/embed/${id}?${params.toString()}`,
+      { config: getConfig(), mutedByDevice: isMobileLike() }
+    );
   } catch {}
   return null;
 }
@@ -374,12 +384,26 @@ function renderPlayer(container, kind, src) {
   clearPlayerContainer(container);
   if (kind === "youtube") {
     const iframe = document.createElement("iframe");
-    iframe.src = src;
+    iframe.src = setYouTubeUrlPreviewAudio(src, { config: getConfig(), mutedByDevice: isMobileLike() });
     iframe.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
     iframe.sandbox = "allow-same-origin allow-scripts allow-popups allow-presentation";
     iframe.frameBorder = "0";
     iframe.referrerPolicy = "strict-origin-when-cross-origin";
     iframe.classList.add("studio-trailer-iframe");
+    iframe.addEventListener("load", () => {
+      postPreviewTrailerAudioToYouTubeIframe(iframe, {
+        config: getConfig(),
+        mutedByDevice: isMobileLike()
+      });
+    }, { once: true });
+    setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
+      config: getConfig(),
+      mutedByDevice: isMobileLike()
+    }), 500);
+    setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
+      config: getConfig(),
+      mutedByDevice: isMobileLike()
+    }), 1400);
     container.appendChild(iframe);
     return;
   }
@@ -387,12 +411,12 @@ function renderPlayer(container, kind, src) {
   const video = document.createElement("video");
   video.src = src;
   video.autoplay = true;
-  video.muted = isMobileLike();
   video.controls = false;
   video.loop = true;
   video.playsInline = true;
   video.preload = "metadata";
   video.classList.add("studio-trailer-video");
+  applyPreviewTrailerAudioToVideo(video, { config: getConfig(), mutedByDevice: isMobileLike() });
   container.appendChild(video);
 }
 

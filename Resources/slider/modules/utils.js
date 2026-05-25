@@ -12,6 +12,8 @@ import { openDetailsModal } from "./detailsModalLoader.js";
 import { withServer, withServerSrcset, invalidateServerBaseCache, resolveServerBase } from "./jfUrl.js";
 
 const config = getConfig();
+const PLAYBACK_START_REQUESTED_EVENT = "jms:playback-start-requested";
+const AUTO_TRAILER_BLOCKED_FLAG = "__JMS_AUTO_TRAILER_PLAYBACK_BLOCKED";
 const S = (u) => {
   if (!u) return u;
   if (/^https?:\/\//i.test(u)) return u;
@@ -106,21 +108,217 @@ function ensureAudioPreviewCssOnce() {
     @media (prefers-reduced-motion: reduce) {
       .jms-audio-preview-overlay__bars span { animation: none; transform: scaleY(.72); }
     }
+    .monwui-auto-trailer-toggle {
+      align-items: center;
+      background: rgba(8,12,18,.64);
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 999px;
+      color: #fff;
+      cursor: pointer;
+      display: none;
+      height: 42px;
+      justify-content: center;
+      position: absolute;
+      right: 14px;
+      top: 48px;
+      width: 42px;
+      z-index: 8;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 24px rgba(0,0,0,.28);
+    }
+    .monwui-auto-trailer-toggle:hover {
+      background: rgba(18,24,34,.78);
+      transform: translateY(-1px);
+    }
+    .monwui-auto-trailer-toggle i {
+      font-size: 14px;
+      line-height: 1;
+    }
+    .monwui-preview-volume-control {
+      display: none;
+      position: absolute;
+      right: 14px;
+      top: 48px;
+      z-index: 8;
+    }
+    .monwui-preview-volume-toggle {
+      align-items: center;
+      background: rgba(8,12,18,.64);
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 999px;
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      height: 42px;
+      justify-content: center;
+      position: relative;
+      width: 42px;
+      backdrop-filter: blur(8px);
+      box-shadow: 0 10px 24px rgba(0,0,0,.28);
+    }
+    .monwui-preview-volume-toggle:hover {
+      background: rgba(18,24,34,.78);
+      transform: translateY(-1px);
+    }
+    .monwui-preview-volume-toggle i {
+      font-size: 14px;
+      line-height: 1;
+    }
+    .monwui-preview-volume-panel {
+      align-items: center;
+      background: rgba(8,12,18,.72);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 999px;
+      box-shadow: 0 10px 24px rgba(0,0,0,.28);
+      display: none;
+      height: 42px;
+      padding: 0 12px;
+      position: absolute;
+      right: 42px;
+      top: 0;
+      width: 148px;
+      backdrop-filter: blur(8px);
+    }
+    .monwui-preview-volume-control:hover .monwui-preview-volume-panel {
+      display: flex;
+    }
+    .monwui-preview-volume-range {
+      accent-color: #fff;
+      cursor: pointer;
+      width: 124px;
+    }
   `;
   document.head.appendChild(style);
+}
+
+function isAutoTrailerPlaybackBlocked() {
+  try {
+    return window[AUTO_TRAILER_BLOCKED_FLAG] === true;
+  } catch {
+    return false;
+  }
+}
+
+function blockAutoTrailerPlayback() {
+  try {
+    window[AUTO_TRAILER_BLOCKED_FLAG] = true;
+  } catch {}
+}
+
+function readBoolConfigValue(sourceConfig, key, fallback = false) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw !== null) return raw === "true";
+  } catch {}
+  const value = sourceConfig?.[key];
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  return fallback;
+}
+
+function readPercentConfigValue(sourceConfig, key, fallback = 50) {
+  let raw = sourceConfig?.[key];
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored !== null && stored !== "") raw = stored;
+  } catch {}
+  const parsed = Number.parseFloat(String(raw ?? fallback).replace(",", "."));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.min(100, parsed));
+}
+
+export function getPreviewTrailerAudioState({
+  config: sourceConfig = null,
+  soundOn = true,
+  mutedByDevice = false,
+  ignoreStartMuted = false,
+} = {}) {
+  const cfg = sourceConfig || getConfig() || {};
+  const startMuted = readBoolConfigValue(cfg, "previewTrailerStartMuted", false);
+  const volumeLimitEnabled = readBoolConfigValue(cfg, "previewTrailerVolumeLimit", false);
+  const volumePercent = readPercentConfigValue(cfg, "previewTrailerVolumePercent", 50);
+  const effectivePercent = volumeLimitEnabled ? volumePercent : 100;
+  const muted =
+    mutedByDevice === true ||
+    soundOn === false ||
+    (!ignoreStartMuted && startMuted) ||
+    effectivePercent <= 0;
+
+  return {
+    startMuted,
+    volumeLimitEnabled,
+    volumePercent,
+    effectivePercent,
+    volume: muted ? 0 : effectivePercent / 100,
+    muted,
+  };
+}
+
+export function applyPreviewTrailerAudioToVideo(video, opts = {}) {
+  const audioState = getPreviewTrailerAudioState(opts);
+  if (!video) return audioState;
+  try {
+    video.muted = audioState.muted;
+    video.volume = audioState.muted ? 0 : audioState.volume;
+  } catch {}
+  return audioState;
+}
+
+export function setYouTubeUrlPreviewAudio(url, opts = {}) {
+  const audioState = getPreviewTrailerAudioState(opts);
+  try {
+    const parsed = new URL(url, window.location.href);
+    parsed.searchParams.set("mute", audioState.muted ? "1" : "0");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+export function applyPreviewTrailerAudioToYouTubePlayer(player, opts = {}) {
+  const audioState = getPreviewTrailerAudioState(opts);
+  if (!player) return audioState;
+  try {
+    if (audioState.muted) {
+      player.mute?.();
+    } else {
+      player.unMute?.();
+      player.setVolume?.(Math.round(audioState.effectivePercent));
+    }
+  } catch {}
+  return audioState;
+}
+
+export function postPreviewTrailerAudioToYouTubeIframe(iframe, opts = {}) {
+  const audioState = getPreviewTrailerAudioState(opts);
+  try {
+    const post = (func, args = []) => {
+      iframe?.contentWindow?.postMessage(
+        JSON.stringify({ event: "command", func, args }),
+        "*"
+      );
+    };
+    if (audioState.muted) {
+      post("mute");
+    } else {
+      post("unMute");
+      post("setVolume", [Math.round(audioState.effectivePercent)]);
+    }
+  } catch {}
+  return audioState;
 }
 
 export function getYoutubeEmbedUrl(input) {
   if (!input || typeof input !== "string") return input;
 
-  const isHttps = (() => {
-    try { return window.location.protocol === "https:"; } catch { return false; }
+  const canUseOriginAndJSAPI = (() => {
+    try {
+      const origin = window.location?.origin || "";
+      return /^https?:\/\//i.test(origin);
+    } catch {
+      return false;
+    }
   })();
-  const host = (() => {
-    try { return new URL(window.location.href).hostname; } catch { return ""; }
-  })();
-  const isPrivateHost = /^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/.test(host);
-  const canUseOriginAndJSAPI = isHttps && !isPrivateHost;
 
   if (/^[a-zA-Z0-9_-]{10,}$/.test(input) && !/youtu\.?be|youtube\.com/i.test(input)) {
     const params = new URLSearchParams({
@@ -136,7 +334,7 @@ export function getYoutubeEmbedUrl(input) {
 
     try {
       const orig = window.location?.origin || "";
-        if (canUseOriginAndJSAPI && orig && /^https:\/\//i.test(orig)) {
+        if (canUseOriginAndJSAPI && orig && /^https?:\/\//i.test(orig)) {
           params.set("origin", orig);
         }
       } catch {}
@@ -212,7 +410,7 @@ export function getYoutubeEmbedUrl(input) {
   });
   try {
     const orig = (typeof window !== "undefined" && window.location?.origin) || "";
-    if (canUseOriginAndJSAPI && orig && /^https:\/\//i.test(orig)) {
+    if (canUseOriginAndJSAPI && orig && /^https?:\/\//i.test(orig)) {
       params.set("origin", orig);
     }
   } catch {}
@@ -441,6 +639,7 @@ export function createTrailerIframe({
   detailsUrl,
   detailsText,
   showDetailsOverlay = true,
+  allowAutoTrailer = false,
 }) {
   const normalizePreviewPlaybackMode = (value) => (
     value === "trailer" ||
@@ -574,13 +773,13 @@ export function createTrailerIframe({
   videoElement.controls = true;
   videoElement.dataset.jmsPreview = "1";
   videoElement.dataset.jmsIgnorePauseOverlay = "1";
-  videoElement.muted = false;
   videoElement.autoplay = true;
   videoElement.playsInline = true;
   videoElement.style.width = "100%";
   videoElement.style.height = "100%";
   videoElement.style.transition = "opacity 0.2s ease-in-out";
   videoElement.style.opacity = "0";
+  applyPreviewTrailerAudioToVideo(videoElement, { config });
 
   videoContainer.appendChild(videoElement);
 
@@ -634,6 +833,29 @@ function clearPreviewPlaybackFlag() {
   let detachGuards = null;
   let ytRevealTimer = null;
   let videoHideTimer = null;
+  let autoPreviewActive = false;
+  let autoPreviewEnded = false;
+  let autoTrailerPaused = false;
+  let autoTrailerUserPaused = false;
+  let autoTrailerSuspended = false;
+  let autoTrailerResumeTimer = null;
+  const autoTrailerSuspendReasons = new Set();
+  let autoCompletionTimer = null;
+  let autoToggleButton = null;
+  let previewVolumeWrap = null;
+  let previewVolumeButton = null;
+  let previewVolumeRange = null;
+  let ytPlayer = null;
+  let ytMuted = getPreviewTrailerAudioState({ config }).muted;
+  let autoPreviewPending = false;
+  let autoAdvanceWaiting = false;
+  let autoSlideVisible = true;
+  let autoTrailerPlaybackBlocked = isAutoTrailerPlaybackBlocked();
+  let runtimePreviewVolumePercent = getPreviewTrailerAudioState({
+    config,
+    soundOn: true,
+    ignoreStartMuted: true
+  }).effectivePercent;
 
   const clearYtRevealTimer = () => {
     if (!ytRevealTimer) return;
@@ -696,6 +918,7 @@ function clearPreviewPlaybackFlag() {
   };
 
   videoElement.addEventListener("ended", () => {
+    const endedKind = playingKind;
     clearVideoHideTimer();
     clearPreviewPlaybackFlag();
     setAudioOverlayState(false);
@@ -708,6 +931,11 @@ function clearPreviewPlaybackFlag() {
       } catch {}
     }, 200);
     playingKind = null;
+    setPreviewVolumeVisible(false);
+    setAutoToggleVisible(false);
+    if (autoPreviewActive && endedKind === "localTrailer") {
+      markAutoTrailerEnded({ advance: true });
+    }
   });
 
   const _detailsCache = new Map();
@@ -753,12 +981,570 @@ function clearPreviewPlaybackFlag() {
 
   const canUseYTApiPostMessage = (() => {
     try {
-      const isHttps = window.location.protocol === "https:";
-      const host = new URL(window.location.href).hostname;
-      const isPrivateHost = /^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/.test(host);
-      return isHttps && !isPrivateHost;
+      const origin = window.location?.origin || "";
+      return /^https?:\/\//i.test(origin);
     } catch { return false; }
   })();
+
+  const isSliderAutoTrailerEnabled = () => {
+    if (!allowAutoTrailer) return false;
+    try {
+      const stored = localStorage.getItem("sliderAutoTrailerPlayback");
+      if (stored !== null) return stored === "true";
+    } catch {}
+    return config?.sliderAutoTrailerPlayback === true;
+  };
+
+  const isAutoSlideRectVisible = () => {
+    if (!allowAutoTrailer) return false;
+    try {
+      if (!slide?.isConnected) return false;
+      const rect = slide.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+      if (!rect.width || !rect.height || !vh || !vw) return false;
+      const visibleW = Math.max(0, Math.min(rect.right, vw) - Math.max(rect.left, 0));
+      const visibleH = Math.max(0, Math.min(rect.bottom, vh) - Math.max(rect.top, 0));
+      const visibleRatio = (visibleW * visibleH) / (rect.width * rect.height);
+      return visibleRatio >= 0.35;
+    } catch {
+      return false;
+    }
+  };
+
+  const isAutoSlideVisible = () => allowAutoTrailer && autoSlideVisible && isAutoSlideRectVisible();
+
+  const shouldKeepPreviewAlive = (hoverId) => (
+    (isMouseOver || autoPreviewActive) &&
+    hoverId === latestHoverId &&
+    isActiveSlide() &&
+    (!autoPreviewActive || isAutoSlideVisible() || autoTrailerSuspended)
+  );
+
+  const clearAutoCompletionTimer = () => {
+    if (!autoCompletionTimer) return;
+    clearTimeout(autoCompletionTimer);
+    autoCompletionTimer = null;
+  };
+
+  const clearAutoTrailerResumeTimer = () => {
+    if (!autoTrailerResumeTimer) return;
+    clearTimeout(autoTrailerResumeTimer);
+    autoTrailerResumeTimer = null;
+  };
+
+  function ensureAutoToggleButton() {
+    if (!isSliderAutoTrailerEnabled()) return null;
+    if (autoToggleButton) return autoToggleButton;
+    const labels = config?.languageLabels || {};
+    autoToggleButton = document.createElement("button");
+    autoToggleButton.type = "button";
+    autoToggleButton.className = "monwui-auto-trailer-toggle";
+    autoToggleButton.setAttribute("aria-label", labels.sliderAutoTrailerPause || "Fragmanı duraklat");
+    autoToggleButton.title = labels.sliderAutoTrailerPause || "Fragmanı duraklat";
+    autoToggleButton.innerHTML = '<i class="fa-solid fa-pause"></i>';
+    autoToggleButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleAutoTrailerPlayback();
+    });
+    (backdropContainer || slide).appendChild(autoToggleButton);
+    return autoToggleButton;
+  }
+
+  function setAutoToggleVisible(visible) {
+    const btn = visible ? ensureAutoToggleButton() : autoToggleButton;
+    if (btn) btn.style.display = visible ? "flex" : "none";
+  }
+
+  function syncAutoToggleButton() {
+    if (!autoToggleButton) return;
+    const labels = config?.languageLabels || {};
+    autoToggleButton.innerHTML = autoTrailerPaused
+      ? '<i class="fa-solid fa-play"></i>'
+      : '<i class="fa-solid fa-pause"></i>';
+    const title = autoTrailerPaused
+      ? (labels.sliderAutoTrailerResume || "Fragmanı devam ettir")
+      : (labels.sliderAutoTrailerPause || "Fragmanı duraklat");
+    autoToggleButton.title = title;
+    autoToggleButton.setAttribute("aria-label", title);
+  }
+
+  function ensurePreviewVolumeButton() {
+    if (previewVolumeButton) return previewVolumeButton;
+    const labels = config?.languageLabels || {};
+    previewVolumeWrap = document.createElement("div");
+    previewVolumeWrap.className = "monwui-preview-volume-control";
+
+    previewVolumeButton = document.createElement("button");
+    previewVolumeButton.type = "button";
+    previewVolumeButton.className = "monwui-preview-volume-toggle";
+    previewVolumeButton.setAttribute("aria-label", labels.previewTrailerVolumeToggle || "Fragman sesini aç/kapat");
+    previewVolumeButton.title = labels.previewTrailerVolumeToggle || "Fragman sesini aç/kapat";
+    previewVolumeButton.innerHTML = '<i class="fa-solid fa-volume-xmark"></i>';
+    previewVolumeButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      togglePreviewVolume();
+    });
+
+    const panel = document.createElement("div");
+    panel.className = "monwui-preview-volume-panel";
+    previewVolumeRange = document.createElement("input");
+    previewVolumeRange.type = "range";
+    previewVolumeRange.className = "monwui-preview-volume-range";
+    previewVolumeRange.min = "0";
+    previewVolumeRange.max = "100";
+    previewVolumeRange.step = "1";
+    previewVolumeRange.value = String(Math.round(runtimePreviewVolumePercent));
+    previewVolumeRange.setAttribute("aria-label", labels.previewTrailerVolumePercent || "Fragman başlangıç ses seviyesi (%)");
+    previewVolumeRange.addEventListener("input", (event) => {
+      event.stopPropagation();
+      setPreviewVolumePercent(Number(event.target.value), { unmute: true });
+    });
+    previewVolumeRange.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    panel.appendChild(previewVolumeRange);
+    previewVolumeWrap.append(panel, previewVolumeButton);
+    (backdropContainer || slide).appendChild(previewVolumeWrap);
+    return previewVolumeButton;
+  }
+
+  function setPreviewVolumeVisible(visible) {
+    if (visible) ensurePreviewVolumeButton();
+    const wrap = previewVolumeWrap;
+    if (wrap) {
+      const alignWithAutoToggle = autoPreviewActive && isSliderAutoTrailerEnabled();
+      wrap.style.top = "48px";
+      wrap.style.right = alignWithAutoToggle ? "64px" : "48px";
+      wrap.style.display = visible ? "block" : "none";
+    }
+  }
+
+  function syncPreviewVolumeButton(muted = null) {
+    const btn = previewVolumeButton;
+    if (!btn) return;
+    const isMuted = muted === null ? getCurrentPreviewMuted() : muted;
+    btn.innerHTML = isMuted
+      ? '<i class="fa-solid fa-volume-xmark"></i>'
+      : '<i class="fa-solid fa-volume-high"></i>';
+    if (previewVolumeRange) {
+      previewVolumeRange.value = String(Math.round(getCurrentPreviewVolumePercent()));
+    }
+  }
+
+  function postYoutubeCommand(func, args = []) {
+    try {
+      ytIframe?.contentWindow?.postMessage(
+        JSON.stringify({ event: "command", func, args }),
+        "*"
+      );
+    } catch {}
+  }
+
+  function getCurrentPreviewMuted() {
+    if (playingKind === "remoteTrailer") return ytMuted;
+    try {
+      return !!videoElement.muted || Number(videoElement.volume) <= 0;
+    } catch {
+      return true;
+    }
+  }
+
+  function getCurrentPreviewVolumePercent() {
+    if (playingKind === "remoteTrailer") {
+      try {
+        const n = ytPlayer?.getVolume?.();
+        if (Number.isFinite(n)) return Math.max(0, Math.min(100, n));
+      } catch {}
+      return runtimePreviewVolumePercent;
+    }
+    try {
+      return Math.round(Math.max(0, Math.min(1, Number(videoElement.volume) || 0)) * 100);
+    } catch {
+      return runtimePreviewVolumePercent;
+    }
+  }
+
+  function setPreviewVolumePercent(percent, { unmute = true } = {}) {
+    const value = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : runtimePreviewVolumePercent));
+    runtimePreviewVolumePercent = value;
+    if (previewVolumeRange) previewVolumeRange.value = String(Math.round(value));
+    const muted = value <= 0 || !unmute;
+
+    if (playingKind === "remoteTrailer") {
+      ytMuted = muted;
+      if (muted) {
+        try { ytPlayer?.mute?.(); } catch {}
+        postYoutubeCommand("mute");
+      } else {
+        try {
+          ytPlayer?.unMute?.();
+          ytPlayer?.setVolume?.(Math.round(value));
+        } catch {}
+        postYoutubeCommand("unMute");
+        postYoutubeCommand("setVolume", [Math.round(value)]);
+      }
+      syncPreviewVolumeButton(ytMuted);
+      return;
+    }
+
+    try {
+      videoElement.muted = muted;
+      videoElement.volume = muted ? 0 : value / 100;
+    } catch {}
+    syncPreviewVolumeButton(muted);
+  }
+
+  function setPreviewVolumeMuted(muted) {
+    if (playingKind === "remoteTrailer") {
+      ytMuted = !!muted;
+      if (ytMuted) {
+        try { ytPlayer?.mute?.(); } catch {}
+        postYoutubeCommand("mute");
+      } else {
+        const audioState = applyPreviewTrailerAudioToYouTubePlayer(ytPlayer, {
+          config,
+          soundOn: true,
+          ignoreStartMuted: true
+        });
+        postPreviewTrailerAudioToYouTubeIframe(ytIframe, {
+          config,
+          soundOn: true,
+          ignoreStartMuted: true
+        });
+        ytMuted = audioState.muted;
+        runtimePreviewVolumePercent = audioState.effectivePercent;
+      }
+      syncPreviewVolumeButton(ytMuted);
+      return;
+    }
+
+    if (muted) {
+      try {
+        videoElement.muted = true;
+        videoElement.volume = 0;
+      } catch {}
+      syncPreviewVolumeButton(true);
+      return;
+    }
+
+    const audioState = applyPreviewTrailerAudioToVideo(videoElement, {
+      config,
+      soundOn: true,
+      ignoreStartMuted: true
+    });
+    runtimePreviewVolumePercent = audioState.effectivePercent;
+    syncPreviewVolumeButton(audioState.muted);
+  }
+
+  function togglePreviewVolume() {
+    setPreviewVolumeMuted(!getCurrentPreviewMuted());
+  }
+
+  function setCurrentAutoTrailerPaused(paused) {
+    autoTrailerPaused = !!paused;
+    if (playingKind === "localTrailer") {
+      try {
+        if (autoTrailerPaused) {
+          videoElement.pause();
+        } else {
+          const playPromise = videoElement.play();
+          if (playPromise?.catch) playPromise.catch(() => {});
+        }
+      } catch {}
+    } else if (playingKind === "remoteTrailer") {
+      if (ytPlayer) {
+        try {
+          if (autoTrailerPaused) ytPlayer.pauseVideo?.();
+          else ytPlayer.playVideo?.();
+        } catch {}
+      } else {
+        postYoutubeCommand(autoTrailerPaused ? "pauseVideo" : "playVideo");
+      }
+    }
+    syncAutoToggleButton();
+  }
+
+  function isAutoTrailerForegroundReady() {
+    try {
+      if (document.hidden) return false;
+      if (typeof document.hasFocus === "function" && !document.hasFocus()) return false;
+    } catch {}
+    return true;
+  }
+
+  function canResumeAutoTrailerPlayback() {
+    return (
+      isSliderAutoTrailerEnabled() &&
+      isActiveSlide() &&
+      isAutoSlideVisible() &&
+      !autoTrailerPlaybackBlocked &&
+      !isAutoTrailerPlaybackBlocked() &&
+      isAutoTrailerForegroundReady()
+    );
+  }
+
+  function resetAutoTrailerSuspension() {
+    autoTrailerSuspended = false;
+    autoTrailerSuspendReasons.clear();
+    clearAutoTrailerResumeTimer();
+  }
+
+  function suspendAutoTrailerPlayback(reason = "system", { hideControls = false } = {}) {
+    if (!autoPreviewActive && !autoPreviewPending) return false;
+
+    if (reason) autoTrailerSuspendReasons.add(reason);
+    autoTrailerSuspended = autoTrailerSuspendReasons.size > 0;
+    clearAutoTrailerResumeTimer();
+    clearAutoCompletionTimer();
+
+    if (enterTimeout) {
+      clearTimeout(enterTimeout);
+      enterTimeout = null;
+      autoPreviewPending = true;
+    }
+
+    setCurrentAutoTrailerPaused(true);
+    if (hideControls) {
+      setAutoToggleVisible(false);
+      setPreviewVolumeVisible(false);
+    }
+    return true;
+  }
+
+  function queueAutoTrailerResume() {
+    clearAutoTrailerResumeTimer();
+    autoTrailerResumeTimer = setTimeout(() => {
+      autoTrailerResumeTimer = null;
+      resumeAutoTrailerPlayback();
+    }, 120);
+  }
+
+  function releaseAutoTrailerSuspension(reason = "system") {
+    if (reason) {
+      autoTrailerSuspendReasons.delete(reason);
+    } else {
+      autoTrailerSuspendReasons.clear();
+    }
+    autoTrailerSuspended = autoTrailerSuspendReasons.size > 0;
+    if (!autoTrailerSuspended && autoTrailerUserPaused && autoPreviewActive && playingKind && canResumeAutoTrailerPlayback()) {
+      setAutoToggleVisible(true);
+      setPreviewVolumeVisible(true);
+      syncAutoToggleButton();
+      return;
+    }
+    if (!autoTrailerSuspended) queueAutoTrailerResume();
+  }
+
+  function resumeAutoTrailerPlayback() {
+    if (autoTrailerSuspended || autoTrailerUserPaused) return false;
+    if (!canResumeAutoTrailerPlayback()) return false;
+
+    if (!autoPreviewActive && !autoPreviewPending) {
+      maybeStartAutoTrailer();
+      return true;
+    }
+
+    if (!playingKind) {
+      const keepAdvanceWaiting = autoAdvanceWaiting;
+      autoPreviewActive = false;
+      autoPreviewPending = false;
+      autoTrailerPaused = false;
+      setAutoToggleVisible(false);
+      setPreviewVolumeVisible(false);
+      startPreview({ auto: true });
+      autoAdvanceWaiting = keepAdvanceWaiting;
+      return true;
+    }
+
+    autoPreviewActive = true;
+    autoPreviewEnded = false;
+    autoPreviewPending = false;
+
+    showDetailsOverlay();
+    setAutoToggleVisible(true);
+    setPreviewVolumeVisible(true);
+
+    if (playingKind === "localTrailer") {
+      try {
+        videoContainer.style.display = "block";
+        slide.classList.add("video-active", "intro-active", "trailer-active");
+        videoElement.style.display = "block";
+        videoElement.style.opacity = "1";
+        hideBackdrop();
+      } catch {}
+    } else if (playingKind === "remoteTrailer") {
+      if (!ytIframe) {
+        playingKind = null;
+        const keepAdvanceWaiting = autoAdvanceWaiting;
+        autoPreviewActive = false;
+        autoPreviewPending = false;
+        startPreview({ auto: true });
+        autoAdvanceWaiting = keepAdvanceWaiting;
+        return true;
+      }
+      try {
+        ytIframe.style.display = "block";
+        slide.classList.add("trailer-active");
+        hideBackdrop();
+      } catch {}
+      postPreviewTrailerAudioToYouTubeIframe(ytIframe, { config });
+      clearAutoCompletionTimer();
+      autoCompletionTimer = setTimeout(() => {
+        markAutoTrailerEnded({ advance: true });
+      }, 180000);
+    }
+
+    setCurrentAutoTrailerPaused(false);
+    return true;
+  }
+
+  function throwIfAutoTrailerSuspended() {
+    if (!autoPreviewActive || !autoTrailerSuspended) return;
+    autoPreviewPending = true;
+    throw new Error("AutoTrailerSuspended");
+  }
+
+  function toggleAutoTrailerPlayback() {
+    if (!autoPreviewActive || !playingKind) return;
+    const nextPaused = !autoTrailerPaused;
+    autoTrailerUserPaused = nextPaused;
+    if (!nextPaused) {
+      resetAutoTrailerSuspension();
+    }
+    setCurrentAutoTrailerPaused(nextPaused);
+  }
+
+  async function advanceAfterAutoTrailer() {
+    if (!isSliderAutoTrailerEnabled() || !isActiveSlide()) return;
+    try {
+      const nav = await import("./navigation.js");
+      if (isActiveSlide()) nav.changeSlide?.(1);
+    } catch {}
+  }
+
+  function markAutoTrailerEnded({ advance = true } = {}) {
+    if (!autoPreviewActive) return;
+    autoPreviewEnded = true;
+    autoPreviewActive = false;
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    resetAutoTrailerSuspension();
+    autoPreviewPending = false;
+    autoAdvanceWaiting = false;
+    clearAutoCompletionTimer();
+    setAutoToggleVisible(false);
+    if (advance) {
+      setTimeout(() => advanceAfterAutoTrailer(), 0);
+    }
+  }
+
+  function finishAutoPreviewWithoutPlayback() {
+    const shouldAdvance = autoAdvanceWaiting;
+    autoPreviewEnded = true;
+    autoPreviewActive = false;
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    resetAutoTrailerSuspension();
+    autoPreviewPending = false;
+    autoAdvanceWaiting = false;
+    clearAutoCompletionTimer();
+    setAutoToggleVisible(false);
+    setPreviewVolumeVisible(false);
+    if (shouldAdvance) {
+      setTimeout(() => advanceAfterAutoTrailer(), 0);
+    }
+  }
+
+  function ensureSliderYTAPI() {
+    if (typeof YT !== "undefined" && typeof YT.Player === "function") return Promise.resolve(true);
+    if (window.__jmsSliderYTApiLoading) {
+      return new Promise((resolve) => {
+        const iv = setInterval(() => {
+          if (typeof YT !== "undefined" && typeof YT.Player === "function") {
+            clearInterval(iv);
+            resolve(true);
+          }
+        }, 100);
+        setTimeout(() => {
+          clearInterval(iv);
+          resolve(typeof YT !== "undefined" && typeof YT.Player === "function");
+        }, 3500);
+      });
+    }
+    window.__jmsSliderYTApiLoading = true;
+    return new Promise((resolve) => {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      tag.async = true;
+      tag.onload = () => {};
+      document.head.appendChild(tag);
+      const startedAt = Date.now();
+      const iv = setInterval(() => {
+        const ready = typeof YT !== "undefined" && typeof YT.Player === "function";
+        if (ready || Date.now() - startedAt > 3500) {
+          clearInterval(iv);
+          window.__jmsSliderYTApiLoading = false;
+          resolve(ready);
+        }
+      }, 100);
+    });
+  }
+
+  function installSliderYTPlayer() {
+    if (!ytIframe || !autoPreviewActive || !canUseYTApiPostMessage) return;
+    ensureSliderYTAPI().then((ready) => {
+      if (!ready || !ytIframe || !autoPreviewActive) return;
+      try {
+        ytPlayer = new YT.Player(ytIframe, {
+          host: "https://www.youtube-nocookie.com",
+          playerVars: {
+            origin: window.location.origin
+          },
+          events: {
+            onReady: (event) => {
+              if (ytMuted || runtimePreviewVolumePercent <= 0) {
+                ytMuted = true;
+                try { event.target.mute?.(); } catch {}
+              } else {
+                ytMuted = false;
+                try {
+                  event.target.unMute?.();
+                  event.target.setVolume?.(Math.round(runtimePreviewVolumePercent));
+                } catch {}
+              }
+              syncPreviewVolumeButton(ytMuted);
+              const shouldPlay = !autoTrailerSuspended && !autoTrailerUserPaused && canResumeAutoTrailerPlayback();
+              autoTrailerPaused = !shouldPlay;
+              syncAutoToggleButton();
+              try {
+                if (shouldPlay) event.target.playVideo?.();
+                else event.target.pauseVideo?.();
+              } catch {}
+            },
+            onStateChange: (event) => {
+              if (!autoPreviewActive) return;
+              if (event.data === YT.PlayerState.ENDED) {
+                markAutoTrailerEnded({ advance: true });
+              } else if (event.data === YT.PlayerState.PAUSED) {
+                autoTrailerPaused = true;
+                syncAutoToggleButton();
+              } else if (event.data === YT.PlayerState.PLAYING) {
+                if (autoTrailerSuspended || autoTrailerUserPaused || !canResumeAutoTrailerPlayback()) {
+                  setCurrentAutoTrailerPaused(true);
+                  return;
+                }
+                autoTrailerPaused = false;
+                syncAutoToggleButton();
+              }
+            }
+          }
+        });
+      } catch {}
+    });
+  }
 
   const stopYoutube = (iframe) => {
     try {
@@ -804,6 +1590,11 @@ function clearPreviewPlaybackFlag() {
     clearPreviewPlaybackFlag();
     clearYtRevealTimer();
     setAudioOverlayState(false);
+    clearAutoCompletionTimer();
+    if (ytPlayer) {
+      try { ytPlayer.stopVideo?.(); ytPlayer.destroy?.(); } catch {}
+      ytPlayer = null;
+    }
     if (ytIframe) {
       try { stopYoutube(ytIframe); } catch {}
       try { ytIframe.src = "about:blank"; } catch {}
@@ -818,6 +1609,13 @@ function clearPreviewPlaybackFlag() {
     setAudioOverlayState(false);
     hideDetailsOverlay();
     showBackdrop();
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    resetAutoTrailerSuspension();
+    clearAutoTrailerResumeTimer();
+    clearAutoCompletionTimer();
+    setAutoToggleVisible(false);
+    setPreviewVolumeVisible(false);
     hardStopVideo({ immediate: false });
     hardStopIframe();
     if (arrowIntervalId) { clearInterval(arrowIntervalId); arrowIntervalId = null; }
@@ -836,7 +1634,7 @@ function clearPreviewPlaybackFlag() {
       false,
       { signal: abortController.signal }
     );
-    if (!isMouseOver || hoverId !== latestHoverId) throw new Error("HoverAbortError");
+    if (!shouldKeepPreviewAlive(hoverId)) throw new Error("HoverAbortError");
     if (!introUrl || introUrl === "null") return false;
     const audioPreview = isAudioLikeItem(previewDetails);
     if (audioPreview) {
@@ -845,11 +1643,18 @@ function clearPreviewPlaybackFlag() {
     }
 
     videoElement.src = introUrl;
+    const audioState = applyPreviewTrailerAudioToVideo(videoElement, { config });
+    runtimePreviewVolumePercent = audioState.effectivePercent;
     videoElement.load();
     const onMeta = () => {
       videoElement.removeEventListener("loadedmetadata", onMeta);
-      if (!isMouseOver || hoverId !== latestHoverId) {
+      if (!shouldKeepPreviewAlive(hoverId)) {
         fullCleanup();
+        return;
+      }
+      if (autoPreviewActive && autoTrailerSuspended) {
+        autoPreviewPending = true;
+        try { videoElement.pause(); } catch {}
         return;
       }
       videoElement.currentTime = startSeconds;
@@ -873,7 +1678,8 @@ function clearPreviewPlaybackFlag() {
   async function tryPlayLocalTrailer(hoverId) {
     if (!isActiveSlide()) return false;
     const locals = await fetchLocalTrailers(previewMediaItemId, { signal: abortController.signal });
-    if (!isMouseOver || hoverId !== latestHoverId || !isActiveSlide()) throw new Error("HoverAbortError");
+    if (!shouldKeepPreviewAlive(hoverId)) throw new Error("HoverAbortError");
+    throwIfAutoTrailerSuspended();
     const best = pickBestLocalTrailer(locals);
     if (!best?.Id) return false;
 
@@ -884,17 +1690,33 @@ function clearPreviewPlaybackFlag() {
     showDetailsOverlay();
     slide.classList.add("video-active", "intro-active", "trailer-active");
     playingKind = "localTrailer";
+    autoPreviewPending = false;
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    setPreviewVolumeVisible(true);
+    syncPreviewVolumeButton();
+    if (autoPreviewActive) {
+      autoPreviewEnded = false;
+      setAutoToggleVisible(true);
+      syncAutoToggleButton();
+    }
     setPreviewPlaybackFlag("localTrailer", best.Id);
     await loadStreamFor(best.Id, hoverId, 0);
     return true;
   }
 
-  async function tryPlayRemoteTrailer(_hoverId) {
+  async function tryPlayRemoteTrailer(hoverId, { onlyYouTube = false } = {}) {
     if (!isActiveSlide()) return false;
     const trailer = Array.isArray(RemoteTrailers) && RemoteTrailers.length ? RemoteTrailers[0] : null;
     if (!trailer?.Url) return false;
+    throwIfAutoTrailerSuspended();
 
-    const url = getYoutubeEmbedUrl(trailer.Url);
+    let url = getYoutubeEmbedUrl(trailer.Url);
+    const isYoutubeEmbed = /youtube(?:-nocookie)?\.com\/embed\//i.test(String(url || ""));
+    if (onlyYouTube && !isYoutubeEmbed) return false;
+    const audioState = getPreviewTrailerAudioState({ config });
+    runtimePreviewVolumePercent = audioState.effectivePercent;
+    url = setYouTubeUrlPreviewAudio(url, { config });
     if (!isValidUrl(url) || !isActiveSlide()) return false;
 
     hardStopVideo({ immediate: true });
@@ -926,12 +1748,22 @@ function clearPreviewPlaybackFlag() {
     clearYtRevealTimer();
     ytIframe.onload = () => {
       clearYtRevealTimer();
-      if (!isMouseOver || !isActiveSlide()) return;
+      if (!shouldKeepPreviewAlive(hoverId)) return;
+      postPreviewTrailerAudioToYouTubeIframe(ytIframe, { config });
+      if (autoTrailerSuspended) {
+        postYoutubeCommand("pauseVideo");
+        return;
+      }
       hideBackdrop();
     };
     ytRevealTimer = setTimeout(() => {
       ytRevealTimer = null;
-      if (!isMouseOver || !isActiveSlide()) return;
+      if (!shouldKeepPreviewAlive(hoverId)) return;
+      postPreviewTrailerAudioToYouTubeIframe(ytIframe, { config });
+      if (autoTrailerSuspended) {
+        postYoutubeCommand("pauseVideo");
+        return;
+      }
       hideBackdrop();
     }, 900);
     ytIframe.style.display = "block";
@@ -939,6 +1771,22 @@ function clearPreviewPlaybackFlag() {
     showDetailsOverlay();
     slide.classList.add("trailer-active");
     playingKind = "remoteTrailer";
+    autoPreviewPending = false;
+    ytMuted = audioState.muted;
+    setPreviewVolumeVisible(true);
+    syncPreviewVolumeButton(ytMuted);
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    if (autoPreviewActive) {
+      autoPreviewEnded = false;
+      setAutoToggleVisible(true);
+      syncAutoToggleButton();
+      clearAutoCompletionTimer();
+      autoCompletionTimer = setTimeout(() => {
+        markAutoTrailerEnded({ advance: true });
+      }, 180000);
+    }
+    installSliderYTPlayer();
     setPreviewPlaybackFlag("remoteTrailer", itemId);
     return true;
   }
@@ -946,13 +1794,15 @@ function clearPreviewPlaybackFlag() {
   async function playMainVideo(hoverId) {
     if (!isActiveSlide()) return false;
     const previewDetails = await getDetailsCached(previewMediaItemId, { signal: abortController.signal });
-    if (!isMouseOver || hoverId !== latestHoverId || !isActiveSlide()) throw new Error("HoverAbortError");
+    if (!shouldKeepPreviewAlive(hoverId)) throw new Error("HoverAbortError");
     hardStopIframe();
     clearVideoHideTimer();
     videoContainer.style.display = "block";
     showDetailsOverlay();
     slide.classList.add("video-active", "intro-active", "trailer-active");
     playingKind = "video";
+    setPreviewVolumeVisible(true);
+    syncPreviewVolumeButton();
     setPreviewPlaybackFlag("videoPreview", previewMediaItemId);
     const startSeconds = await getSmartStartSeconds(previewMediaItemId, { signal: abortController.signal });
     const ok = await loadStreamFor(previewMediaItemId, hoverId, startSeconds, { previewDetails });
@@ -963,10 +1813,22 @@ function clearPreviewPlaybackFlag() {
     return true;
   }
 
-  const handleEnter = () => {
+  const startPreview = ({ auto = false } = {}) => {
     if (!isActiveSlide()) return;
+    if (auto && !isSliderAutoTrailerEnabled()) return;
+    if (auto && (autoTrailerPlaybackBlocked || isAutoTrailerPlaybackBlocked())) return;
+    if (auto && !isAutoSlideVisible()) return;
+    if (!auto && autoPreviewActive && isSliderAutoTrailerEnabled()) return;
 
-    isMouseOver = true;
+    if (auto) {
+      autoPreviewActive = true;
+      autoPreviewEnded = false;
+      autoTrailerPaused = false;
+      autoPreviewPending = true;
+      autoAdvanceWaiting = false;
+    } else {
+      isMouseOver = true;
+    }
     showDetailsOverlay();
     latestHoverId++;
     const thisHoverId = latestHoverId;
@@ -979,9 +1841,15 @@ function clearPreviewPlaybackFlag() {
     }
 
     enterTimeout = setTimeout(async () => {
-      if (!isMouseOver || thisHoverId !== latestHoverId || !isActiveSlide()) return;
+      if (!shouldKeepPreviewAlive(thisHoverId)) return;
       try {
-        if (mode === "video") {
+        if (auto) {
+          throwIfAutoTrailerSuspended();
+          if (await tryPlayLocalTrailer(thisHoverId)) return;
+          if (await tryPlayRemoteTrailer(thisHoverId, { onlyYouTube: true })) return;
+          fullCleanup();
+          finishAutoPreviewWithoutPlayback();
+        } else if (mode === "video") {
           if (await playMainVideo(thisHoverId)) return;
         } else {
           if (await tryPlayLocalTrailer(thisHoverId)) return;
@@ -993,15 +1861,27 @@ function clearPreviewPlaybackFlag() {
           }
         }
       } catch (e) {
-        if (e.name === "AbortError" || e.message === "HoverAbortError") return;
+        if (e.name === "AbortError" || e.message === "HoverAbortError" || e.message === "AutoTrailerSuspended") return;
         console.error("Hover/play error:", e);
+        autoPreviewPending = false;
         fullCleanup();
+        if (auto) {
+          finishAutoPreviewWithoutPlayback();
+        }
       }
     }, delay);
   };
 
-  const handleLeave = () => {
+  const stopPreview = ({ force = false, markAutoEnded = false } = {}) => {
+    const shouldAdvanceStoppedAuto = markAutoEnded && autoAdvanceWaiting;
     isMouseOver = false;
+    autoPreviewActive = false;
+    autoPreviewEnded = markAutoEnded;
+    autoTrailerPaused = false;
+    autoTrailerUserPaused = false;
+    resetAutoTrailerSuspension();
+    autoPreviewPending = false;
+    if (markAutoEnded) autoAdvanceWaiting = false;
     latestHoverId++;
     abortController.abort("hover-cancel");
     abortController = new AbortController();
@@ -1010,6 +1890,27 @@ function clearPreviewPlaybackFlag() {
       enterTimeout = null;
     }
     fullCleanup();
+    if (shouldAdvanceStoppedAuto) {
+      setTimeout(() => advanceAfterAutoTrailer(), 0);
+    }
+  };
+
+  const handleEnter = () => startPreview({ auto: false });
+
+  const handleLeave = () => {
+    if (autoPreviewActive && !isMouseOver && !document.hidden && isActiveSlide() && isSliderAutoTrailerEnabled()) {
+      return;
+    }
+    stopPreview({ force: true });
+  };
+
+  const maybeStartAutoTrailer = () => {
+    if (!isSliderAutoTrailerEnabled() || !isActiveSlide()) return;
+    if (autoTrailerPlaybackBlocked || isAutoTrailerPlaybackBlocked()) return;
+    if (autoTrailerSuspended || !isAutoTrailerForegroundReady()) return;
+    if (!isAutoSlideVisible()) return;
+    if (autoPreviewActive || playingKind || enterTimeout) return;
+    startPreview({ auto: true });
   };
 
   function attachAutoCleanupGuards(slideEl) {
@@ -1029,7 +1930,15 @@ function clearPreviewPlaybackFlag() {
           for (const entry of entries) {
             if (entry.target === slideEl) {
               const visible = entry.isIntersecting && entry.intersectionRatio >= 0.5;
-              if (!visible) handleLeave();
+              autoSlideVisible = visible;
+              if (!visible) {
+                if (!suspendAutoTrailerPlayback("viewport", { hideControls: true })) {
+                  stopPreview({ force: true, markAutoEnded: true });
+                }
+              } else {
+                releaseAutoTrailerSuspension("viewport");
+                if (!autoPreviewActive && !autoPreviewPending) maybeStartAutoTrailer();
+              }
             }
           }
         },
@@ -1039,10 +1948,40 @@ function clearPreviewPlaybackFlag() {
       cleanups.push(() => io.disconnect());
     }
 
+    if (allowAutoTrailer) {
+      let viewportCheckRaf = 0;
+      const runViewportVisibilityCheck = () => {
+        viewportCheckRaf = 0;
+        if (!isActiveSlide() && !autoPreviewActive && !autoPreviewPending) return;
+        if (isAutoSlideRectVisible()) {
+          releaseAutoTrailerSuspension("viewport-scroll");
+          if (!autoPreviewActive && !autoPreviewPending) maybeStartAutoTrailer();
+        } else {
+          if (!suspendAutoTrailerPlayback("viewport-scroll", { hideControls: true })) {
+            stopPreview({ force: true, markAutoEnded: true });
+          }
+        }
+      };
+      const queueViewportVisibilityCheck = () => {
+        if (viewportCheckRaf) return;
+        viewportCheckRaf = requestAnimationFrame(runViewportVisibilityCheck);
+      };
+      window.addEventListener("scroll", queueViewportVisibilityCheck, { passive: true, capture: true });
+      window.addEventListener("resize", queueViewportVisibilityCheck, { passive: true });
+      cleanups.push(() => {
+        if (viewportCheckRaf) {
+          try { cancelAnimationFrame(viewportCheckRaf); } catch {}
+          viewportCheckRaf = 0;
+        }
+        window.removeEventListener("scroll", queueViewportVisibilityCheck, true);
+        window.removeEventListener("resize", queueViewportVisibilityCheck);
+      });
+    }
+
     const mo = new MutationObserver(() => {
       if (!document.body.contains(slideEl)) {
         try {
-          handleLeave();
+          stopPreview({ force: true });
         } catch {}
         cleanups.forEach((fn) => {
           try {
@@ -1056,22 +1995,52 @@ function clearPreviewPlaybackFlag() {
     cleanups.push(() => mo.disconnect());
 
     const onVis = () => {
-      if (document.hidden) handleLeave();
+      if (document.hidden) {
+        if (!suspendAutoTrailerPlayback("visibility", { hideControls: true })) {
+          stopPreview({ force: true, markAutoEnded: true });
+        }
+      } else {
+        releaseAutoTrailerSuspension("visibility");
+      }
     };
     document.addEventListener("visibilitychange", onVis);
     cleanups.push(() => document.removeEventListener("visibilitychange", onVis));
-    const onPageHide = () => handleLeave();
+    const onWindowBlur = () => {
+      setTimeout(() => {
+        if (document.hidden) return;
+        try {
+          if (typeof document.hasFocus === "function" && document.hasFocus()) return;
+        } catch {}
+        suspendAutoTrailerPlayback("focus");
+      }, 80);
+    };
+    const onWindowFocus = () => releaseAutoTrailerSuspension("focus");
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("focus", onWindowFocus);
+    cleanups.push(() => {
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("focus", onWindowFocus);
+    });
+    const onPageHide = () => {
+      if (!suspendAutoTrailerPlayback("pagehide", { hideControls: true })) {
+        stopPreview({ force: true, markAutoEnded: true });
+      }
+    };
+    const onPageShow = () => releaseAutoTrailerSuspension("pagehide");
+    const onBeforeUnload = () => stopPreview({ force: true, markAutoEnded: true });
     window.addEventListener("pagehide", onPageHide);
-    window.addEventListener("beforeunload", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("beforeunload", onBeforeUnload);
     cleanups.push(() => {
       window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("beforeunload", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("beforeunload", onBeforeUnload);
     });
 
     const swiperHost = slideEl.closest(".swiper");
     const swiperInst = swiperHost && swiperHost.swiper;
     if (swiperInst?.on && swiperInst?.off) {
-      const onSwiperChange = () => handleLeave();
+      const onSwiperChange = () => stopPreview({ force: true });
       swiperInst.on("slideChangeTransitionStart", onSwiperChange);
       swiperInst.on("slideChange", onSwiperChange);
       swiperInst.on("transitionStart", onSwiperChange);
@@ -1091,7 +2060,7 @@ function clearPreviewPlaybackFlag() {
     const splideRoot = slideEl.closest(".splide");
     const splideInst = splideRoot && (splideRoot.__splide || window.splide);
     if (splideInst?.on && splideInst?.off) {
-      const onMove = () => handleLeave();
+      const onMove = () => stopPreview({ force: true });
       splideInst.on("move", onMove);
       splideInst.on("moved", onMove);
       cleanups.push(() => {
@@ -1107,7 +2076,7 @@ function clearPreviewPlaybackFlag() {
     const flktyRoot = slideEl.closest(".flickity-enabled");
     const flktyInst = flktyRoot && flktyRoot.flickity;
     if (flktyInst?.on && flktyInst?.off) {
-      const onChange = () => handleLeave();
+      const onChange = () => stopPreview({ force: true });
       flktyInst.on("change", onChange);
       flktyInst.on("select", onChange);
       cleanups.push(() => {
@@ -1123,8 +2092,8 @@ function clearPreviewPlaybackFlag() {
     const emblaViewport = slideEl.closest(".embla__viewport");
     const emblaInst = emblaViewport && emblaViewport.__embla;
     if (emblaInst?.on) {
-      const onSelect = () => handleLeave();
-      const onReInit = () => handleLeave();
+      const onSelect = () => stopPreview({ force: true });
+      const onReInit = () => stopPreview({ force: true });
       emblaInst.on("select", onSelect);
       emblaInst.on("reInit", onReInit);
       cleanups.push(() => {
@@ -1145,12 +2114,18 @@ function clearPreviewPlaybackFlag() {
   detachGuards = attachAutoCleanupGuards(slide);
 
   const classObserver = new MutationObserver(() => {
-  const nowActive = isActiveSlide();
+    const nowActive = isActiveSlide();
 
     if (lastActive && !nowActive && !leavingLock) {
       leavingLock = true;
       (typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn))(() => {
-        try { handleLeave(); } finally { leavingLock = false; }
+        try { stopPreview({ force: true }); } finally { leavingLock = false; }
+      });
+    }
+
+    if (!lastActive && nowActive) {
+      (typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn))(() => {
+        maybeStartAutoTrailer();
       });
     }
 
@@ -1163,12 +2138,51 @@ function clearPreviewPlaybackFlag() {
   hoverTarget.addEventListener("mouseenter", handleEnter, { passive: true });
   hoverTarget.addEventListener("mouseleave", handleLeave, { passive: true });
 
+  const onSlideActive = () => {
+    maybeStartAutoTrailer();
+  };
+  slide.addEventListener("slideActive", onSlideActive);
+
+  const onPerSlideComplete = (event) => {
+    if (!isSliderAutoTrailerEnabled() || !isActiveSlide()) return;
+    const suspendedAutoTrailer = autoPreviewActive && autoTrailerSuspended;
+    if (!isAutoSlideVisible() && !suspendedAutoTrailer) return;
+    const hasAutoTrailerWork =
+      autoPreviewPending ||
+      suspendedAutoTrailer ||
+      (autoPreviewActive && (playingKind === "localTrailer" || playingKind === "remoteTrailer")) ||
+      (autoPreviewActive && !!enterTimeout);
+
+    if (hasAutoTrailerWork) {
+      event.preventDefault();
+      autoAdvanceWaiting = true;
+      return;
+    }
+  };
+  document.addEventListener("jms:per-slide-complete", onPerSlideComplete);
+
+  const onPlaybackStartRequested = () => {
+    autoTrailerPlaybackBlocked = true;
+    blockAutoTrailerPlayback();
+    autoAdvanceWaiting = false;
+    stopPreview({ force: true });
+  };
+  window.addEventListener(PLAYBACK_START_REQUESTED_EVENT, onPlaybackStartRequested, { passive: true });
+
+  if (isActiveSlide()) {
+    setTimeout(() => maybeStartAutoTrailer(), 0);
+  }
+
   const mo = new MutationObserver(() => {
     if (!document.body.contains(slide)) {
       try { hoverTarget.removeEventListener("mouseenter", handleEnter); } catch {}
       try { hoverTarget.removeEventListener("mouseleave", handleLeave); } catch {}
+      try { slide.removeEventListener("slideActive", onSlideActive); } catch {}
+      try { document.removeEventListener("jms:per-slide-complete", onPerSlideComplete); } catch {}
+      try { window.removeEventListener(PLAYBACK_START_REQUESTED_EVENT, onPlaybackStartRequested); } catch {}
       try { detachGuards?.(); } catch {}
       try { classObserver.disconnect(); } catch {}
+      try { stopPreview({ force: true }); } catch {}
       mo.disconnect();
     }
   });

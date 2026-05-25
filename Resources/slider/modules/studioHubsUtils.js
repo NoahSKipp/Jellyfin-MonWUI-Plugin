@@ -31,6 +31,70 @@ function isPersonItem(it) {
   return t === 'person';
 }
 
+function normalizeLiveTvToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || '',
+      window.location?.pathname || '',
+      window.location?.search || ''
+    ].join(' ').toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvItemLike(item) {
+  if (!item || typeof item !== 'object') return false;
+  const type = normalizeLiveTvToken(item.Type || item.ItemType || item.itemType);
+  const mediaType = normalizeLiveTvToken(item.MediaType || item.mediaType);
+  const sourceType = normalizeLiveTvToken(item.SourceType || item.sourceType);
+  const mediaSourceType = normalizeLiveTvToken(item.MediaSourceType || item.mediaSourceType);
+  const collectionType = normalizeLiveTvToken(item.CollectionType || item.collectionType);
+
+  if (type === 'tvchannel' || type === 'livetvchannel' || type === 'channel') return true;
+  if (type === 'program' || type === 'livetvprogram') return true;
+  if (type === 'audio' || mediaType === 'audio') return false;
+  return sourceType === 'livetv'
+    || mediaSourceType === 'livetv'
+    || collectionType === 'livetv'
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
+function isLiveTvCardElement(el) {
+  if (!el) return false;
+  if (isLiveTvRouteActive()) return true;
+  try {
+    const host = el.closest?.('.cardImageContainer,[data-id],[data-itemid],[data-item-id]') || el;
+    const rawType =
+      host?.dataset?.type ||
+      host?.dataset?.itemType ||
+      host?.dataset?.itemtype ||
+      host?.dataset?.mediaType ||
+      host?.dataset?.mediatype ||
+      host?.dataset?.collectionType ||
+      host?.dataset?.collectiontype ||
+      host?.closest?.('[data-type]')?.dataset?.type ||
+      host?.closest?.('[data-itemtype]')?.dataset?.itemtype ||
+      host?.closest?.('[data-media-type]')?.dataset?.mediaType ||
+      host?.closest?.('[data-mediatype]')?.dataset?.mediatype ||
+      host?.closest?.('[data-collectiontype]')?.dataset?.collectiontype ||
+      '';
+    if (isLiveTvItemLike({ Type: rawType, MediaType: rawType, CollectionType: rawType })) return true;
+    if (host?.closest?.('[data-channelid],[data-channel-id],[data-programid],[data-program-id]')) return true;
+    return !!host?.closest?.(
+      '#liveTvPage,#liveTvSuggestionsPage,#liveTvGuidePage,#tvGuidePage,.liveTvPage,.livetvPage,.tvGuidePage,.programGrid,.guideGrid,.guideProgram,.channelList,.channelsContainer'
+    );
+  } catch {
+    return false;
+  }
+}
+
 function allowTrailerPopover() {
   const cfg = getConfig();
   const localOk  = !!cfg?.studioHubsHoverVideo;
@@ -300,24 +364,28 @@ function shortLang(v) {
 }
 
 function buildPosterUrl(it, h = 400, q = 95) {
+  if (isLiveTvItemLike(it)) return null;
   const tag = it?.ImageTags?.Primary || it?.PrimaryImageTag;
   if (!tag) return null;
   return `/Items/${it.Id}/Images/Primary?tag=${encodeURIComponent(tag)}&fillHeight=${h}&quality=${q}`;
 }
 
 function buildBackdropUrl(it, idx = 0) {
+  if (isLiveTvItemLike(it)) return null;
   const t = (it?.BackdropImageTags || [])[idx];
   if (!t) return null;
   return `/Items/${it.Id}/Images/Backdrop/${idx}?tag=${encodeURIComponent(t)}&quality=90`;
 }
 
 async function getDetails(itemId, abortSignal) {
+  if (isLiveTvRouteActive()) return null;
   const cached = detailsCache.get(itemId);
   if (cached && (Date.now() - cached.ts) < DETAILS_TTL) return cached.data;
 
   try {
     const data = await fetchItemDetails(itemId, { signal: abortSignal });
     if (!data) return null;
+    if (isLiveTvItemLike(data)) return null;
 
     if (data.Type === 'Season' && data.SeriesId) {
       const series = await fetchItemDetails(data.SeriesId, { signal: abortSignal });
@@ -597,6 +665,7 @@ function fillMiniContent(pop, itemBase, details) {
 
 export function attachMiniPosterHover(cardEl, itemLike) {
   if (!cardEl || !itemLike || !itemLike.Id) return;
+  if (isLiveTvRouteActive() || isLiveTvCardElement(cardEl) || isLiveTvItemLike(itemLike)) return;
 
   ensureMiniPopover();
 
@@ -621,6 +690,7 @@ export function attachMiniPosterHover(cardEl, itemLike) {
   };
 
   const open = async () => {
+    if (isLiveTvRouteActive() || isLiveTvCardElement(cardEl)) return;
     if (document.hidden || Date.now() < __miniTombstoneUntil) return;
     if (__activeHoverCard && __activeHoverCard !== cardEl) return;
 
@@ -834,8 +904,9 @@ if (typeof window !== 'undefined') {
 }
 
 export async function openMiniPopoverFor(cardEl, itemLikeOrId) {
-  ensureMiniPopover();
   const itemLike = (typeof itemLikeOrId === 'string') ? { Id: itemLikeOrId } : itemLikeOrId;
+  if (isLiveTvRouteActive() || isLiveTvCardElement(cardEl) || isLiveTvItemLike(itemLike)) return;
+  ensureMiniPopover();
   if (!cardEl || !itemLike?.Id || !document.contains(cardEl)) return;
 
   const myKill = (window.__studioMiniKillToken || 0);

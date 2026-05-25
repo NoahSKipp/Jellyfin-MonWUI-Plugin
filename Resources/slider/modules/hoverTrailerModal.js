@@ -1,7 +1,14 @@
 import { getConfig } from './config.js';
 import { getLanguageLabels, getDefaultLanguage } from '../language/index.js';
 import { playNow, getVideoStreamUrl, fetchItemDetails, fetchPlayableItemDetails, updateFavoriteStatus, goToDetailsPage, fetchLocalTrailers, pickBestLocalTrailer, getCachedUserTopGenres } from '../../Plugins/JMSFusion/runtime/api.js';
-import { getYoutubeEmbedUrl, isValidUrl } from './utils.js';
+import {
+  getYoutubeEmbedUrl,
+  isValidUrl,
+  applyPreviewTrailerAudioToVideo,
+  applyPreviewTrailerAudioToYouTubePlayer,
+  getPreviewTrailerAudioState,
+  postPreviewTrailerAudioToYouTubeIframe
+} from './utils.js';
 import { getVideoQualityText } from './containerUtils.js';
 import { attachMiniPosterHover, openMiniPopoverFor } from "./studioHubsUtils.js";
 import { positionModalRelativeToDot, centerActiveDot } from "./navigation.js";
@@ -46,11 +53,8 @@ const MODAL_ANIM = {
 
 function canUseYTOriginAndJSAPI() {
   try {
-    const isHttps = window.location.protocol === 'https:';
-    const host = new URL(window.location.href).hostname;
-    const isPrivateHost =
-      /^(localhost|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)$/.test(host);
-    return isHttps && !isPrivateHost;
+    const origin = window.location?.origin || '';
+    return /^https?:\/\//i.test(origin);
   } catch {
     return false;
   }
@@ -112,6 +116,70 @@ function syncTouchDeviceClass() {
   try {
     syncTrailerBadgeRuntime();
   } catch {}
+}
+
+function normalizeLiveTvToken(value) {
+  return String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || '',
+      window.location?.pathname || '',
+      window.location?.search || ''
+    ].join(' ').toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvItemLike(item) {
+  if (!item || typeof item !== 'object') return false;
+  const type = normalizeLiveTvToken(item.Type || item.ItemType || item.itemType);
+  const mediaType = normalizeLiveTvToken(item.MediaType || item.mediaType);
+  const sourceType = normalizeLiveTvToken(item.SourceType || item.sourceType);
+  const mediaSourceType = normalizeLiveTvToken(item.MediaSourceType || item.mediaSourceType);
+  const collectionType = normalizeLiveTvToken(item.CollectionType || item.collectionType);
+
+  if (type === 'tvchannel' || type === 'livetvchannel' || type === 'channel') return true;
+  if (type === 'program' || type === 'livetvprogram') return true;
+  if (type === 'audio' || mediaType === 'audio') return false;
+  return sourceType === 'livetv'
+    || mediaSourceType === 'livetv'
+    || collectionType === 'livetv'
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
+function isLiveTvCardElement(el) {
+  if (!el) return false;
+  if (isLiveTvRouteActive()) return true;
+  try {
+    const host = el.closest?.('.cardImageContainer,[data-id],[data-itemid],[data-item-id]') || el;
+    const rawType =
+      host?.dataset?.type ||
+      host?.dataset?.itemType ||
+      host?.dataset?.itemtype ||
+      host?.dataset?.mediaType ||
+      host?.dataset?.mediatype ||
+      host?.dataset?.collectionType ||
+      host?.dataset?.collectiontype ||
+      host?.closest?.('[data-type]')?.dataset?.type ||
+      host?.closest?.('[data-itemtype]')?.dataset?.itemtype ||
+      host?.closest?.('[data-media-type]')?.dataset?.mediaType ||
+      host?.closest?.('[data-mediatype]')?.dataset?.mediatype ||
+      host?.closest?.('[data-collectiontype]')?.dataset?.collectiontype ||
+      '';
+    if (isLiveTvItemLike({ Type: rawType, MediaType: rawType, CollectionType: rawType })) return true;
+    if (host?.closest?.('[data-channelid],[data-channel-id],[data-programid],[data-program-id]')) return true;
+    return !!host?.closest?.(
+      '#liveTvPage,#liveTvSuggestionsPage,#liveTvGuidePage,#tvGuidePage,.liveTvPage,.livetvPage,.tvGuidePage,.programGrid,.guideGrid,.guideProgram,.channelList,.channelsContainer'
+    );
+  } catch {
+    return false;
+  }
 }
 
 function ensureHoverInfra() {
@@ -211,20 +279,35 @@ export async function updateModalContent(item, videoUrl) {
 
   const showYT = (labelText) => {
     const iframe = getOrCreateTrailerIframe(modal);
-    const wantSoundStart = ((isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn);
+    const audioState = getPreviewTrailerAudioState({
+      config: cfg,
+      soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+    });
     iframe.src = ensureYTParams(trailerUrl, {
       autoplay: true,
-      muteInitial: !wantSoundStart,
+      muteInitial: audioState.muted,
       enableJsApi: CAN_USE_YT_API
     });
     iframe.__wrapper && (iframe.__wrapper.style.display = 'block');
     iframe.style.display = 'block';
     showYTFirstTouchShield(iframe, 380);
     sizeYTToCover(iframe);
+    setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
+      config: cfg,
+      soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+    }), 200);
+    setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
+      config: cfg,
+      soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+    }), 1200);
     if (CAN_USE_YT_API) ensureYTAPI().then(() => installYTPlayer(iframe));
     if (labelText) addTrailerTip(modal, labelText);
     const btn = modal?.querySelector?.('.preview-volume-button');
-    if (btn) btn.innerHTML = '<i class="fa-solid fa-volume-xmark"></i>';
+    if (btn) {
+      btn.innerHTML = audioState.muted
+        ? '<i class="fa-solid fa-volume-xmark"></i>'
+        : '<i class="fa-solid fa-volume-high"></i>';
+    }
   };
 
   if (modalState.modalButtonsContainer) {
@@ -504,7 +587,7 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
   video.setAttribute('webkit-playsinline', '');
   video.setAttribute('x-webkit-airplay', 'allow');
   video.autoplay = true;
-  video.muted = !modalState._soundOn;
+  applyPreviewTrailerAudioToVideo(video, { config, soundOn: modalState._soundOn });
   video.loop = true;
   video.playsInline = true;
   video.addEventListener('stalled', () => video.load());
@@ -642,7 +725,11 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
         const isMuted = typeof player.isMuted === 'function' ? player.isMuted() : (player.getVolume?.() === 0);
         if (isMuted) {
           player.unMute?.();
-          player.setVolume?.(100);
+          player.setVolume?.(Math.round(getPreviewTrailerAudioState({
+            config: getConfig(),
+            soundOn: true,
+            ignoreStartMuted: true
+          }).effectivePercent));
           player.playVideo?.();
           volumeButton.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
         } else {
@@ -658,7 +745,13 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
 
     if (modalState.modalVideo) {
       modalState.modalVideo.muted = !modalState.modalVideo.muted;
-      modalState.modalVideo.volume = modalState.modalVideo.muted ? 0 : 1.0;
+      modalState.modalVideo.volume = modalState.modalVideo.muted
+        ? 0
+        : getPreviewTrailerAudioState({
+            config: getConfig(),
+            soundOn: true,
+            ignoreStartMuted: true
+          }).volume;
       volumeButton.innerHTML = modalState.modalVideo.muted
         ? '<i class="fa-solid fa-volume-xmark"></i>'
         : '<i class="fa-solid fa-volume-high"></i>';
@@ -698,7 +791,13 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
       volumeButton?.click();
     } else if (modalState.modalVideo) {
       modalState.modalVideo.muted = !modalState.modalVideo.muted;
-      modalState.modalVideo.volume = modalState.modalVideo.muted ? 0 : 1.0;
+      modalState.modalVideo.volume = modalState.modalVideo.muted
+        ? 0
+        : getPreviewTrailerAudioState({
+            config: getConfig(),
+            soundOn: true,
+            ignoreStartMuted: true
+          }).volume;
       volumeButton.innerHTML = modalState.modalVideo.muted
         ? '<i class="fa-solid fa-volume-xmark"></i>'
         : '<i class="fa-solid fa-volume-high"></i>';
@@ -743,6 +842,7 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
     await sleep(150);
 
     video.src = url;
+    applyPreviewTrailerAudioToVideo(video, { config: getConfig(), soundOn: modalState._soundOn });
     video.addEventListener('loadedmetadata', () => {
       video.currentTime = 10 * 60;
       Promise.resolve(video.play()).catch(e => { if (e.name !== 'AbortError') console.warn('Video oynatma hatası:', e); });
@@ -846,11 +946,13 @@ function _debounce(fn, wait = 80) {
  function mountStudioMiniForAll() {
    const cfg = getConfig();
    if (!cfg || cfg.globalPreviewMode !== 'studioMini') return;
+   if (isLiveTvRouteActive()) return;
 
   const items = document.querySelectorAll('.cardImageContainer');
   if (!items.length) return;
   chunkIter(items, (item) => {
     if (item.__miniBound) return;
+    if (isLiveTvCardElement(item)) return;
     const itemId =
       item.dataset.itemId ||
       item.dataset.id ||
@@ -1057,6 +1159,10 @@ function ensureBadgeIO() {
     for (const ent of entries) {
       if (!ent.isIntersecting) continue;
       const card = ent.target;
+      if (isLiveTvCardElement(card)) {
+        try { __badgeIO?.unobserve?.(card); } catch {}
+        continue;
+      }
       if (card.dataset.hastrailer === 'true' || card.dataset.hastrailer === 'false') continue;
 
       const itemId = getItemIdFromCard(card);
@@ -1096,6 +1202,7 @@ function disconnectObservers() {
 
 function observeCardForTrailer(card) {
   if (!shouldRunTrailerBadge()) return;
+  if (isLiveTvCardElement(card)) return;
   if (!card || card.__jmsTrailerObserved) return;
   card.__jmsTrailerObserved = true;
   ensureTrailerBadgeCSS();
@@ -1167,7 +1274,7 @@ function shouldShowTrailerBadge() {
 }
 
 function shouldRunTrailerBadge() {
-  return shouldShowTrailerBadge() && shouldEnableTouchDeviceClass();
+  return !isLiveTvRouteActive() && shouldShowTrailerBadge() && shouldEnableTouchDeviceClass();
 }
 
 function hideAllTrailerBadges() {
@@ -1219,6 +1326,7 @@ window.addEventListener('jms:globalPreviewModeChanged', () => {
 
 function mountTrailerBadge(card, text = 'Fragman') {
   if (!card) return;
+  if (isLiveTvCardElement(card)) return;
   const existing = card.querySelector('.jms-trailer-badge');
   if (existing) {
     existing.style.display = '';
@@ -1300,6 +1408,10 @@ function scanAndMarkCardsForTrailers() {
       for (const ent of entries) {
         if (!ent.isIntersecting) continue;
         const card = ent.target;
+        if (isLiveTvCardElement(card)) {
+          try { __trailerBadgeObserver.unobserve(card); } catch {}
+          continue;
+        }
         if (!card || card.__jmsTrailerBadgePending) continue;
         if (card.dataset.hastrailer === 'true') {
           const labels = (getConfig()?.languageLabels) || {};
@@ -1335,6 +1447,7 @@ function scanAndMarkCardsForTrailers() {
 
   items.forEach((card) => {
     if (!card) return;
+    if (isLiveTvCardElement(card)) return;
     if (card.dataset.hastrailer === 'true') {
       const labels = (getConfig()?.languageLabels) || {};
       mountTrailerBadge(card, labels.fragman || 'Fragman');
@@ -1388,8 +1501,10 @@ function getYTPlayerForIframe(iframe) {
        if (typeof ev.target.mute === 'function') ev.target.mute();
      } else {
        if (modalState._soundOn) {
-         if (typeof ev.target.unMute === 'function') ev.target.unMute();
-         if (typeof ev.target.setVolume === 'function') ev.target.setVolume(100);
+         applyPreviewTrailerAudioToYouTubePlayer(ev.target, {
+           config: getConfig(),
+           soundOn: true
+         });
        } else {
          if (typeof ev.target.mute === 'function') ev.target.mute();
        }
@@ -1574,7 +1689,7 @@ function ensureYTParams(url, { autoplay = true, muteInitial = true, enableJsApi 
     if (enableJsApi) {
       u.searchParams.set('enablejsapi', '1');
       const origin = window.location.origin;
-      if (origin && origin !== 'null' && /^https:\/\//i.test(origin)) {
+      if (origin && origin !== 'null' && /^https?:\/\//i.test(origin)) {
         u.searchParams.set('origin', origin);
         u.searchParams.set('widget_referrer', origin);
       } else {
@@ -1810,10 +1925,16 @@ function installYTPlayer(iframe) {
     const handler = () => {
       try {
         const player = _ytPlayers.get(iframe);
-        player?.unMute?.();
-        player?.setVolume?.(100);
+        const audioState = applyPreviewTrailerAudioToYouTubePlayer(player, {
+          config: getConfig(),
+          soundOn: true
+        });
         player?.playVideo?.();
-        if (btn) btn.innerHTML = '<i class="fa-solid fa-volume-high"></i>';
+        if (btn) {
+          btn.innerHTML = audioState.muted
+            ? '<i class="fa-solid fa-volume-xmark"></i>'
+            : '<i class="fa-solid fa-volume-high"></i>';
+        }
       } catch {}
       cleanup();
     };
@@ -1835,15 +1956,21 @@ function installYTPlayer(iframe) {
           try {
             const root = iframe?.closest?.('.video-preview-modal') || document.querySelector('.video-preview-modal');
             const btn  = root?.querySelector?.('.preview-volume-button');
+            const audioState = getPreviewTrailerAudioState({
+              config: getConfig(),
+              soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+            });
             if (btn) {
-              btn.innerHTML = modalState._soundOn
-                ? '<i class="fa-solid fa-volume-high"></i>'
-                : '<i class="fa-solid fa-volume-xmark"></i>';
+              btn.innerHTML = audioState.muted
+                ? '<i class="fa-solid fa-volume-xmark"></i>'
+                : '<i class="fa-solid fa-volume-high"></i>';
             }
 
-            if ((isMobileAppEnv() || !isTouchRuntime()) && modalState._soundOn) {
-              ev.target.unMute?.();
-              ev.target.setVolume?.(100);
+            if (!audioState.muted) {
+              applyPreviewTrailerAudioToYouTubePlayer(ev.target, {
+                config: getConfig(),
+                soundOn: true
+              });
               try { ev.target.playVideo?.(); } catch {}
               setTimeout(() => {
                 try {
@@ -1854,6 +1981,7 @@ function installYTPlayer(iframe) {
                 }
               }, 250);
             } else {
+              ev.target.mute?.();
               if (btn) btn.innerHTML = '<i class="fa-solid fa-volume-xmark"></i>';
             }
           } catch {}
@@ -1873,8 +2001,10 @@ function installYTPlayer(iframe) {
             }
             try {
      if (isMobileAppEnv() && modalState._soundOn) {
-       event.target.unMute?.();
-       event.target.setVolume?.(100);
+       applyPreviewTrailerAudioToYouTubePlayer(event.target, {
+         config: getConfig(),
+         soundOn: true
+       });
      }
    } catch {}
           }
@@ -1935,9 +2065,18 @@ export function applyVolumePreference(modal = modalState.videoModal) {
   const trailerVisible = trailerIframe && trailerIframe.style.display !== 'none';
   if (trailerVisible) {
     const player = _ytPlayers.get(trailerIframe);
+    const audioState = player
+      ? applyPreviewTrailerAudioToYouTubePlayer(player, {
+          config: getConfig(),
+          soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+        })
+      : getPreviewTrailerAudioState({
+          config: getConfig(),
+          soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
+        });
     if (volumeButton) {
-      let muted = true;
-      try { muted = player?.isMuted?.() ?? true; } catch {}
+      let muted = audioState.muted;
+      try { muted = player?.isMuted?.() ?? audioState.muted; } catch {}
       volumeButton.innerHTML = muted
         ? '<i class="fa-solid fa-volume-xmark"></i>'
         : '<i class="fa-solid fa-volume-high"></i>';
@@ -1945,13 +2084,19 @@ export function applyVolumePreference(modal = modalState.videoModal) {
     return;
   }
   if (modalState.modalVideo) {
-    modalState.modalVideo.muted = !modalState._soundOn;
-    modalState.modalVideo.volume = modalState._soundOn ? 1.0 : 0.0;
+    applyPreviewTrailerAudioToVideo(modalState.modalVideo, {
+      config: getConfig(),
+      soundOn: modalState._soundOn
+    });
   }
   if (volumeButton) {
-    volumeButton.innerHTML = modalState._soundOn
-      ? '<i class="fa-solid fa-volume-high"></i>'
-      : '<i class="fa-solid fa-volume-xmark"></i>';
+    const audioState = getPreviewTrailerAudioState({
+      config: getConfig(),
+      soundOn: modalState._soundOn
+    });
+    volumeButton.innerHTML = audioState.muted
+      ? '<i class="fa-solid fa-volume-xmark"></i>'
+      : '<i class="fa-solid fa-volume-high"></i>';
   }
 }
 
@@ -2510,6 +2655,7 @@ async function getItemTypeCached(itemId){
 }
 
 export function setupHoverForAllItems() {
+  if (isLiveTvRouteActive()) return;
   if (!config || config.allPreviewModal === false) return;
   installHoverOpenSuppressors();
   scanAndMarkCardsForTrailers();
@@ -2570,9 +2716,11 @@ export function setupHoverForAllItems() {
         });
 
       const onTouchStart = async (e) => {
+        if (isLiveTvRouteActive()) return;
         if (e.target?.closest?.('.jms-trailer-badge')) return;
         const card = e.target?.closest?.('.cardImageContainer');
         if (!card) return;
+        if (isLiveTvCardElement(card)) return;
         const itemId = getId(card);
         if (!itemId) return;
         let type = getCardItemType(card);
@@ -2629,6 +2777,7 @@ export function setupHoverForAllItems() {
     destroyVideoModal();
     items.forEach(item => {
       if (item.__miniBound) return;
+      if (isLiveTvCardElement(item)) return;
       item.__miniBound = true;
       const itemId =
         item.dataset.itemId ||
@@ -2644,10 +2793,12 @@ export function setupHoverForAllItems() {
     __hoverModalDelegatesBound = true;
 
     const onEnter = async (e) => {
+      if (isLiveTvRouteActive()) return;
       if (Date.now() < (modalState.__suppressOpenUntil || 0)) return;
       ensureHoverInfra();
       const item = e.target?.closest?.('.cardImageContainer');
       if (!item || isInsideDotArea(item)) return;
+      if (isLiveTvCardElement(item)) return;
       const itemId =
         item.dataset.itemId || item.dataset.id || (item.closest('[data-id]')?.dataset?.id);
       if (!itemId) return;
@@ -2667,6 +2818,7 @@ export function setupHoverForAllItems() {
           }
           const itemDetails = await fetchPlayableItemDetails(itemId, { signal });
           if (signal.aborted || !itemDetails) { closeVideoModal(); return; }
+          if (isLiveTvItemLike(itemDetails)) { closeVideoModal(); return; }
           if (itemDetails.Genres && itemDetails.Genres.length > 3) itemDetails.Genres = itemDetails.Genres.slice(0,3);
           const videoTypes = ['Movie','Episode','Series','Season'];
           if (!videoTypes.includes(itemDetails.Type)) { closeVideoModal(); return; }
@@ -2880,6 +3032,13 @@ function toggleYouTubeVolumeManual(iframe, volumeBtn) {
     const nextMute = currentMute === '1' ? '0' : '1';
     url.searchParams.set('mute', nextMute);
     iframe.src = url.toString();
+    if (nextMute === '0') {
+      setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
+        config: getConfig(),
+        soundOn: true,
+        ignoreStartMuted: true
+      }), 250);
+    }
     if (volumeBtn) {
       volumeBtn.innerHTML = nextMute === '1'
         ? '<i class="fa-solid fa-volume-xmark"></i>'
@@ -3061,6 +3220,7 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
     const cfg = getConfig();
     const mode = (cfg?.globalPreviewMode || 'modal');
     if (mode !== 'modal' || cfg?.allPreviewModal === false || !itemId) return;
+    if (isLiveTvRouteActive() || isLiveTvCardElement(anchorEl)) return;
     if (!canOpenItem(itemId)) return;
     if (modalIsVisible() && modalState.videoModal?.dataset?.itemId === String(itemId)) {
       if (anchorEl) positionModalRelativeToItem(modalState.videoModal, anchorEl);
@@ -3080,6 +3240,7 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
     const { signal } = ac;
     const item = await fetchItemDetails(itemId, { signal });
     if (!item) return;
+    if (isLiveTvItemLike(item)) return;
 
     let domBackdrop = null;
     try {

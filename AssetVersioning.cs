@@ -40,6 +40,83 @@ namespace Jellyfin.Plugin.JMSFusion
     root.setAttribute("data-jms-asset-version", "{{version}}");
   }
 
+  function installScrollEventListenerCompat() {
+    try {
+      function installOn(proto) {
+        if (!proto || typeof proto.addScrollEventListener === "function") return;
+
+        Object.defineProperty(proto, "addScrollEventListener", {
+          configurable: true,
+          writable: true,
+          value: function () {
+            var target = this;
+            var listener = arguments[0];
+            var options = arguments[1];
+
+            if (
+              arguments[0] &&
+              typeof arguments[0].addEventListener === "function" &&
+              (typeof arguments[1] === "function" || (arguments[1] && typeof arguments[1].handleEvent === "function"))
+            ) {
+              target = arguments[0];
+              listener = arguments[1];
+              options = arguments[2];
+            }
+
+            if (!target || typeof target.addEventListener !== "function" || !listener) {
+              return function () {};
+            }
+
+            var eventOptions = options || { passive: true };
+            target.addEventListener("scroll", listener, eventOptions);
+            return function () {
+              try { target.removeEventListener("scroll", listener, eventOptions); } catch {}
+            };
+          }
+        });
+      }
+
+      function installRemoveOn(proto) {
+        if (!proto || typeof proto.removeScrollEventListener === "function") return;
+
+        Object.defineProperty(proto, "removeScrollEventListener", {
+          configurable: true,
+          writable: true,
+          value: function () {
+            var target = this;
+            var listener = arguments[0];
+            var options = arguments[1];
+
+            if (
+              arguments[0] &&
+              typeof arguments[0].removeEventListener === "function" &&
+              (typeof arguments[1] === "function" || (arguments[1] && typeof arguments[1].handleEvent === "function"))
+            ) {
+              target = arguments[0];
+              listener = arguments[1];
+              options = arguments[2];
+            }
+
+            if (!target || typeof target.removeEventListener !== "function" || !listener) return;
+            target.removeEventListener("scroll", listener, options || false);
+          }
+        });
+      }
+
+      var protos = [
+        window.Element && window.Element.prototype,
+        window.Document && window.Document.prototype,
+        window.Window && window.Window.prototype
+      ];
+      for (var i = 0; i < protos.length; i += 1) {
+        installOn(protos[i]);
+        installRemoveOn(protos[i]);
+      }
+    } catch {}
+  }
+
+  installScrollEventListenerCompat();
+
   var STORAGE_KEY = "enableCustomSplashScreen";
   var STYLE_ID = "jms-boot-splash-style";
   var LAYER_ID = "jms-boot-splash-layer";

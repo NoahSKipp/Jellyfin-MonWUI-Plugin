@@ -2365,7 +2365,7 @@ function formatEpisodeHeading({
     autoOpenModal: false
   };
 
-  (function patchImageSrcSetterOnce(){
+  function patchImageSrcSetterOnce(){
     const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
     if (!desc || !desc.set || HTMLImageElement.prototype.__jfNotifSrcPatched) return;
     const origSet = desc.set;
@@ -2386,11 +2386,12 @@ function formatEpisodeHeading({
       }
     });
     HTMLImageElement.prototype.__jfNotifSrcPatched = true;
-  })();
+  }
 
   let imgObserver, toastObserver, modalObserver, closeClickBound = false;
 
   function bindImgObserver() {
+    if (S.forceImages) patchImageSrcSetterOnce();
     if (imgObserver) return;
     imgObserver = new MutationObserver((muts) => {
       if (!S.enabled || !S.forceImages) return;
@@ -2664,7 +2665,7 @@ function formatEpisodeHeading({
     setAutoOpen(v=true){ S.autoOpenModal = !!v; return this; },
     setLockToasts(v=true){ S.lockToasts = !!v; return this; },
     setLockModal(v=true){ S.lockModal = !!v; return this; },
-    setForceImages(v=true){ S.forceImages = !!v; return this; }
+    setForceImages(v=true){ S.forceImages = !!v; if (S.forceImages) patchImageSrcSetterOnce(); return this; }
   };
 
   document.addEventListener('keydown', (e) => {

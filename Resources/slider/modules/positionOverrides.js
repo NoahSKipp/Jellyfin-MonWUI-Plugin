@@ -160,8 +160,21 @@ function findVisibleSkinHeader() {
   return null;
 }
 
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || '',
+      window.location?.pathname || '',
+      window.location?.search || ''
+    ].join(' ').toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
 function getHomeTopTargets(affectFavoritesTab = true) {
-  const targets = [...document.querySelectorAll('.homeSectionsContainer')]
+  const targets = [...document.querySelectorAll('#indexPage .homeSectionsContainer, #homePage .homeSectionsContainer')]
     .filter(el => affectFavoritesTab || el?.id !== 'favoritesTab');
   if (affectFavoritesTab) {
     const fav = document.querySelector('#favoritesTab');
@@ -204,6 +217,10 @@ function readSliderVisualTopValue() {
 }
 
 function computeEffectiveTopState() {
+  if (isLiveTvRouteActive()) {
+    return null;
+  }
+
   const cfg = (typeof getConfig === 'function') ? getConfig() : {};
   const userTop = readUserTopFromLocalStorage();
   if (userTop !== null) {

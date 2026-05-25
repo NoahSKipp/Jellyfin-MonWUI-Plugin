@@ -21,6 +21,7 @@ const TRAILER_POOL_BACKGROUND_FETCH_TIMEOUT_MS = 4_000;
 const YT_API_TIMEOUT_MS = 3_000;
 const YT_PLAYABILITY_PROBE_TIMEOUT_MS = 1_400;
 const YT_PLAYABILITY_PROBE_READY_GRACE_MS = 450;
+const PLAYBACK_START_REQUESTED_EVENT = "jms:playback-start-requested";
 const MIN_ACCEPTABLE_YT_HEIGHT = 720;
 const TRAILER_QUALITY_RETRY_DELAYS_MS = [0, 350, 1200, 2600];
 const MAX_TRAILER_CANDIDATE_ATTEMPTS = 24;
@@ -104,6 +105,18 @@ function escapeAttribute(value) {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function notifyPlaybackStartRequested(detail = {}) {
+  try {
+    if (typeof window === "undefined" || typeof CustomEvent !== "function") return;
+    window.dispatchEvent(new CustomEvent(PLAYBACK_START_REQUESTED_EVENT, {
+      detail: {
+        at: Date.now(),
+        ...detail
+      }
+    }));
+  } catch {}
 }
 
 function serrLabel(key, fallback) {
@@ -373,7 +386,45 @@ function clampTrailerCount(value) {
   return Math.min(MAX_TRAILER_COUNT, Math.max(1, parsed));
 }
 
+function normalizeNativePlaybackToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function isLiveTvRouteActive() {
+  try {
+    const raw = [
+      window.location?.hash || "",
+      window.location?.pathname || "",
+      window.location?.search || ""
+    ].join(" ").toLowerCase();
+    return /(?:^|[#/?&.\s-])(?:live[-_]?tv|tvguide)(?:[/?#&=.\s-]|$)/i.test(raw);
+  } catch {
+    return false;
+  }
+}
+
+function isLiveTvNativePlaybackItem(item) {
+  if (!item || typeof item !== "object") return false;
+
+  const type = normalizeNativePlaybackToken(item?.Type || item?.ItemType || item?.itemType);
+  const mediaType = normalizeNativePlaybackToken(item?.MediaType || item?.mediaType);
+  const sourceType = normalizeNativePlaybackToken(item?.SourceType || item?.sourceType);
+  const mediaSourceType = normalizeNativePlaybackToken(item?.MediaSourceType || item?.mediaSourceType);
+  const collectionType = normalizeNativePlaybackToken(item?.CollectionType || item?.collectionType);
+
+  if (type === "tvchannel" || type === "livetvchannel" || type === "channel") return true;
+  if (type === "program" || type === "livetvprogram") return true;
+  if (type === "audio" || mediaType === "audio") return false;
+  return sourceType === "livetv"
+    || mediaSourceType === "livetv"
+    || collectionType === "livetv"
+    || item.IsLiveStream === true
+    || item.isLiveStream === true;
+}
+
 function shouldRunForItem(item) {
+  if (isLiveTvNativePlaybackItem(item)) return false;
+
   const type = String(item?.Type || "");
   const mediaType = String(item?.MediaType || "");
   const collectionType = String(item?.CollectionType || item?.collectionType || "").trim().toLowerCase();
@@ -2147,6 +2198,9 @@ async function runNativePreRollBeforePlay(original, target, args, label) {
   if (nativePlaybackHookBypassDepth > 0 || Date.now() < nativePlaybackHookBypassUntil) {
     return callOriginalNativePlay(original, target, args);
   }
+  if (isLiveTvRouteActive() || isLiveTvNativePlaybackItem(context.item)) {
+    return callOriginalNativePlay(original, target, args);
+  }
   try {
     if (window.__jmsCinemaPreRollNativeHookBypass === true) {
       return callOriginalNativePlay(original, target, args);
@@ -2154,6 +2208,13 @@ async function runNativePreRollBeforePlay(original, target, args, label) {
   } catch {}
 
   const contextItemId = context.itemId || getItemId(context.item);
+  if (contextItemId) {
+    notifyPlaybackStartRequested({
+      source: "cinema-preroll-native-play",
+      itemId: contextItemId,
+      label: String(label || "")
+    });
+  }
   const existingContextGate = getActiveNativePlaybackGate(contextItemId);
   if (existingContextGate) {
     return existingContextGate;
@@ -2167,6 +2228,10 @@ async function runNativePreRollBeforePlay(original, target, args, label) {
   }
 
   const item = await resolveNativePlaybackItem(context);
+  if (isLiveTvNativePlaybackItem(item)) {
+    return callOriginalNativePlay(original, target, args);
+  }
+
   const itemId = getItemId(item) || context.itemId;
   if (!itemId || !shouldRunForItem(item)) {
     return callOriginalNativePlay(original, target, args);
