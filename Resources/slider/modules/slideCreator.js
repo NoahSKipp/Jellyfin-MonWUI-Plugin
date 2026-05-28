@@ -505,8 +505,9 @@ async function createSlide(item, options = {}) {
   const primaryUrl  = S(`/Items/${parentId}/Images/Primary`);
   let logoUrl = S(`/Items/${parentId}/Images/Logo`);
   const bannerUrl = `/Items/${parentId}/Images/Banner`;
-  const artUrl = `/Items/${parentId}/Images/Art`;
-  const discUrl = `/Items/${parentId}/Images/Disc`;
+  const clearartUrl = S(`/Items/${parentId}/Images/Art`);
+  const artUrl = clearartUrl;
+  const discUrl = S(`/Items/${parentId}/Images/Disc`);
   const logoExists = true;
 
   storeBackdropUrl(parentId, autoBackdropUrl);
@@ -590,8 +591,9 @@ async function createSlide(item, options = {}) {
   slide.dataset.primaryUrl = primaryUrl;
   slide.dataset.logoUrl = logoUrl;
   slide.dataset.bannerUrl = S(`/Items/${parentId}/Images/Banner`);
-  slide.dataset.artUrl  = S(`/Items/${parentId}/Images/Art`);
-  slide.dataset.discUrl = S(`/Items/${parentId}/Images/Disc`);
+  slide.dataset.artUrl = clearartUrl;
+  slide.dataset.clearartUrl = clearartUrl;
+  slide.dataset.discUrl = discUrl;
 
   const { backdropUrl, placeholderUrl, srcset } = await getHighResImageUrls(
     { ...item, Id: parentId },
@@ -740,6 +742,37 @@ async function createSlide(item, options = {}) {
         ? config.displayOrder.split(",").map(item => item.trim())
         : [];
 
+  function createImageElement({ className, src, fallback, styles = {} }) {
+    const img = document.createElement("img");
+    img.className = className;
+    img.src = src;
+    img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.addEventListener('error', () => {
+      img.remove();
+      fallback?.();
+    }, { once: true });
+    Object.assign(img.style, styles);
+    return img;
+  }
+
+  function createClearartElement(fallback) {
+    return createImageElement({
+      className: "monwui-clearart",
+      src: clearartUrl,
+      fallback,
+      styles: {
+        width: "auto",
+        maxWidth: "min(420px, 55vw)",
+        height: "auto",
+        maxHeight: "clamp(80px, 14vh, 160px)",
+        objectFit: "contain",
+        display: "block"
+      }
+    });
+  }
+
   function createLogoElement(fallback) {
     const logoImg = document.createElement("img");
     logoImg.className = "monwui-logo";
@@ -752,22 +785,25 @@ async function createSlide(item, options = {}) {
      fallback?.();
    }, { once:true });
     Object.assign(logoImg.style, {
-      width: "100%", maxWidth: "90%", height: "100%", maxHeight: "40%", objectFit: "contain", aspectRatio: "1", display: "block"
+      width: "auto",
+      maxWidth: "min(420px, 55vw)",
+      height: "auto",
+      maxHeight: "clamp(60px, 12vh, 130px)",
+      objectFit: "contain",
+      display: "block"
     });
     return logoImg;
   }
 
   function createDiskElement(fallback) {
-    const discImg = document.createElement("img");
-    discImg.className = "monwui-disk";
-    discImg.src = discUrl;
-    discImg.alt = "";
-    discImg.loading = "lazy";
-    Object.assign(discImg.style, {
-      maxWidth: "75%", maxHeight: "75%", width: "auto", objectFit: "contain", borderRadius: "50%", display: "block"
+    return createImageElement({
+      className: "monwui-disk",
+      src: discUrl,
+      fallback,
+      styles: {
+        maxWidth: "75%", maxHeight: "75%", width: "auto", objectFit: "contain", borderRadius: "50%", display: "block"
+      }
     });
-    discImg.onerror = fallback;
-    return discImg;
   }
 
   function createTitleElement() {
@@ -782,8 +818,14 @@ async function createSlide(item, options = {}) {
 
   function tryDisplayElement(index) {
     if (index >= order.length) return;
-    const type = order[index];
-    if (type === "logo") {
+    const type = String(order[index] || "").trim().toLowerCase();
+    if (type === "clearart" || type === "art") {
+      const element = createClearartElement(() => {
+        logoContainer.innerHTML = "";
+        tryDisplayElement(index + 1);
+      });
+      logoContainer.appendChild(element);
+    } else if (type === "logo") {
       const element = createLogoElement(() => {
         logoContainer.innerHTML = "";
         tryDisplayElement(index + 1);
@@ -795,7 +837,7 @@ async function createSlide(item, options = {}) {
         tryDisplayElement(index + 1);
       });
       logoContainer.appendChild(element);
-    } else if (type === "originalTitle") {
+    } else if (type === "originaltitle") {
       const element = createTitleElement();
       logoContainer.appendChild(element);
     } else {

@@ -176,6 +176,9 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("serrEnableNotifications")]
         public bool SerrEnableNotifications { get; set; } = true;
 
+        [JsonPropertyName("serrEnable4KRequests")]
+        public bool SerrEnable4KRequests { get; set; } = false;
+
         [JsonPropertyName("serrRequests")]
         public List<SerrRequestEntry> SerrRequests { get; set; } = new();
 
@@ -209,6 +212,30 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("arrSonarrSearchOnRequest")]
         public bool ArrSonarrSearchOnRequest { get; set; } = true;
 
+        [JsonPropertyName("arrSonarr4KEnabled")]
+        public bool ArrSonarr4KEnabled { get; set; } = false;
+
+        [JsonPropertyName("arrSonarr4KBaseUrl")]
+        public string ArrSonarr4KBaseUrl { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrSonarr4KApiKey")]
+        public string ArrSonarr4KApiKey { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrSonarr4KRootFolderPath")]
+        public string ArrSonarr4KRootFolderPath { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrSonarr4KQualityProfileId")]
+        public int ArrSonarr4KQualityProfileId { get; set; } = 0;
+
+        [JsonPropertyName("arrSonarr4KLanguageProfileId")]
+        public int ArrSonarr4KLanguageProfileId { get; set; } = 0;
+
+        [JsonPropertyName("arrSonarr4KSeasonFolder")]
+        public bool ArrSonarr4KSeasonFolder { get; set; } = true;
+
+        [JsonPropertyName("arrSonarr4KSearchOnRequest")]
+        public bool ArrSonarr4KSearchOnRequest { get; set; } = true;
+
         [JsonPropertyName("arrRadarrEnabled")]
         public bool ArrRadarrEnabled { get; set; } = false;
 
@@ -226,6 +253,24 @@ namespace Jellyfin.Plugin.JMSFusion
 
         [JsonPropertyName("arrRadarrSearchOnRequest")]
         public bool ArrRadarrSearchOnRequest { get; set; } = true;
+
+        [JsonPropertyName("arrRadarr4KEnabled")]
+        public bool ArrRadarr4KEnabled { get; set; } = false;
+
+        [JsonPropertyName("arrRadarr4KBaseUrl")]
+        public string ArrRadarr4KBaseUrl { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrRadarr4KApiKey")]
+        public string ArrRadarr4KApiKey { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrRadarr4KRootFolderPath")]
+        public string ArrRadarr4KRootFolderPath { get; set; } = string.Empty;
+
+        [JsonPropertyName("arrRadarr4KQualityProfileId")]
+        public int ArrRadarr4KQualityProfileId { get; set; } = 0;
+
+        [JsonPropertyName("arrRadarr4KSearchOnRequest")]
+        public bool ArrRadarr4KSearchOnRequest { get; set; } = true;
     }
 
     public class SerrRequestEntry

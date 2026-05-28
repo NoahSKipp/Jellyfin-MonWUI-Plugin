@@ -732,7 +732,7 @@ export function createInfoContainer({ config, Genres, ProductionYear, Production
       ? ProductionLocations.map((c) => {
           const info = getCountryInfo(c);
           return `${getFlagEmoji(info.code)} ${info.name}`;
-        }).join(", ")
+        }).join("&nbsp;&nbsp;◦&nbsp;&nbsp;")
       : (() => {
           const info = getCountryInfo(ProductionLocations);
           return `${getFlagEmoji(info.code)} ${info.name}`;

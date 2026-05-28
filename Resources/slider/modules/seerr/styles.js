@@ -27,6 +27,10 @@ export function ensureSerrStyles() {
       background: linear-gradient(135deg, #ffb703, #fb8500);
       color: #1b1f28;
     }
+    .monwui-serr-4k-btn {
+      background: linear-gradient(135deg, #e0f2fe, #38bdf8);
+      color: #07131f;
+    }
     .monwui-serr-search-bridge-btn,
     .monwui-serr-mini-btn {
       background: rgba(255,255,255,0.08);
@@ -257,6 +261,13 @@ export function ensureSerrStyles() {
       box-shadow: 0 14px 30px rgba(0,0,0,0.18);
       transform: translateY(-2px);
     }
+    .monwui-serr-result-actions {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
     .monwui-serr-result img,
     .monwui-serr-poster-fallback {
       aspect-ratio: 2/3;
@@ -324,6 +335,59 @@ export function ensureSerrStyles() {
       gap: 10px;
       padding: 22px 24px 8px;
     }
+    .monwui-serr-confirm-layout {
+      align-items: start;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .monwui-serr-confirm-layout.has-poster {
+      grid-template-columns: 116px minmax(0, 1fr);
+    }
+    .monwui-serr-confirm-poster {
+      align-items: center;
+      aspect-ratio: 2 / 3;
+      background:
+        linear-gradient(160deg, rgba(255,183,3,0.28), rgba(251,133,0,0.08)),
+        rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.28);
+      color: #ffb703;
+      display: flex;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+      width: 116px;
+    }
+    .monwui-serr-confirm-poster[hidden] {
+      display: none;
+    }
+    .monwui-serr-confirm-poster::before {
+      background: linear-gradient(180deg, transparent, rgba(0,0,0,.35));
+      content: "";
+      inset: 0;
+      position: absolute;
+      z-index: 1;
+    }
+    .monwui-serr-confirm-poster img {
+      display: block;
+      height: 100%;
+      inset: 0;
+      object-fit: cover;
+      position: absolute;
+      width: 100%;
+    }
+    .monwui-serr-confirm-poster i {
+      font-size: 32px;
+      position: relative;
+      z-index: 2;
+    }
+    .monwui-serr-confirm-summary {
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }
     .monwui-serr-confirm-eyebrow {
       color: #ffcf70;
       font-size: 12px;
@@ -371,14 +435,25 @@ export function ensureSerrStyles() {
       .monwui-serr-result {
         grid-template-columns: 52px minmax(0, 1fr);
       }
-      .monwui-serr-result .monwui-serr-btn {
+      .monwui-serr-result .monwui-serr-result-actions {
         grid-column: 1 / -1;
         width: 100%;
+      }
+      .monwui-serr-result .monwui-serr-btn {
+        flex: 1 1 140px;
       }
       .monwui-serr-result img,
       .monwui-serr-poster-fallback {
         border-radius: 12px;
         width: 52px;
+      }
+      .monwui-serr-confirm-layout.has-poster {
+        gap: 12px;
+        grid-template-columns: 86px minmax(0, 1fr);
+      }
+      .monwui-serr-confirm-poster {
+        border-radius: 12px;
+        width: 86px;
       }
     }
   `;

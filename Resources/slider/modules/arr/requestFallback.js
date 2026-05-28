@@ -31,7 +31,7 @@ function tvdbId(item) {
   return Number.isFinite(id) && id > 0 ? id : 0;
 }
 
-export async function requestSingleEpisodeFromArr({ series, episode } = {}) {
+export async function requestSingleEpisodeFromArr({ series, episode, is4K = false } = {}) {
   const seasonNumber = Number(episode?.ParentIndexNumber);
   const episodeNumber = Number(episode?.IndexNumber);
   if (!Number.isFinite(seasonNumber) || seasonNumber < 0 || !Number.isFinite(episodeNumber) || episodeNumber < 0) {
@@ -43,7 +43,8 @@ export async function requestSingleEpisodeFromArr({ series, episode } = {}) {
     tvdbId: tvdbId(series) || undefined,
     seasonNumber,
     episodeNumber,
-    title: text(series?.Name || series?.OriginalTitle || series?.OriginalName)
+    title: text(series?.Name || series?.OriginalTitle || series?.OriginalName),
+    is4K: is4K === true
   });
 }
 
@@ -56,6 +57,7 @@ export async function requestMovieFromArr(movie = {}, options = {}) {
   return requestArrMovie({
     tmdbId: id,
     title: text(options.title || movie?.Name || movie?.Title || movie?.OriginalTitle || movie?.OriginalName),
-    year: Number(options.year || movie?.ProductionYear || movie?.Year || 0) || undefined
+    year: Number(options.year || movie?.ProductionYear || movie?.Year || 0) || undefined,
+    is4K: options.is4K === true
   });
 }

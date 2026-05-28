@@ -44,12 +44,26 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public int? SonarrLanguageProfileId { get; set; }
             public bool? SonarrSeasonFolder { get; set; }
             public bool? SonarrSearchOnRequest { get; set; }
+            public bool? Sonarr4KEnabled { get; set; }
+            public string? Sonarr4KBaseUrl { get; set; }
+            public string? Sonarr4KApiKey { get; set; }
+            public string? Sonarr4KRootFolderPath { get; set; }
+            public int? Sonarr4KQualityProfileId { get; set; }
+            public int? Sonarr4KLanguageProfileId { get; set; }
+            public bool? Sonarr4KSeasonFolder { get; set; }
+            public bool? Sonarr4KSearchOnRequest { get; set; }
             public bool? RadarrEnabled { get; set; }
             public string? RadarrBaseUrl { get; set; }
             public string? RadarrApiKey { get; set; }
             public string? RadarrRootFolderPath { get; set; }
             public int? RadarrQualityProfileId { get; set; }
             public bool? RadarrSearchOnRequest { get; set; }
+            public bool? Radarr4KEnabled { get; set; }
+            public string? Radarr4KBaseUrl { get; set; }
+            public string? Radarr4KApiKey { get; set; }
+            public string? Radarr4KRootFolderPath { get; set; }
+            public int? Radarr4KQualityProfileId { get; set; }
+            public bool? Radarr4KSearchOnRequest { get; set; }
         }
 
         public sealed class ArrEpisodeRequest
@@ -59,6 +73,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public int? SeasonNumber { get; set; }
             public int? EpisodeNumber { get; set; }
             public string? Title { get; set; }
+            public bool? Is4K { get; set; }
         }
 
         public sealed class ArrMovieRequest
@@ -66,6 +81,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public int? TmdbId { get; set; }
             public string? Title { get; set; }
             public int? Year { get; set; }
+            public bool? Is4K { get; set; }
         }
 
         [HttpGet("settings")]
@@ -106,13 +122,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (request?.SonarrLanguageProfileId.HasValue == true) cfg.ArrSonarrLanguageProfileId = Math.Max(0, request.SonarrLanguageProfileId.Value);
             if (request?.SonarrSeasonFolder.HasValue == true) cfg.ArrSonarrSeasonFolder = request.SonarrSeasonFolder.Value;
             if (request?.SonarrSearchOnRequest.HasValue == true) cfg.ArrSonarrSearchOnRequest = request.SonarrSearchOnRequest.Value;
+            if (request?.Sonarr4KEnabled.HasValue == true) cfg.ArrSonarr4KEnabled = request.Sonarr4KEnabled.Value;
+            if (request?.Sonarr4KBaseUrl is not null) cfg.ArrSonarr4KBaseUrl = NormalizeBaseUrlForStorage(request.Sonarr4KBaseUrl);
+            if (request?.Sonarr4KApiKey is not null) cfg.ArrSonarr4KApiKey = NormalizeSecret(request.Sonarr4KApiKey);
+            if (request?.Sonarr4KRootFolderPath is not null) cfg.ArrSonarr4KRootFolderPath = CleanText(request.Sonarr4KRootFolderPath, 500);
+            if (request?.Sonarr4KQualityProfileId.HasValue == true) cfg.ArrSonarr4KQualityProfileId = Math.Max(0, request.Sonarr4KQualityProfileId.Value);
+            if (request?.Sonarr4KLanguageProfileId.HasValue == true) cfg.ArrSonarr4KLanguageProfileId = Math.Max(0, request.Sonarr4KLanguageProfileId.Value);
+            if (request?.Sonarr4KSeasonFolder.HasValue == true) cfg.ArrSonarr4KSeasonFolder = request.Sonarr4KSeasonFolder.Value;
+            if (request?.Sonarr4KSearchOnRequest.HasValue == true) cfg.ArrSonarr4KSearchOnRequest = request.Sonarr4KSearchOnRequest.Value;
             if (request?.RadarrEnabled.HasValue == true) cfg.ArrRadarrEnabled = request.RadarrEnabled.Value;
             if (request?.RadarrBaseUrl is not null) cfg.ArrRadarrBaseUrl = NormalizeBaseUrlForStorage(request.RadarrBaseUrl);
             if (request?.RadarrApiKey is not null) cfg.ArrRadarrApiKey = NormalizeSecret(request.RadarrApiKey);
             if (request?.RadarrRootFolderPath is not null) cfg.ArrRadarrRootFolderPath = CleanText(request.RadarrRootFolderPath, 500);
             if (request?.RadarrQualityProfileId.HasValue == true) cfg.ArrRadarrQualityProfileId = Math.Max(0, request.RadarrQualityProfileId.Value);
             if (request?.RadarrSearchOnRequest.HasValue == true) cfg.ArrRadarrSearchOnRequest = request.RadarrSearchOnRequest.Value;
+            if (request?.Radarr4KEnabled.HasValue == true) cfg.ArrRadarr4KEnabled = request.Radarr4KEnabled.Value;
+            if (request?.Radarr4KBaseUrl is not null) cfg.ArrRadarr4KBaseUrl = NormalizeBaseUrlForStorage(request.Radarr4KBaseUrl);
+            if (request?.Radarr4KApiKey is not null) cfg.ArrRadarr4KApiKey = NormalizeSecret(request.Radarr4KApiKey);
+            if (request?.Radarr4KRootFolderPath is not null) cfg.ArrRadarr4KRootFolderPath = CleanText(request.Radarr4KRootFolderPath, 500);
+            if (request?.Radarr4KQualityProfileId.HasValue == true) cfg.ArrRadarr4KQualityProfileId = Math.Max(0, request.Radarr4KQualityProfileId.Value);
+            if (request?.Radarr4KSearchOnRequest.HasValue == true) cfg.ArrRadarr4KSearchOnRequest = request.Radarr4KSearchOnRequest.Value;
 
+            SerrRequestStore.Save(cfg);
             plugin.UpdateConfiguration(cfg);
             NoCache();
             return Ok(new
@@ -128,6 +159,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
         [HttpPost("sonarr/test")]
         public async Task<IActionResult> TestSonarr(CancellationToken cancellationToken)
+            => await TestSonarrInternal(cancellationToken, use4K: false);
+
+        [HttpPost("sonarr4k/test")]
+        public async Task<IActionResult> TestSonarr4K(CancellationToken cancellationToken)
+            => await TestSonarrInternal(cancellationToken, use4K: true);
+
+        private async Task<IActionResult> TestSonarrInternal(CancellationToken cancellationToken, bool use4K)
         {
             var adminCheck = TryGetAdminUser();
             if (adminCheck.Result is not null)
@@ -136,22 +174,29 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureSonarrConnectionConfigured(cfg);
+            var guard = EnsureSonarrConnectionConfigured(cfg, use4K);
             if (guard is not null) return guard;
 
-            var status = await SendSonarrAsync(cfg, HttpMethod.Get, "/system/status", null, cancellationToken);
+            var status = await SendSonarrAsync(cfg, HttpMethod.Get, "/system/status", null, cancellationToken, use4K);
             if (!status.Ok)
             {
                 return StatusCode(502, new { ok = false, error = status.Error, status = status.StatusCode });
             }
 
-            var options = await FetchSonarrOptions(cfg, cancellationToken);
+            var options = await FetchSonarrOptions(cfg, cancellationToken, use4K);
             NoCache();
             return Ok(new { ok = true, sonarr = status.Payload, options });
         }
 
         [HttpPost("radarr/test")]
         public async Task<IActionResult> TestRadarr(CancellationToken cancellationToken)
+            => await TestRadarrInternal(cancellationToken, use4K: false);
+
+        [HttpPost("radarr4k/test")]
+        public async Task<IActionResult> TestRadarr4K(CancellationToken cancellationToken)
+            => await TestRadarrInternal(cancellationToken, use4K: true);
+
+        private async Task<IActionResult> TestRadarrInternal(CancellationToken cancellationToken, bool use4K)
         {
             var adminCheck = TryGetAdminUser();
             if (adminCheck.Result is not null)
@@ -160,16 +205,16 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureRadarrConnectionConfigured(cfg);
+            var guard = EnsureRadarrConnectionConfigured(cfg, use4K);
             if (guard is not null) return guard;
 
-            var status = await SendRadarrAsync(cfg, HttpMethod.Get, "/system/status", null, cancellationToken);
+            var status = await SendRadarrAsync(cfg, HttpMethod.Get, "/system/status", null, cancellationToken, use4K);
             if (!status.Ok)
             {
                 return StatusCode(502, new { ok = false, error = status.Error, status = status.StatusCode });
             }
 
-            var options = await FetchRadarrOptions(cfg, cancellationToken);
+            var options = await FetchRadarrOptions(cfg, cancellationToken, use4K);
             NoCache();
             return Ok(new { ok = true, radarr = status.Payload, options });
         }
@@ -184,10 +229,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureSonarrConnectionConfigured(cfg);
+            var guard = EnsureSonarrConnectionConfigured(cfg, use4K: false);
             if (guard is not null) return guard;
 
-            var options = await FetchSonarrOptions(cfg, cancellationToken);
+            var options = await FetchSonarrOptions(cfg, cancellationToken, use4K: false);
+            NoCache();
+            return Ok(new { ok = true, options });
+        }
+
+        [HttpGet("sonarr4k/options")]
+        public async Task<IActionResult> GetSonarr4KOptions(CancellationToken cancellationToken)
+        {
+            var adminCheck = TryGetAdminUser();
+            if (adminCheck.Result is not null)
+            {
+                return adminCheck.Result;
+            }
+
+            var cfg = GetConfig();
+            var guard = EnsureSonarrConnectionConfigured(cfg, use4K: true);
+            if (guard is not null) return guard;
+
+            var options = await FetchSonarrOptions(cfg, cancellationToken, use4K: true);
             NoCache();
             return Ok(new { ok = true, options });
         }
@@ -202,10 +265,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureRadarrConnectionConfigured(cfg);
+            var guard = EnsureRadarrConnectionConfigured(cfg, use4K: false);
             if (guard is not null) return guard;
 
-            var options = await FetchRadarrOptions(cfg, cancellationToken);
+            var options = await FetchRadarrOptions(cfg, cancellationToken, use4K: false);
+            NoCache();
+            return Ok(new { ok = true, options });
+        }
+
+        [HttpGet("radarr4k/options")]
+        public async Task<IActionResult> GetRadarr4KOptions(CancellationToken cancellationToken)
+        {
+            var adminCheck = TryGetAdminUser();
+            if (adminCheck.Result is not null)
+            {
+                return adminCheck.Result;
+            }
+
+            var cfg = GetConfig();
+            var guard = EnsureRadarrConnectionConfigured(cfg, use4K: true);
+            if (guard is not null) return guard;
+
+            var options = await FetchRadarrOptions(cfg, cancellationToken, use4K: true);
             NoCache();
             return Ok(new { ok = true, options });
         }
@@ -249,6 +330,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 await AppendRadarrCalendar(events, cfg, startDate, endDate, cancellationToken);
             }
 
+            if (SerrRequestStore.Save(cfg))
+            {
+                JMSFusionPlugin.Instance.UpdateConfiguration(cfg);
+            }
             var requests = cfg.SerrRequests ?? new List<SerrRequestEntry>();
             var payload = events
                 .OrderBy(item => item.SortDate)
@@ -300,7 +385,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureSonarrRequestConfigured(cfg);
+            var use4K = ShouldUseSonarr4K(cfg, request?.Is4K == true);
+            var guard = EnsureSonarrRequestConfigured(cfg, use4K);
             if (guard is not null) return guard;
 
             var seasonNumber = request?.SeasonNumber ?? -1;
@@ -315,7 +401,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return BadRequest(new { ok = false, error = "tvdbId, tmdbId or title is required." });
             }
 
-            var result = await RequestSonarrEpisode(cfg, request!, cancellationToken);
+            var result = await RequestSonarrEpisode(cfg, request!, cancellationToken, use4K);
             if (!result.Ok)
             {
                 return StatusCode(502, new { ok = false, error = result.Error, status = result.StatusCode });
@@ -343,7 +429,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             var cfg = GetConfig();
-            var guard = EnsureRadarrRequestConfigured(cfg);
+            var use4K = ShouldUseRadarr4K(cfg, request?.Is4K == true);
+            var guard = EnsureRadarrRequestConfigured(cfg, use4K);
             if (guard is not null) return guard;
 
             if ((request?.TmdbId ?? 0) <= 0 && string.IsNullOrWhiteSpace(request?.Title))
@@ -351,7 +438,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return BadRequest(new { ok = false, error = "tmdbId or title is required." });
             }
 
-            var result = await RequestRadarrMovie(cfg, request!, cancellationToken);
+            var result = await RequestRadarrMovie(cfg, request!, cancellationToken, use4K);
             if (!result.Ok)
             {
                 return StatusCode(502, new { ok = false, error = result.Error, status = result.StatusCode });
@@ -368,12 +455,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             });
         }
 
-        private async Task<object> FetchSonarrOptions(JMSFusionConfiguration cfg, CancellationToken cancellationToken)
+        private async Task<object> FetchSonarrOptions(JMSFusionConfiguration cfg, CancellationToken cancellationToken, bool use4K = false)
         {
             var qualityProfiles = await ReadSonarrOptionList(
                 cfg,
                 "/qualityprofile",
                 cancellationToken,
+                use4K,
                 item => new
                 {
                     id = ReadIntValue(item, "id"),
@@ -384,6 +472,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 cfg,
                 "/rootfolder",
                 cancellationToken,
+                use4K,
                 item => new
                 {
                     id = ReadIntValue(item, "id"),
@@ -395,6 +484,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 cfg,
                 "/languageprofile",
                 cancellationToken,
+                use4K,
                 item => new
                 {
                     id = ReadIntValue(item, "id"),
@@ -413,9 +503,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             JMSFusionConfiguration cfg,
             string path,
             CancellationToken cancellationToken,
+            bool use4K,
             Func<JsonElement, T> map)
         {
-            var response = await SendSonarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken);
+            var response = await SendSonarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken, use4K);
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return new List<T>();
             return response.Payload.EnumerateArray()
                 .Where(item => item.ValueKind == JsonValueKind.Object)
@@ -423,12 +514,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 .ToList();
         }
 
-        private async Task<object> FetchRadarrOptions(JMSFusionConfiguration cfg, CancellationToken cancellationToken)
+        private async Task<object> FetchRadarrOptions(JMSFusionConfiguration cfg, CancellationToken cancellationToken, bool use4K = false)
         {
             var qualityProfiles = await ReadRadarrOptionList(
                 cfg,
                 "/qualityprofile",
                 cancellationToken,
+                use4K,
                 item => new
                 {
                     id = ReadIntValue(item, "id"),
@@ -439,6 +531,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 cfg,
                 "/rootfolder",
                 cancellationToken,
+                use4K,
                 item => new
                 {
                     id = ReadIntValue(item, "id"),
@@ -457,9 +550,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             JMSFusionConfiguration cfg,
             string path,
             CancellationToken cancellationToken,
+            bool use4K,
             Func<JsonElement, T> map)
         {
-            var response = await SendRadarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken);
+            var response = await SendRadarrAsync(cfg, HttpMethod.Get, path, null, cancellationToken, use4K);
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return new List<T>();
             return response.Payload.EnumerateArray()
                 .Where(item => item.ValueKind == JsonValueKind.Object)
@@ -635,19 +729,19 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return item.TvdbId.HasValue && item.TvdbId.Value > 0 ? item.TvdbId.Value : null;
         }
 
-        private async Task<SonarrEpisodeResult> RequestSonarrEpisode(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken)
+        private async Task<SonarrEpisodeResult> RequestSonarrEpisode(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
-            var series = await FindSonarrSeries(cfg, request, cancellationToken);
+            var series = await FindSonarrSeries(cfg, request, cancellationToken, use4K);
             var addedSeries = false;
             if (series.ValueKind != JsonValueKind.Object)
             {
-                var lookup = await LookupSonarrSeries(cfg, request, cancellationToken);
+                var lookup = await LookupSonarrSeries(cfg, request, cancellationToken, use4K);
                 if (lookup.ValueKind != JsonValueKind.Object)
                 {
                     return SonarrEpisodeResult.Fail(404, "Series was not found in Sonarr lookup.");
                 }
 
-                var addResult = await AddSonarrSeries(cfg, lookup, request.SeasonNumber ?? 0, cancellationToken);
+                var addResult = await AddSonarrSeries(cfg, lookup, request.SeasonNumber ?? 0, cancellationToken, use4K);
                 if (!addResult.Ok) return SonarrEpisodeResult.Fail(addResult.StatusCode, addResult.Error);
                 series = addResult.Payload;
                 addedSeries = true;
@@ -658,22 +752,22 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return SonarrEpisodeResult.Fail(502, "Sonarr did not return a valid series id.");
             }
 
-            var updateResult = await EnsureSonarrSeriesMonitored(cfg, series, request.SeasonNumber ?? 0, cancellationToken);
+            var updateResult = await EnsureSonarrSeriesMonitored(cfg, series, request.SeasonNumber ?? 0, cancellationToken, use4K);
             if (updateResult.Ok && updateResult.Payload.ValueKind == JsonValueKind.Object)
             {
                 series = updateResult.Payload;
             }
 
-            var episode = await FindSonarrEpisode(cfg, seriesId, request.SeasonNumber ?? 0, request.EpisodeNumber ?? 0, cancellationToken);
+            var episode = await FindSonarrEpisode(cfg, seriesId, request.SeasonNumber ?? 0, request.EpisodeNumber ?? 0, cancellationToken, use4K);
             if (episode.ValueKind != JsonValueKind.Object && addedSeries)
             {
                 await SendSonarrAsync(cfg, HttpMethod.Post, "/command", new Dictionary<string, object?>
                 {
                     ["name"] = "RefreshSeries",
                     ["seriesId"] = seriesId
-                }, cancellationToken);
+                }, cancellationToken, use4K);
                 await Task.Delay(1200, cancellationToken);
-                episode = await FindSonarrEpisode(cfg, seriesId, request.SeasonNumber ?? 0, request.EpisodeNumber ?? 0, cancellationToken);
+                episode = await FindSonarrEpisode(cfg, seriesId, request.SeasonNumber ?? 0, request.EpisodeNumber ?? 0, cancellationToken, use4K);
             }
 
             if (episode.ValueKind != JsonValueKind.Object || !TryReadInt(episode, "id", out var episodeId) || episodeId <= 0)
@@ -685,17 +779,17 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             {
                 ["episodeIds"] = new[] { episodeId },
                 ["monitored"] = true
-            }, cancellationToken);
+            }, cancellationToken, use4K);
             if (!monitor.Ok) return SonarrEpisodeResult.Fail(monitor.StatusCode, monitor.Error);
 
             int? commandId = null;
-            if (cfg.ArrSonarrSearchOnRequest)
+            if (SonarrSearchOnRequest(cfg, use4K))
             {
                 var command = await SendSonarrAsync(cfg, HttpMethod.Post, "/command", new Dictionary<string, object?>
                 {
                     ["name"] = "EpisodeSearch",
                     ["episodeIds"] = new[] { episodeId }
-                }, cancellationToken);
+                }, cancellationToken, use4K);
                 if (!command.Ok) return SonarrEpisodeResult.Fail(command.StatusCode, command.Error);
                 if (TryReadInt(command.Payload, "id", out var id)) commandId = id;
             }
@@ -703,9 +797,9 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return SonarrEpisodeResult.Success(seriesId, episodeId, commandId, addedSeries);
         }
 
-        private async Task<JsonElement> FindSonarrSeries(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken)
+        private async Task<JsonElement> FindSonarrSeries(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
-            var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/series", null, cancellationToken);
+            var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/series", null, cancellationToken, use4K);
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return default;
 
             foreach (var item in response.Payload.EnumerateArray())
@@ -727,7 +821,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return default;
         }
 
-        private async Task<JsonElement> LookupSonarrSeries(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken)
+        private async Task<JsonElement> LookupSonarrSeries(JMSFusionConfiguration cfg, ArrEpisodeRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
             var terms = new List<string>();
             if (request.TvdbId.HasValue && request.TvdbId.Value > 0) terms.Add("tvdb:" + request.TvdbId.Value.ToString(CultureInfo.InvariantCulture));
@@ -736,7 +830,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             foreach (var term in terms.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/series/lookup?term=" + Uri.EscapeDataString(term), null, cancellationToken);
+                var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/series/lookup?term=" + Uri.EscapeDataString(term), null, cancellationToken, use4K);
                 if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) continue;
                 foreach (var item in response.Payload.EnumerateArray())
                 {
@@ -754,36 +848,36 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return default;
         }
 
-        private async Task<ArrCallResult> AddSonarrSeries(JMSFusionConfiguration cfg, JsonElement lookup, int seasonNumber, CancellationToken cancellationToken)
+        private async Task<ArrCallResult> AddSonarrSeries(JMSFusionConfiguration cfg, JsonElement lookup, int seasonNumber, CancellationToken cancellationToken, bool use4K = false)
         {
             var body = JsonSerializer.Deserialize<Dictionary<string, object?>>(lookup.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
-            body["qualityProfileId"] = cfg.ArrSonarrQualityProfileId;
-            if (cfg.ArrSonarrLanguageProfileId > 0) body["languageProfileId"] = cfg.ArrSonarrLanguageProfileId;
-            body["rootFolderPath"] = cfg.ArrSonarrRootFolderPath;
+            body["qualityProfileId"] = SonarrQualityProfileId(cfg, use4K);
+            if (SonarrLanguageProfileId(cfg, use4K) > 0) body["languageProfileId"] = SonarrLanguageProfileId(cfg, use4K);
+            body["rootFolderPath"] = SonarrRootFolderPath(cfg, use4K);
             body["monitored"] = true;
-            body["seasonFolder"] = cfg.ArrSonarrSeasonFolder;
+            body["seasonFolder"] = SonarrSeasonFolder(cfg, use4K);
             body["seasons"] = BuildSeasonMonitorPayload(lookup, seasonNumber);
             body["addOptions"] = new Dictionary<string, object?>
             {
                 ["searchForMissingEpisodes"] = false
             };
 
-            return await SendSonarrAsync(cfg, HttpMethod.Post, "/series", body, cancellationToken);
+            return await SendSonarrAsync(cfg, HttpMethod.Post, "/series", body, cancellationToken, use4K);
         }
 
-        private async Task<ArrCallResult> EnsureSonarrSeriesMonitored(JMSFusionConfiguration cfg, JsonElement series, int seasonNumber, CancellationToken cancellationToken)
+        private async Task<ArrCallResult> EnsureSonarrSeriesMonitored(JMSFusionConfiguration cfg, JsonElement series, int seasonNumber, CancellationToken cancellationToken, bool use4K = false)
         {
             if (!TryReadInt(series, "id", out var seriesId) || seriesId <= 0) return ArrCallResult.Fail(0, "Invalid series id.");
 
             var body = JsonSerializer.Deserialize<Dictionary<string, object?>>(series.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
             body["monitored"] = true;
             body["seasons"] = BuildSeasonMonitorPayload(series, seasonNumber, preserveExisting: true);
-            return await SendSonarrAsync(cfg, HttpMethod.Put, "/series/" + seriesId.ToString(CultureInfo.InvariantCulture), body, cancellationToken);
+            return await SendSonarrAsync(cfg, HttpMethod.Put, "/series/" + seriesId.ToString(CultureInfo.InvariantCulture), body, cancellationToken, use4K);
         }
 
-        private async Task<JsonElement> FindSonarrEpisode(JMSFusionConfiguration cfg, int seriesId, int seasonNumber, int episodeNumber, CancellationToken cancellationToken)
+        private async Task<JsonElement> FindSonarrEpisode(JMSFusionConfiguration cfg, int seriesId, int seasonNumber, int episodeNumber, CancellationToken cancellationToken, bool use4K = false)
         {
-            var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/episode?seriesId=" + seriesId.ToString(CultureInfo.InvariantCulture), null, cancellationToken);
+            var response = await SendSonarrAsync(cfg, HttpMethod.Get, "/episode?seriesId=" + seriesId.ToString(CultureInfo.InvariantCulture), null, cancellationToken, use4K);
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return default;
 
             foreach (var item in response.Payload.EnumerateArray())
@@ -828,19 +922,19 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return output;
         }
 
-        private async Task<RadarrMovieResult> RequestRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken)
+        private async Task<RadarrMovieResult> RequestRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
-            var movie = await FindRadarrMovie(cfg, request, cancellationToken);
+            var movie = await FindRadarrMovie(cfg, request, cancellationToken, use4K);
             var addedMovie = false;
             if (movie.ValueKind != JsonValueKind.Object)
             {
-                var lookup = await LookupRadarrMovie(cfg, request, cancellationToken);
+                var lookup = await LookupRadarrMovie(cfg, request, cancellationToken, use4K);
                 if (lookup.ValueKind != JsonValueKind.Object)
                 {
                     return RadarrMovieResult.Fail(404, "Movie was not found in Radarr lookup.");
                 }
 
-                var addResult = await AddRadarrMovie(cfg, lookup, cancellationToken);
+                var addResult = await AddRadarrMovie(cfg, lookup, cancellationToken, use4K);
                 if (!addResult.Ok) return RadarrMovieResult.Fail(addResult.StatusCode, addResult.Error);
                 movie = addResult.Payload;
                 addedMovie = true;
@@ -851,7 +945,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return RadarrMovieResult.Fail(502, "Radarr did not return a valid movie id.");
             }
 
-            var updateResult = await EnsureRadarrMovieMonitored(cfg, movie, cancellationToken);
+            var updateResult = await EnsureRadarrMovieMonitored(cfg, movie, cancellationToken, use4K);
             if (!updateResult.Ok) return RadarrMovieResult.Fail(updateResult.StatusCode, updateResult.Error);
             if (updateResult.Payload.ValueKind == JsonValueKind.Object)
             {
@@ -859,13 +953,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             int? commandId = null;
-            if (cfg.ArrRadarrSearchOnRequest)
+            if (RadarrSearchOnRequest(cfg, use4K))
             {
                 var command = await SendRadarrAsync(cfg, HttpMethod.Post, "/command", new Dictionary<string, object?>
                 {
                     ["name"] = "MoviesSearch",
                     ["movieIds"] = new[] { movieId }
-                }, cancellationToken);
+                }, cancellationToken, use4K);
                 if (!command.Ok) return RadarrMovieResult.Fail(command.StatusCode, command.Error);
                 if (TryReadInt(command.Payload, "id", out var id)) commandId = id;
             }
@@ -873,9 +967,9 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return RadarrMovieResult.Success(movieId, commandId, addedMovie);
         }
 
-        private async Task<JsonElement> FindRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken)
+        private async Task<JsonElement> FindRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
-            var response = await SendRadarrAsync(cfg, HttpMethod.Get, "/movie", null, cancellationToken);
+            var response = await SendRadarrAsync(cfg, HttpMethod.Get, "/movie", null, cancellationToken, use4K);
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) return default;
 
             var requestedTitle = CleanKey(request.Title);
@@ -898,7 +992,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return default;
         }
 
-        private async Task<JsonElement> LookupRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken)
+        private async Task<JsonElement> LookupRadarrMovie(JMSFusionConfiguration cfg, ArrMovieRequest request, CancellationToken cancellationToken, bool use4K = false)
         {
             if (request.TmdbId.HasValue && request.TmdbId.Value > 0)
             {
@@ -907,7 +1001,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                     HttpMethod.Get,
                     "/movie/lookup/tmdb?tmdbId=" + request.TmdbId.Value.ToString(CultureInfo.InvariantCulture),
                     null,
-                    cancellationToken);
+                    cancellationToken,
+                    use4K);
                 if (byTmdb.Ok && byTmdb.Payload.ValueKind == JsonValueKind.Object)
                 {
                     return byTmdb.Payload.Clone();
@@ -920,7 +1015,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             foreach (var term in terms.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var response = await SendRadarrAsync(cfg, HttpMethod.Get, "/movie/lookup?term=" + Uri.EscapeDataString(term), null, cancellationToken);
+                var response = await SendRadarrAsync(cfg, HttpMethod.Get, "/movie/lookup?term=" + Uri.EscapeDataString(term), null, cancellationToken, use4K);
                 if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Array) continue;
 
                 foreach (var item in response.Payload.EnumerateArray())
@@ -950,34 +1045,34 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return default;
         }
 
-        private async Task<ArrCallResult> AddRadarrMovie(JMSFusionConfiguration cfg, JsonElement lookup, CancellationToken cancellationToken)
+        private async Task<ArrCallResult> AddRadarrMovie(JMSFusionConfiguration cfg, JsonElement lookup, CancellationToken cancellationToken, bool use4K = false)
         {
-            var validation = await ValidateRadarrMovieRequestConfig(cfg, cancellationToken);
+            var validation = await ValidateRadarrMovieRequestConfig(cfg, cancellationToken, use4K);
             if (!validation.Ok) return validation;
 
             var body = JsonSerializer.Deserialize<Dictionary<string, object?>>(lookup.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
-            PrepareRadarrAddMovieBody(body, cfg);
+            PrepareRadarrAddMovieBody(body, cfg, use4K);
 
-            var result = await SendRadarrAsync(cfg, HttpMethod.Post, "/movie", body, cancellationToken);
+            var result = await SendRadarrAsync(cfg, HttpMethod.Post, "/movie", body, cancellationToken, use4K);
             if (result.Ok || !IsRadarrSequenceError(result.Error)) return result;
 
-            var minimal = BuildMinimalRadarrAddMovieBody(lookup, cfg);
-            return await SendRadarrAsync(cfg, HttpMethod.Post, "/movie", minimal, cancellationToken);
+            var minimal = BuildMinimalRadarrAddMovieBody(lookup, cfg, use4K);
+            return await SendRadarrAsync(cfg, HttpMethod.Post, "/movie", minimal, cancellationToken, use4K);
         }
 
-        private async Task<ArrCallResult> ValidateRadarrMovieRequestConfig(JMSFusionConfiguration cfg, CancellationToken cancellationToken)
+        private async Task<ArrCallResult> ValidateRadarrMovieRequestConfig(JMSFusionConfiguration cfg, CancellationToken cancellationToken, bool use4K = false)
         {
-            var profiles = await SendRadarrAsync(cfg, HttpMethod.Get, "/qualityprofile", null, cancellationToken);
+            var profiles = await SendRadarrAsync(cfg, HttpMethod.Get, "/qualityprofile", null, cancellationToken, use4K);
             if (!profiles.Ok) return profiles;
             if (profiles.Payload.ValueKind == JsonValueKind.Array &&
-                !profiles.Payload.EnumerateArray().Any(profile => TryReadInt(profile, "id", out var id) && id == cfg.ArrRadarrQualityProfileId))
+                !profiles.Payload.EnumerateArray().Any(profile => TryReadInt(profile, "id", out var id) && id == RadarrQualityProfileId(cfg, use4K)))
             {
                 return ArrCallResult.Fail(412, "Radarr quality profile is not valid anymore. Test the Radarr connection and save a valid quality profile.");
             }
 
-            var roots = await SendRadarrAsync(cfg, HttpMethod.Get, "/rootfolder", null, cancellationToken);
+            var roots = await SendRadarrAsync(cfg, HttpMethod.Get, "/rootfolder", null, cancellationToken, use4K);
             if (!roots.Ok) return roots;
-            var configuredRoot = NormalizeArrPath(cfg.ArrRadarrRootFolderPath);
+            var configuredRoot = NormalizeArrPath(RadarrRootFolderPath(cfg, use4K));
             if (roots.Payload.ValueKind == JsonValueKind.Array &&
                 !roots.Payload.EnumerateArray().Any(root => string.Equals(NormalizeArrPath(ReadString(root, "path")), configuredRoot, StringComparison.OrdinalIgnoreCase)))
             {
@@ -987,7 +1082,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return ArrCallResult.Success(200, default);
         }
 
-        private static void PrepareRadarrAddMovieBody(Dictionary<string, object?> body, JMSFusionConfiguration cfg)
+        private static void PrepareRadarrAddMovieBody(Dictionary<string, object?> body, JMSFusionConfiguration cfg, bool use4K = false)
         {
             foreach (var key in new[]
             {
@@ -1005,8 +1100,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 body.Remove(key);
             }
 
-            body["qualityProfileId"] = cfg.ArrRadarrQualityProfileId;
-            body["rootFolderPath"] = cfg.ArrRadarrRootFolderPath;
+            body["qualityProfileId"] = RadarrQualityProfileId(cfg, use4K);
+            body["rootFolderPath"] = RadarrRootFolderPath(cfg, use4K);
             body["monitored"] = true;
             if (!body.ContainsKey("minimumAvailability") || body["minimumAvailability"] is null) body["minimumAvailability"] = "announced";
             if (!body.ContainsKey("tags") || body["tags"] is null) body["tags"] = Array.Empty<int>();
@@ -1016,7 +1111,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             };
         }
 
-        private static Dictionary<string, object?> BuildMinimalRadarrAddMovieBody(JsonElement lookup, JMSFusionConfiguration cfg)
+        private static Dictionary<string, object?> BuildMinimalRadarrAddMovieBody(JsonElement lookup, JMSFusionConfiguration cfg, bool use4K = false)
         {
             var body = new Dictionary<string, object?>();
             foreach (var property in new[]
@@ -1043,7 +1138,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 CopyJsonProperty(lookup, body, property);
             }
 
-            PrepareRadarrAddMovieBody(body, cfg);
+            PrepareRadarrAddMovieBody(body, cfg, use4K);
             return body;
         }
 
@@ -1053,77 +1148,135 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             target[property] = value.Clone();
         }
 
-        private async Task<ArrCallResult> EnsureRadarrMovieMonitored(JMSFusionConfiguration cfg, JsonElement movie, CancellationToken cancellationToken)
+        private async Task<ArrCallResult> EnsureRadarrMovieMonitored(JMSFusionConfiguration cfg, JsonElement movie, CancellationToken cancellationToken, bool use4K = false)
         {
             if (!TryReadInt(movie, "id", out var movieId) || movieId <= 0) return ArrCallResult.Fail(0, "Invalid movie id.");
             if (ReadBool(movie, "monitored")) return ArrCallResult.Success(200, movie);
 
             var body = JsonSerializer.Deserialize<Dictionary<string, object?>>(movie.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
             body["monitored"] = true;
-            return await SendRadarrAsync(cfg, HttpMethod.Put, "/movie/" + movieId.ToString(CultureInfo.InvariantCulture), body, cancellationToken);
+            return await SendRadarrAsync(cfg, HttpMethod.Put, "/movie/" + movieId.ToString(CultureInfo.InvariantCulture), body, cancellationToken, use4K);
         }
 
-        private IActionResult? EnsureSonarrConnectionConfigured(JMSFusionConfiguration cfg)
+        private static bool ShouldUseSonarr4K(JMSFusionConfiguration cfg, bool requested4K)
+            => requested4K && IsSonarr4KRequestConfigured(cfg);
+
+        private static bool ShouldUseRadarr4K(JMSFusionConfiguration cfg, bool requested4K)
+            => requested4K && IsRadarr4KRequestConfigured(cfg);
+
+        private static bool IsSonarr4KRequestConfigured(JMSFusionConfiguration cfg)
+            => cfg.EnableArrIntegration &&
+               cfg.ArrSonarr4KEnabled &&
+               !string.IsNullOrWhiteSpace(cfg.ArrSonarr4KBaseUrl) &&
+               !string.IsNullOrWhiteSpace(cfg.ArrSonarr4KApiKey) &&
+               !string.IsNullOrWhiteSpace(cfg.ArrSonarr4KRootFolderPath) &&
+               cfg.ArrSonarr4KQualityProfileId > 0;
+
+        private static bool IsRadarr4KRequestConfigured(JMSFusionConfiguration cfg)
+            => cfg.EnableArrIntegration &&
+               cfg.ArrRadarr4KEnabled &&
+               !string.IsNullOrWhiteSpace(cfg.ArrRadarr4KBaseUrl) &&
+               !string.IsNullOrWhiteSpace(cfg.ArrRadarr4KApiKey) &&
+               !string.IsNullOrWhiteSpace(cfg.ArrRadarr4KRootFolderPath) &&
+               cfg.ArrRadarr4KQualityProfileId > 0;
+
+        private static string SonarrBaseUrl(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KBaseUrl : cfg.ArrSonarrBaseUrl;
+
+        private static string SonarrApiKey(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KApiKey : cfg.ArrSonarrApiKey;
+
+        private static string SonarrRootFolderPath(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KRootFolderPath : cfg.ArrSonarrRootFolderPath;
+
+        private static int SonarrQualityProfileId(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KQualityProfileId : cfg.ArrSonarrQualityProfileId;
+
+        private static int SonarrLanguageProfileId(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KLanguageProfileId : cfg.ArrSonarrLanguageProfileId;
+
+        private static bool SonarrSeasonFolder(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KSeasonFolder : cfg.ArrSonarrSeasonFolder;
+
+        private static bool SonarrSearchOnRequest(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrSonarr4KSearchOnRequest : cfg.ArrSonarrSearchOnRequest;
+
+        private static string RadarrBaseUrl(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrRadarr4KBaseUrl : cfg.ArrRadarrBaseUrl;
+
+        private static string RadarrApiKey(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrRadarr4KApiKey : cfg.ArrRadarrApiKey;
+
+        private static string RadarrRootFolderPath(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrRadarr4KRootFolderPath : cfg.ArrRadarrRootFolderPath;
+
+        private static int RadarrQualityProfileId(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrRadarr4KQualityProfileId : cfg.ArrRadarrQualityProfileId;
+
+        private static bool RadarrSearchOnRequest(JMSFusionConfiguration cfg, bool use4K)
+            => use4K ? cfg.ArrRadarr4KSearchOnRequest : cfg.ArrRadarrSearchOnRequest;
+
+        private IActionResult? EnsureSonarrConnectionConfigured(JMSFusionConfiguration cfg, bool use4K = false)
         {
-            if (string.IsNullOrWhiteSpace(cfg.ArrSonarrBaseUrl) || string.IsNullOrWhiteSpace(cfg.ArrSonarrApiKey))
+            if (string.IsNullOrWhiteSpace(SonarrBaseUrl(cfg, use4K)) || string.IsNullOrWhiteSpace(SonarrApiKey(cfg, use4K)))
             {
-                return StatusCode(412, new { ok = false, error = "Sonarr URL and API key are required." });
+                return StatusCode(412, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Sonarr URL and API key are required." });
             }
 
             return null;
         }
 
-        private IActionResult? EnsureRadarrConnectionConfigured(JMSFusionConfiguration cfg)
+        private IActionResult? EnsureRadarrConnectionConfigured(JMSFusionConfiguration cfg, bool use4K = false)
         {
-            if (string.IsNullOrWhiteSpace(cfg.ArrRadarrBaseUrl) || string.IsNullOrWhiteSpace(cfg.ArrRadarrApiKey))
+            if (string.IsNullOrWhiteSpace(RadarrBaseUrl(cfg, use4K)) || string.IsNullOrWhiteSpace(RadarrApiKey(cfg, use4K)))
             {
-                return StatusCode(412, new { ok = false, error = "Radarr URL and API key are required." });
+                return StatusCode(412, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Radarr URL and API key are required." });
             }
 
             return null;
         }
 
-        private IActionResult? EnsureRadarrRequestConfigured(JMSFusionConfiguration cfg)
+        private IActionResult? EnsureRadarrRequestConfigured(JMSFusionConfiguration cfg, bool use4K = false)
         {
-            if (!cfg.EnableArrIntegration || !cfg.ArrRadarrEnabled)
+            if (!cfg.EnableArrIntegration || !(use4K ? cfg.ArrRadarr4KEnabled : cfg.ArrRadarrEnabled))
             {
-                return StatusCode(403, new { ok = false, error = "Arr/Radarr integration is disabled." });
+                return StatusCode(403, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Arr/Radarr integration is disabled." });
             }
 
-            var connectionError = EnsureRadarrConnectionConfigured(cfg);
+            var connectionError = EnsureRadarrConnectionConfigured(cfg, use4K);
             if (connectionError is not null) return connectionError;
 
-            if (string.IsNullOrWhiteSpace(cfg.ArrRadarrRootFolderPath) || cfg.ArrRadarrQualityProfileId <= 0)
+            if (string.IsNullOrWhiteSpace(RadarrRootFolderPath(cfg, use4K)) || RadarrQualityProfileId(cfg, use4K) <= 0)
             {
-                return StatusCode(412, new { ok = false, error = "Radarr root folder path and quality profile id are required." });
+                return StatusCode(412, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Radarr root folder path and quality profile id are required." });
             }
 
             return null;
         }
 
-        private IActionResult? EnsureSonarrRequestConfigured(JMSFusionConfiguration cfg)
+        private IActionResult? EnsureSonarrRequestConfigured(JMSFusionConfiguration cfg, bool use4K = false)
         {
-            if (!cfg.EnableArrIntegration || !cfg.ArrSonarrEnabled)
+            if (!cfg.EnableArrIntegration || !(use4K ? cfg.ArrSonarr4KEnabled : cfg.ArrSonarrEnabled))
             {
-                return StatusCode(403, new { ok = false, error = "Arr/Sonarr integration is disabled." });
+                return StatusCode(403, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Arr/Sonarr integration is disabled." });
             }
 
-            var connectionError = EnsureSonarrConnectionConfigured(cfg);
+            var connectionError = EnsureSonarrConnectionConfigured(cfg, use4K);
             if (connectionError is not null) return connectionError;
 
-            if (string.IsNullOrWhiteSpace(cfg.ArrSonarrRootFolderPath) || cfg.ArrSonarrQualityProfileId <= 0)
+            if (string.IsNullOrWhiteSpace(SonarrRootFolderPath(cfg, use4K)) || SonarrQualityProfileId(cfg, use4K) <= 0)
             {
-                return StatusCode(412, new { ok = false, error = "Sonarr root folder path and quality profile id are required." });
+                return StatusCode(412, new { ok = false, error = (use4K ? "4K " : string.Empty) + "Sonarr root folder path and quality profile id are required." });
             }
 
             return null;
         }
 
-        private async Task<ArrCallResult> SendSonarrAsync(JMSFusionConfiguration cfg, HttpMethod method, string pathAndQuery, object? body, CancellationToken cancellationToken)
-            => await SendArrAsync(cfg.ArrSonarrBaseUrl, cfg.ArrSonarrApiKey, "Sonarr", method, pathAndQuery, body, cancellationToken);
+        private async Task<ArrCallResult> SendSonarrAsync(JMSFusionConfiguration cfg, HttpMethod method, string pathAndQuery, object? body, CancellationToken cancellationToken, bool use4K = false)
+            => await SendArrAsync(SonarrBaseUrl(cfg, use4K), SonarrApiKey(cfg, use4K), use4K ? "4K Sonarr" : "Sonarr", method, pathAndQuery, body, cancellationToken);
 
-        private async Task<ArrCallResult> SendRadarrAsync(JMSFusionConfiguration cfg, HttpMethod method, string pathAndQuery, object? body, CancellationToken cancellationToken)
-            => await SendArrAsync(cfg.ArrRadarrBaseUrl, cfg.ArrRadarrApiKey, "Radarr", method, pathAndQuery, body, cancellationToken);
+        private async Task<ArrCallResult> SendRadarrAsync(JMSFusionConfiguration cfg, HttpMethod method, string pathAndQuery, object? body, CancellationToken cancellationToken, bool use4K = false)
+            => await SendArrAsync(RadarrBaseUrl(cfg, use4K), RadarrApiKey(cfg, use4K), use4K ? "4K Radarr" : "Radarr", method, pathAndQuery, body, cancellationToken);
 
         private async Task<ArrCallResult> SendArrAsync(string baseUrl, string apiKey, string serviceName, HttpMethod method, string pathAndQuery, object? body, CancellationToken cancellationToken)
         {
@@ -1219,13 +1372,29 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 sonarrLanguageProfileId = cfg.ArrSonarrLanguageProfileId,
                 sonarrSeasonFolder = cfg.ArrSonarrSeasonFolder,
                 sonarrSearchOnRequest = cfg.ArrSonarrSearchOnRequest,
+                sonarr4KEnabled = cfg.ArrSonarr4KEnabled,
+                sonarr4KBaseUrl = cfg.ArrSonarr4KBaseUrl,
+                sonarr4KApiKey = includeSensitive ? cfg.ArrSonarr4KApiKey : string.Empty,
+                hasSonarr4KApiKey = !string.IsNullOrWhiteSpace(cfg.ArrSonarr4KApiKey),
+                sonarr4KRootFolderPath = cfg.ArrSonarr4KRootFolderPath,
+                sonarr4KQualityProfileId = cfg.ArrSonarr4KQualityProfileId,
+                sonarr4KLanguageProfileId = cfg.ArrSonarr4KLanguageProfileId,
+                sonarr4KSeasonFolder = cfg.ArrSonarr4KSeasonFolder,
+                sonarr4KSearchOnRequest = cfg.ArrSonarr4KSearchOnRequest,
                 radarrEnabled = cfg.ArrRadarrEnabled,
                 radarrBaseUrl = cfg.ArrRadarrBaseUrl,
                 radarrApiKey = includeSensitive ? cfg.ArrRadarrApiKey : string.Empty,
                 hasRadarrApiKey = !string.IsNullOrWhiteSpace(cfg.ArrRadarrApiKey),
                 radarrRootFolderPath = cfg.ArrRadarrRootFolderPath,
                 radarrQualityProfileId = cfg.ArrRadarrQualityProfileId,
-                radarrSearchOnRequest = cfg.ArrRadarrSearchOnRequest
+                radarrSearchOnRequest = cfg.ArrRadarrSearchOnRequest,
+                radarr4KEnabled = cfg.ArrRadarr4KEnabled,
+                radarr4KBaseUrl = cfg.ArrRadarr4KBaseUrl,
+                radarr4KApiKey = includeSensitive ? cfg.ArrRadarr4KApiKey : string.Empty,
+                hasRadarr4KApiKey = !string.IsNullOrWhiteSpace(cfg.ArrRadarr4KApiKey),
+                radarr4KRootFolderPath = cfg.ArrRadarr4KRootFolderPath,
+                radarr4KQualityProfileId = cfg.ArrRadarr4KQualityProfileId,
+                radarr4KSearchOnRequest = cfg.ArrRadarr4KSearchOnRequest
             };
 
         private static JMSFusionConfiguration GetConfig()

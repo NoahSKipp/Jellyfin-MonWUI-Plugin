@@ -246,6 +246,7 @@ When request notifications are loaded with download data enabled, MonWUI checks 
 
 - Radarr queue and movie records are used for movie requests.
 - Sonarr queue and series records are used for TV requests.
+- 4K requests use the configured 4K Radarr/Sonarr queue when that connection is available.
 - Active downloads display service name, download client, remaining time, item count, and progress percent when available.
 
 Queue lookups are cached briefly to avoid excessive API calls while the notification panel is open.

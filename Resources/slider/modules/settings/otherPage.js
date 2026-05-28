@@ -269,10 +269,10 @@ export function createLogoTitlePanel(config, labels) {
     displayOrderInput.type = 'text';
     displayOrderInput.id = 'displayOrderInput';
     displayOrderInput.name = 'displayOrder';
-    displayOrderInput.placeholder = 'logo,disk,originalTitle';
+    displayOrderInput.placeholder = 'clearart,disk,logo,originalTitle';
     displayOrderInput.value = config.displayOrder || 'logo,disk,originalTitle';
     const displayOrderSmall = document.createElement('small');
-    displayOrderSmall.textContent = labels.displayOrderhelp || '(Örnek: logo,disk,originalTitle)';
+    displayOrderSmall.textContent = labels.displayOrderhelp || '(Örnek: clearart,disk,logo,originalTitle)';
     displayOrderLabel.append(displayOrderSpan, displayOrderInput, displayOrderSmall);
     displayOrderDiv.appendChild(displayOrderLabel);
     section.appendChild(displayOrderDiv);

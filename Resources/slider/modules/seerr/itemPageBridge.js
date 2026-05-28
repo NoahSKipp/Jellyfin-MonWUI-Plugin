@@ -1,5 +1,6 @@
 import { fetchItemDetailsFull, getSessionInfo, makeApiRequest } from "../../../Plugins/JMSFusion/runtime/api.js";
 import { getConfig } from "../config.js";
+import { withServer } from "../jfUrl.js";
 import { getEffectiveLanguage, getLanguageLabels } from "../../language/index.js";
 import { showNotification } from "../player/ui/notification.js";
 import { requestMovieFromArr, requestSingleEpisodeFromArr } from "../arr/requestFallback.js";
@@ -99,6 +100,10 @@ function accessHasSerr(access) {
   return access?.serrEnabled !== false && access?.enabled === true;
 }
 
+function access4KEnabled(access) {
+  return access?.settings?.enable4KRequests === true;
+}
+
 function moduleEnabled() {
   return cfg()?.enableSerrArrIntegrationModule !== false;
 }
@@ -168,7 +173,37 @@ function imageUrl(path, size = "w300") {
   const clean = text(path);
   if (!clean) return "";
   if (/^https?:\/\//i.test(clean)) return clean;
+  if (/^\/(?:Items|Users|Videos|web|Plugins)\//i.test(clean)) return withServer(clean);
   return `${SERR_IMAGE_BASE}/${size}${clean.startsWith("/") ? clean : `/${clean}`}`;
+}
+
+function buildJellyfinPrimaryImageUrl(itemId, tag = "", maxHeight = 420) {
+  const cleanId = text(itemId);
+  if (!cleanId) return "";
+  const qs = new URLSearchParams();
+  qs.set("quality", "88");
+  qs.set("maxHeight", String(maxHeight));
+  if (tag) qs.set("tag", tag);
+  return withServer(`/Items/${encodeURIComponent(cleanId)}/Images/Primary?${qs.toString()}`);
+}
+
+function jellyfinPrimaryImageUrl(item, maxHeight = 420) {
+  const tags = item?.ImageTags || item?.imageTags || {};
+  const primaryTag = text(item?.PrimaryImageTag || item?.primaryImageTag || tags?.Primary || tags?.primary);
+  const itemId = text(item?.Id || item?.id);
+  const hasPrimary = primaryTag || item?.HasPrimaryImage === true || item?.hasPrimaryImage === true;
+  if (itemId && hasPrimary) return buildJellyfinPrimaryImageUrl(itemId, primaryTag, maxHeight);
+
+  const series = item?.Series || item?.series || {};
+  const seriesTag = text(item?.SeriesPrimaryImageTag || item?.seriesPrimaryImageTag || series?.PrimaryImageTag || series?.ImageTags?.Primary);
+  const seriesId = text(item?.SeriesId || item?.seriesId || series?.Id || series?.id);
+  if (seriesId && seriesTag) return buildJellyfinPrimaryImageUrl(seriesId, seriesTag, maxHeight);
+
+  const parentTag = text(item?.ParentPrimaryImageTag || item?.parentPrimaryImageTag);
+  const parentId = text(item?.ParentPrimaryImageItemId || item?.parentPrimaryImageItemId || item?.ParentId || item?.parentId);
+  if (parentId && parentTag) return buildJellyfinPrimaryImageUrl(parentId, parentTag, maxHeight);
+
+  return "";
 }
 
 function notify(message, type = "info") {
@@ -569,7 +604,9 @@ export async function requestSerrMissingSyntheticItem(item, { button } = {}) {
     return null;
   }
   const type = text(item.__monwuiSerrMissingType);
-  const confirmRequests = await shouldConfirmRequests();
+  const access = await getSerrAccess().catch(() => null);
+  const serrSettings = access?.settings || {};
+  const confirmRequests = access4KEnabled(access) || serrSettings.confirmRequests !== false;
   if (type === "movie") {
     if (confirmRequests) {
       openSelectionModal({
@@ -577,7 +614,7 @@ export async function requestSerrMissingSyntheticItem(item, { button } = {}) {
         titleMode: "movie",
         submitMode: "movie",
         visualOnly: true,
-        plan: null,
+        plan: { serrSettings },
         items: [item],
         originButton: button,
         source: "jellyfin-missing-preview-card",
@@ -596,7 +633,7 @@ export async function requestSerrMissingSyntheticItem(item, { button } = {}) {
   }
 
   const series = item.__monwuiSerrSeriesItem || {};
-  const plan = { seriesItem: series, pageItem: series, requestState: emptyRequestState(), serrSettings: { confirmRequests } };
+  const plan = { seriesItem: series, pageItem: series, requestState: emptyRequestState(), serrSettings: { ...serrSettings, confirmRequests } };
   if (type === "season") {
     const seasonNumber = Number(item?.IndexNumber);
     if (!isRequestableSeasonNumber(seasonNumber)) {
@@ -1930,6 +1967,9 @@ function ensureSelectionModal() {
         <button type="button" class="monwui-serr-btn" data-serr-native-submit>
           <i class="fas fa-paper-plane" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestButton", "İste"))}</span>
         </button>
+        <button type="button" class="monwui-serr-btn monwui-serr-4k-btn" data-serr-native-submit-4k hidden>
+          <i class="fas fa-film" aria-hidden="true"></i><span>${escapeHtml(L("serrRequest4KButton", "4K İste"))}</span>
+        </button>
       </div>
     </div>
   `;
@@ -1978,8 +2018,8 @@ function selectionImagePath(item, mode) {
 
 function selectionImageUrl(item, mode) {
   const path = selectionImagePath(item, mode);
-  if (!path) return "";
-  return imageUrl(path, mode === "episode" ? "w500" : "w342");
+  return imageUrl(path, mode === "episode" ? "w500" : "w342") ||
+    jellyfinPrimaryImageUrl(item, mode === "episode" ? 320 : 420);
 }
 
 function selectionIcon(mode, titleMode) {
@@ -2092,6 +2132,7 @@ function closeSelectionModal() {
 
 function planConfirmRequestsValue(plan) {
   const settings = plan?.serrSettings || plan?.settings || null;
+  if (settings?.enable4KRequests === true) return true;
   if (settings && settings.confirmRequests !== undefined) return settings.confirmRequests !== false;
   return null;
 }
@@ -2100,6 +2141,7 @@ async function shouldConfirmRequests(plan = null) {
   const fromPlan = planConfirmRequestsValue(plan);
   if (fromPlan !== null) return fromPlan;
   const access = await getSerrAccess().catch(() => null);
+  if (access4KEnabled(access)) return true;
   return access?.settings?.confirmRequests !== false;
 }
 
@@ -2116,11 +2158,17 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
   const toolbar = modal.querySelector(".monwui-serr-choice-toolbar");
   const list = modal.querySelector(".monwui-serr-choice-list");
   const submit = modal.querySelector("[data-serr-native-submit]");
+  const submit4K = modal.querySelector("[data-serr-native-submit-4k]");
   const isSeasonMode = mode === "season";
   const isMovieMode = mode === "movie";
+  const enable4K = plan?.serrSettings?.enable4KRequests === true || plan?.settings?.enable4KRequests === true;
 
   title.textContent = selectionModalTitle(mode, titleMode, submitMode);
   renderSelectionHero(modal, { mode, titleMode, submitMode, plan, items });
+  if (submit4K) {
+    if (enable4K) submit4K.removeAttribute("hidden");
+    else submit4K.setAttribute("hidden", "hidden");
+  }
 
   toolbar.innerHTML = `<div class="monwui-serr-choice-hint">${escapeHtml(selectionModalHint(mode, titleMode, submitMode))}</div>`;
 
@@ -2155,7 +2203,7 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
     `;
   }).join("");
 
-  submit.onclick = async () => {
+  const handleSubmit = async (is4K = false) => {
     const checked = Array.from(list.querySelectorAll(visualOnly ? "input[type='checkbox']" : "input[type='checkbox']:checked"));
     if (!checked.length) {
       notify(L("serrSelectAtLeastOne", "En az bir seçim yapın."), "error");
@@ -2170,16 +2218,17 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
       await submitMovieCollection({
         plan,
         movies: selectedMovies,
-        button: submit,
+        button: is4K ? submit4K : submit,
         originButton,
-        source: source || "jellyfin-native-collection"
+        source: source || "jellyfin-native-collection",
+        is4K
       });
       return;
     }
     if (effectiveMode === "movie") {
       const selected = checked[0];
       const movie = selected ? (items[Number(selected.getAttribute("data-index"))] || items[0]) : items[0];
-      await submitMovieRequest({ movie, button: submit, originButton, source: source || "jellyfin-native-movie-card", requestedItem });
+      await submitMovieRequest({ movie, button: is4K ? submit4K : submit, originButton, source: source || "jellyfin-native-movie-card", requestedItem, is4K });
       return;
     }
 
@@ -2198,8 +2247,10 @@ function openSelectionModal({ mode, plan, items, titleMode = mode, visualOnly = 
       entry.episodeNumber >= 0
     );
 
-    await submitSelection({ plan, seasons, episodes, mode: effectiveMode, button: submit, originButton, source, requestedItem });
+    await submitSelection({ plan, seasons, episodes, mode: effectiveMode, button: is4K ? submit4K : submit, originButton, source, requestedItem, is4K });
   };
+  submit.onclick = () => handleSubmit(false);
+  if (submit4K) submit4K.onclick = () => handleSubmit(true);
 
   modal.style.display = "flex";
 }
@@ -2213,7 +2264,7 @@ function openSeasonRequestModal(plan) {
   openSelectionModal({ mode: "season", submitMode: "season", visualOnly: true, plan, items: plan.missingSeasons });
 }
 
-async function submitSelection({ plan, seasons, episodes, mode, button, originButton = null, source = "", requestedItem = null }) {
+async function submitSelection({ plan, seasons, episodes, mode, button, originButton = null, source = "", requestedItem = null, is4K = false }) {
   const series = plan?.seriesItem || {};
   const mediaId = tmdbId(series);
   if (!mediaId) {
@@ -2239,6 +2290,7 @@ async function submitSelection({ plan, seasons, episodes, mode, button, originBu
       seasons: mode === "episode" ? [] : seasons,
       episodes,
       requestAllSeasons: false,
+      is4K: is4K === true,
       title: `${text(series?.Name, L("serrTv", "Dizi"))} - ${countText}`,
       source: source || "jellyfin-native-details",
       jellyfinItemId: ""
@@ -2258,7 +2310,8 @@ async function submitSelection({ plan, seasons, episodes, mode, button, originBu
           ParentIndexNumber: selected.seasonNumber,
           IndexNumber: selected.episodeNumber,
           Name: selected.name
-        }
+        },
+        is4K: is4K === true
       });
       notify(arrStatusMessage(arrResult), "success");
       if (requestedItem) requestedItem.__monwuiSerrRequested = true;
@@ -2285,7 +2338,8 @@ async function submitSelection({ plan, seasons, episodes, mode, button, originBu
             ParentIndexNumber: selected.seasonNumber,
             IndexNumber: selected.episodeNumber,
             Name: selected.name
-          }
+          },
+          is4K: is4K === true
         });
         notify(arrStatusMessage(arrResult), "success");
         if (requestedItem) requestedItem.__monwuiSerrRequested = true;
@@ -3199,7 +3253,7 @@ async function submitCollectionMovie({ plan, movie, button }) {
   });
 }
 
-async function requestCollectionMovieBackend(movie, { source = "jellyfin-native-collection", access = null } = {}) {
+async function requestCollectionMovieBackend(movie, { source = "jellyfin-native-collection", access = null, is4K = false } = {}) {
   const mediaId = tmdbId(movie);
   if (!mediaId) {
     throw new Error(L("serrTmdbMissing", "TMDb ID bulunamadı. Seerr araması ile devam edin."));
@@ -3213,6 +3267,7 @@ async function requestCollectionMovieBackend(movie, { source = "jellyfin-native-
       seasons: [],
       episodes: [],
       requestAllSeasons: false,
+      is4K: is4K === true,
       title,
       source,
       jellyfinItemId: ""
@@ -3223,18 +3278,18 @@ async function requestCollectionMovieBackend(movie, { source = "jellyfin-native-
       throw err;
     }
     if (accessHasSerr(access) && shouldFallbackMovieToArr(result)) {
-      return await requestMovieFromArr(movie, { tmdbId: mediaId, title });
+      return await requestMovieFromArr(movie, { tmdbId: mediaId, title, is4K: is4K === true });
     }
     return result;
   } catch (error) {
     if (accessHasSerr(access) && !isJellyfinAlreadyAvailableError(error)) {
-      return await requestMovieFromArr(movie, { tmdbId: mediaId, title });
+      return await requestMovieFromArr(movie, { tmdbId: mediaId, title, is4K: is4K === true });
     }
     throw error;
   }
 }
 
-async function submitMovieCollection({ plan = null, movies = [], button, originButton = null, source = "jellyfin-native-collection" } = {}) {
+async function submitMovieCollection({ plan = null, movies = [], button, originButton = null, source = "jellyfin-native-collection", is4K = false } = {}) {
   const list = [];
   const seen = new Set();
   for (const movie of Array.isArray(movies) ? movies : []) {
@@ -3268,7 +3323,7 @@ async function submitMovieCollection({ plan = null, movies = [], button, originB
         continue;
       }
       try {
-        await requestCollectionMovieBackend(movie, { source, access });
+        await requestCollectionMovieBackend(movie, { source, access, is4K });
         completed += 1;
         if (id > 0) requestState.movieIds?.add?.(id);
         movie.__monwuiSerrRequested = true;
@@ -3303,7 +3358,7 @@ async function submitMovieCollection({ plan = null, movies = [], button, originB
   }
 }
 
-async function submitMovieRequest({ movie, button, originButton = null, source = "jellyfin-native-movie-card", requestedItem = null }) {
+async function submitMovieRequest({ movie, button, originButton = null, source = "jellyfin-native-movie-card", requestedItem = null, is4K = false }) {
   const mediaId = tmdbId(movie);
   if (!mediaId) {
     notify(L("serrTmdbMissing", "TMDb ID bulunamadı. Seerr araması ile devam edin."), "error");
@@ -3324,6 +3379,7 @@ async function submitMovieRequest({ movie, button, originButton = null, source =
       seasons: [],
       episodes: [],
       requestAllSeasons: false,
+      is4K: is4K === true,
       title: text(movie?.Name, L("serrMovie", "Film")),
       source,
       jellyfinItemId: ""
@@ -3334,7 +3390,7 @@ async function submitMovieRequest({ movie, button, originButton = null, source =
       throw err;
     }
     if (accessHasSerr(access) && shouldFallbackMovieToArr(result)) {
-      await requestMovieFallbackFromArr(movie, { tmdbId: mediaId, title: text(movie?.Name, L("serrMovie", "Film")) });
+      await requestMovieFallbackFromArr(movie, { tmdbId: mediaId, title: text(movie?.Name, L("serrMovie", "Film")), is4K: is4K === true });
       if (requestedItem) requestedItem.__monwuiSerrRequested = true;
       if (originButton) markButtonRequested(originButton);
       completed = true;
@@ -3353,7 +3409,7 @@ async function submitMovieRequest({ movie, button, originButton = null, source =
   } catch (error) {
     if (accessHasSerr(access) && !isJellyfinAlreadyAvailableError(error)) {
       try {
-        await requestMovieFallbackFromArr(movie, { tmdbId: mediaId, title: text(movie?.Name, L("serrMovie", "Film")) });
+        await requestMovieFallbackFromArr(movie, { tmdbId: mediaId, title: text(movie?.Name, L("serrMovie", "Film")), is4K: is4K === true });
         if (requestedItem) requestedItem.__monwuiSerrRequested = true;
         if (originButton) markButtonRequested(originButton);
         completed = true;

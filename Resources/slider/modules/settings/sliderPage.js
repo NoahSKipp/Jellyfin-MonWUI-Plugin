@@ -228,11 +228,14 @@ export function createSliderPanel(config, labels) {
     const diagonalOnlyFields = [
       peakGapYLabel, peakGapYInput
     ];
+    const showDiagonalSettings = isPeak && input.checked;
+
     peakRailFields.forEach(el => {
-      el.style.display = isPeak ? '' : 'none';
+      el.style.display = showDiagonalSettings ? '' : 'none';
     });
+
     diagonalOnlyFields.forEach(el => {
-      el.style.display = (isPeak && input.checked) ? '' : 'none';
+      el.style.display = showDiagonalSettings ? '' : 'none';
     });
   }
 

@@ -2,10 +2,14 @@ import { showNotification } from "../player/ui/notification.js";
 import { createCheckbox, createSection } from "../settings/shared.js";
 import {
   getArrSettings,
+  getRadarr4KOptions,
   getRadarrOptions,
+  getSonarr4KOptions,
   getSonarrOptions,
   saveArrSettings,
+  testRadarr4KConnection,
   testRadarrConnection,
+  testSonarr4KConnection,
   testSonarrConnection
 } from "../arr/api.js";
 import { getSerrSettings, saveSerrSettings, testSerrConnection } from "./api.js";
@@ -19,6 +23,28 @@ function L(labels, key, fallback) {
   const value = labels?.[key];
   return typeof value === "string" && value.trim() ? value : fallback;
 }
+
+const SONARR_FIELDS = {
+  quality: "arrSonarrQualityProfileId",
+  root: "arrSonarrRootFolderPath",
+  language: "arrSonarrLanguageProfileId"
+};
+
+const SONARR_4K_FIELDS = {
+  quality: "arrSonarr4KQualityProfileId",
+  root: "arrSonarr4KRootFolderPath",
+  language: "arrSonarr4KLanguageProfileId"
+};
+
+const RADARR_FIELDS = {
+  quality: "arrRadarrQualityProfileId",
+  root: "arrRadarrRootFolderPath"
+};
+
+const RADARR_4K_FIELDS = {
+  quality: "arrRadarr4KQualityProfileId",
+  root: "arrRadarr4KRootFolderPath"
+};
 
 function createInput(name, label, value = "", { type = "text", placeholder = "" } = {}) {
   const wrap = document.createElement("div");
@@ -65,6 +91,11 @@ function createSelect(name, label, options = []) {
   return wrap;
 }
 
+function mark4KField(node) {
+  if (node) node.setAttribute("data-arr-4k-field", "1");
+  return node;
+}
+
 function setValues(panel, settings = {}) {
   const set = (name, value) => {
     const el = panel.querySelector(`[name="${name}"]`);
@@ -88,9 +119,11 @@ function setValues(panel, settings = {}) {
   set("serrApiKey", settings.apiKey || "");
   set("serrDefaultLanguage", settings.defaultLanguage || "tr");
   set("serrRequestAsJellyfinUser", settings.requestAsJellyfinUser !== false);
-  set("serrConfirmRequests", settings.confirmRequests !== false);
+  set("serrEnable4KRequests", settings.enable4KRequests === true);
+  set("serrConfirmRequests", settings.enable4KRequests === true || settings.confirmRequests !== false);
   set("serrShowMissingSearchButton", settings.showMissingSearchButton !== false);
   set("serrEnableNotifications", settings.enableNotifications !== false);
+  sync4KControls(panel);
 }
 
 function setArrValues(panel, settings = {}) {
@@ -110,12 +143,27 @@ function setArrValues(panel, settings = {}) {
   set("arrSonarrLanguageProfileId", settings.sonarrLanguageProfileId || "");
   set("arrSonarrSeasonFolder", settings.sonarrSeasonFolder !== false);
   set("arrSonarrSearchOnRequest", settings.sonarrSearchOnRequest !== false);
+  set("arrSonarr4KEnabled", settings.sonarr4KEnabled === true);
+  set("arrSonarr4KBaseUrl", settings.sonarr4KBaseUrl || "");
+  set("arrSonarr4KApiKey", settings.sonarr4KApiKey || "");
+  set("arrSonarr4KRootFolderPath", settings.sonarr4KRootFolderPath || "");
+  set("arrSonarr4KQualityProfileId", settings.sonarr4KQualityProfileId || "");
+  set("arrSonarr4KLanguageProfileId", settings.sonarr4KLanguageProfileId || "");
+  set("arrSonarr4KSeasonFolder", settings.sonarr4KSeasonFolder !== false);
+  set("arrSonarr4KSearchOnRequest", settings.sonarr4KSearchOnRequest !== false);
   set("arrRadarrEnabled", settings.radarrEnabled === true);
   set("arrRadarrBaseUrl", settings.radarrBaseUrl || "");
   set("arrRadarrApiKey", settings.radarrApiKey || "");
   set("arrRadarrRootFolderPath", settings.radarrRootFolderPath || "");
   set("arrRadarrQualityProfileId", settings.radarrQualityProfileId || "");
   set("arrRadarrSearchOnRequest", settings.radarrSearchOnRequest !== false);
+  set("arrRadarr4KEnabled", settings.radarr4KEnabled === true);
+  set("arrRadarr4KBaseUrl", settings.radarr4KBaseUrl || "");
+  set("arrRadarr4KApiKey", settings.radarr4KApiKey || "");
+  set("arrRadarr4KRootFolderPath", settings.radarr4KRootFolderPath || "");
+  set("arrRadarr4KQualityProfileId", settings.radarr4KQualityProfileId || "");
+  set("arrRadarr4KSearchOnRequest", settings.radarr4KSearchOnRequest !== false);
+  sync4KControls(panel);
 }
 
 function setSelectOptions(select, options, currentValue = "") {
@@ -152,24 +200,25 @@ function formatBytes(value) {
   return `${size.toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
 }
 
-function applySonarrOptions(panel, options = {}, labels = {}) {
+function applySonarrOptions(panel, options = {}, labels = {}, fieldNames = SONARR_FIELDS) {
+  const names = { ...SONARR_FIELDS, ...(fieldNames || {}) };
   const qualityProfiles = Array.isArray(options?.qualityProfiles) ? options.qualityProfiles : [];
   const rootFolders = Array.isArray(options?.rootFolders) ? options.rootFolders : [];
   const languageProfiles = Array.isArray(options?.languageProfiles) ? options.languageProfiles : [];
 
   setSelectOptions(
-    panel.querySelector('[name="arrSonarrQualityProfileId"]'),
+    panel.querySelector(`[name="${names.quality}"]`),
     [
       { value: "", label: L(labels, "arrSelectQualityProfile", "Kalite profili seç") },
       ...qualityProfiles
         .filter((profile) => Number(profile?.id) > 0)
         .map((profile) => ({ value: String(profile.id), label: text(profile.name, `#${profile.id}`) }))
     ],
-    panel.querySelector('[name="arrSonarrQualityProfileId"]')?.value
+    panel.querySelector(`[name="${names.quality}"]`)?.value
   );
 
   setSelectOptions(
-    panel.querySelector('[name="arrSonarrRootFolderPath"]'),
+    panel.querySelector(`[name="${names.root}"]`),
     [
       { value: "", label: L(labels, "arrSelectRootFolder", "Dizin seç") },
       ...rootFolders
@@ -182,44 +231,45 @@ function applySonarrOptions(panel, options = {}, labels = {}) {
           };
         })
     ],
-    panel.querySelector('[name="arrSonarrRootFolderPath"]')?.value
+    panel.querySelector(`[name="${names.root}"]`)?.value
   );
 
   setSelectOptions(
-    panel.querySelector('[name="arrSonarrLanguageProfileId"]'),
+    panel.querySelector(`[name="${names.language}"]`),
     [
       { value: "", label: L(labels, "arrLanguageProfileNone", "Yok / Sonarr v4") },
       ...languageProfiles
         .filter((profile) => Number(profile?.id) > 0)
         .map((profile) => ({ value: String(profile.id), label: text(profile.name, `#${profile.id}`) }))
     ],
-    panel.querySelector('[name="arrSonarrLanguageProfileId"]')?.value
+    panel.querySelector(`[name="${names.language}"]`)?.value
   );
 }
 
-async function refreshSonarrOptions(panel, labels) {
-  const data = await getSonarrOptions();
-  applySonarrOptions(panel, data?.options || {}, labels);
+async function refreshSonarrOptions(panel, labels, { is4K = false } = {}) {
+  const data = await (is4K ? getSonarr4KOptions() : getSonarrOptions());
+  applySonarrOptions(panel, data?.options || {}, labels, is4K ? SONARR_4K_FIELDS : SONARR_FIELDS);
   return data?.options || {};
 }
 
-function applyRadarrOptions(panel, options = {}, labels = {}) {
+function applyRadarrOptions(panel, options = {}, labels = {}, fieldNames = RADARR_FIELDS) {
+  const names = { ...RADARR_FIELDS, ...(fieldNames || {}) };
   const qualityProfiles = Array.isArray(options?.qualityProfiles) ? options.qualityProfiles : [];
   const rootFolders = Array.isArray(options?.rootFolders) ? options.rootFolders : [];
 
   setSelectOptions(
-    panel.querySelector('[name="arrRadarrQualityProfileId"]'),
+    panel.querySelector(`[name="${names.quality}"]`),
     [
       { value: "", label: L(labels, "arrSelectQualityProfile", "Kalite profili seç") },
       ...qualityProfiles
         .filter((profile) => Number(profile?.id) > 0)
         .map((profile) => ({ value: String(profile.id), label: text(profile.name, `#${profile.id}`) }))
     ],
-    panel.querySelector('[name="arrRadarrQualityProfileId"]')?.value
+    panel.querySelector(`[name="${names.quality}"]`)?.value
   );
 
   setSelectOptions(
-    panel.querySelector('[name="arrRadarrRootFolderPath"]'),
+    panel.querySelector(`[name="${names.root}"]`),
     [
       { value: "", label: L(labels, "arrSelectRootFolder", "Dizin seç") },
       ...rootFolders
@@ -232,28 +282,30 @@ function applyRadarrOptions(panel, options = {}, labels = {}) {
           };
         })
     ],
-    panel.querySelector('[name="arrRadarrRootFolderPath"]')?.value
+    panel.querySelector(`[name="${names.root}"]`)?.value
   );
 }
 
-async function refreshRadarrOptions(panel, labels) {
-  const data = await getRadarrOptions();
-  applyRadarrOptions(panel, data?.options || {}, labels);
+async function refreshRadarrOptions(panel, labels, { is4K = false } = {}) {
+  const data = await (is4K ? getRadarr4KOptions() : getRadarrOptions());
+  applyRadarrOptions(panel, data?.options || {}, labels, is4K ? RADARR_4K_FIELDS : RADARR_FIELDS);
   return data?.options || {};
 }
 
 function readValues(panel) {
   const value = (name) => panel.querySelector(`[name="${name}"]`)?.value ?? "";
   const checked = (name) => panel.querySelector(`[name="${name}"]`)?.checked === true;
+  const enable4KRequests = checked("serrEnable4KRequests");
   return {
     enabled: checked("serrEnabled"),
     baseUrl: text(value("serrBaseUrl")),
     apiKey: text(value("serrApiKey")),
     defaultLanguage: text(value("serrDefaultLanguage"), "tr"),
     requestAsJellyfinUser: checked("serrRequestAsJellyfinUser"),
-    confirmRequests: checked("serrConfirmRequests"),
+    confirmRequests: enable4KRequests ? true : checked("serrConfirmRequests"),
     showMissingSearchButton: checked("serrShowMissingSearchButton"),
-    enableNotifications: checked("serrEnableNotifications")
+    enableNotifications: checked("serrEnableNotifications"),
+    enable4KRequests
   };
 }
 
@@ -266,9 +318,11 @@ function readArrValues(panel) {
   };
   const radarrEnabled = checked("arrRadarrEnabled");
   const sonarrEnabled = checked("arrSonarrEnabled");
+  const radarr4KEnabled = checked("arrRadarr4KEnabled");
+  const sonarr4KEnabled = checked("arrSonarr4KEnabled");
   const arrEnabledControl = panel.querySelector('[name="arrEnabled"]');
   return {
-    enabled: arrEnabledControl ? checked("arrEnabled") : (radarrEnabled || sonarrEnabled),
+    enabled: arrEnabledControl ? checked("arrEnabled") : (radarrEnabled || sonarrEnabled || radarr4KEnabled || sonarr4KEnabled),
     sonarrEnabled,
     sonarrBaseUrl: text(value("arrSonarrBaseUrl")),
     sonarrApiKey: text(value("arrSonarrApiKey")),
@@ -277,19 +331,55 @@ function readArrValues(panel) {
     sonarrLanguageProfileId: number("arrSonarrLanguageProfileId"),
     sonarrSeasonFolder: checked("arrSonarrSeasonFolder"),
     sonarrSearchOnRequest: checked("arrSonarrSearchOnRequest"),
+    sonarr4KEnabled,
+    sonarr4KBaseUrl: text(value("arrSonarr4KBaseUrl")),
+    sonarr4KApiKey: text(value("arrSonarr4KApiKey")),
+    sonarr4KRootFolderPath: text(value("arrSonarr4KRootFolderPath")),
+    sonarr4KQualityProfileId: number("arrSonarr4KQualityProfileId"),
+    sonarr4KLanguageProfileId: number("arrSonarr4KLanguageProfileId"),
+    sonarr4KSeasonFolder: checked("arrSonarr4KSeasonFolder"),
+    sonarr4KSearchOnRequest: checked("arrSonarr4KSearchOnRequest"),
     radarrEnabled,
     radarrBaseUrl: text(value("arrRadarrBaseUrl")),
     radarrApiKey: text(value("arrRadarrApiKey")),
     radarrRootFolderPath: text(value("arrRadarrRootFolderPath")),
     radarrQualityProfileId: number("arrRadarrQualityProfileId"),
-    radarrSearchOnRequest: checked("arrRadarrSearchOnRequest")
+    radarrSearchOnRequest: checked("arrRadarrSearchOnRequest"),
+    radarr4KEnabled,
+    radarr4KBaseUrl: text(value("arrRadarr4KBaseUrl")),
+    radarr4KApiKey: text(value("arrRadarr4KApiKey")),
+    radarr4KRootFolderPath: text(value("arrRadarr4KRootFolderPath")),
+    radarr4KQualityProfileId: number("arrRadarr4KQualityProfileId"),
+    radarr4KSearchOnRequest: checked("arrRadarr4KSearchOnRequest")
   };
+}
+
+function sync4KControls(panel) {
+  if (!panel) return;
+  const enable4K = panel.querySelector('[name="serrEnable4KRequests"]')?.checked === true;
+  const confirm = panel.querySelector('[name="serrConfirmRequests"]');
+  if (confirm) {
+    if (enable4K) confirm.checked = true;
+    confirm.disabled = enable4K;
+    confirm.closest?.(".setting-item")?.classList?.toggle?.("disabled", enable4K);
+  }
+
+  panel.querySelectorAll("[data-arr-4k-field]").forEach((wrap) => {
+    wrap.style.opacity = enable4K ? "1" : "0.55";
+    wrap.querySelectorAll("input,select,button").forEach((el) => {
+      el.disabled = !enable4K;
+    });
+  });
+  panel.querySelectorAll("[data-arr-4k-action]").forEach((el) => {
+    el.disabled = !enable4K;
+  });
 }
 
 function setBusy(panel, isBusy) {
   panel.querySelectorAll("input,button,select").forEach((el) => {
     el.disabled = isBusy;
   });
+  if (!isBusy) sync4KControls(panel);
 }
 
 export function createSerrPanel(config, labels) {
@@ -312,6 +402,11 @@ export function createSerrPanel(config, labels) {
   section.appendChild(createCheckbox(
     "arrSonarrEnabled",
     L(labels, "arrSonarrEnabled", "Sonarr'ı etkinleştir"),
+    false
+  ));
+  section.appendChild(createCheckbox(
+    "serrEnable4KRequests",
+    L(labels, "serrEnable4KRequests", "4K istekleri etkinleştir"),
     false
   ));
   section.appendChild(createCheckbox(
@@ -539,6 +634,165 @@ export function createSerrPanel(config, labels) {
   radarrActions.appendChild(radarrTestBtn);
   arrSection.appendChild(radarrActions);
 
+  const arr4KHeading = document.createElement("div");
+  arr4KHeading.className = "description-text";
+  arr4KHeading.textContent = L(labels, "arr4KSettingsSection", "4K Arr Fallback");
+  arrSection.appendChild(mark4KField(arr4KHeading));
+
+  const sonarr4KHeading = document.createElement("div");
+  sonarr4KHeading.className = "description-text";
+  sonarr4KHeading.textContent = L(labels, "arrSonarr4KSection", "4K Sonarr");
+  arrSection.appendChild(mark4KField(sonarr4KHeading));
+  arrSection.appendChild(mark4KField(createCheckbox(
+    "arrSonarr4KEnabled",
+    L(labels, "arrSonarr4KEnabled", "4K Sonarr'ı etkinleştir"),
+    false
+  )));
+  arrSection.appendChild(mark4KField(createInput(
+    "arrSonarr4KBaseUrl",
+    L(labels, "arrSonarr4KBaseUrl", "4K Sonarr URL"),
+    "",
+    { placeholder: "http://localhost:8990" }
+  )));
+  arrSection.appendChild(mark4KField(createInput(
+    "arrSonarr4KApiKey",
+    L(labels, "arrSonarr4KApiKey", "4K Sonarr API anahtarı"),
+    "",
+    { type: "password", placeholder: L(labels, "arrApiKeyPlaceholder", "Sonarr ayarlarındaki API anahtarı") }
+  )));
+  arrSection.appendChild(mark4KField(createSelect(
+    "arrSonarr4KRootFolderPath",
+    L(labels, "arrSonarr4KRootFolderPath", "4K Sonarr root folder path"),
+    [{ value: "", label: L(labels, "arrSelectRootFolder", "Dizin seçmek için bağlantıyı test et") }]
+  )));
+  arrSection.appendChild(mark4KField(createSelect(
+    "arrSonarr4KQualityProfileId",
+    L(labels, "arrSonarr4KQualityProfileId", "4K Sonarr quality profile ID"),
+    [{ value: "", label: L(labels, "arrSelectQualityProfile", "Kalite seçmek için bağlantıyı test et") }]
+  )));
+  arrSection.appendChild(mark4KField(createSelect(
+    "arrSonarr4KLanguageProfileId",
+    L(labels, "arrSonarr4KLanguageProfileId", "4K Sonarr language profile ID"),
+    [{ value: "", label: L(labels, "arrLanguageProfileNone", "Yok / Sonarr v4") }]
+  )));
+  arrSection.appendChild(mark4KField(createCheckbox(
+    "arrSonarr4KSeasonFolder",
+    L(labels, "arrSonarr4KSeasonFolder", "4K Sonarr'da season folder kullan"),
+    true
+  )));
+  arrSection.appendChild(mark4KField(createCheckbox(
+    "arrSonarr4KSearchOnRequest",
+    L(labels, "arrSonarr4KSearchOnRequest", "4K fallback isteğinde bölümü hemen ara"),
+    true
+  )));
+
+  const sonarr4KActions = document.createElement("div");
+  sonarr4KActions.className = "setting-item";
+  sonarr4KActions.setAttribute("data-arr-4k-field", "1");
+  const sonarr4KTestBtn = document.createElement("button");
+  sonarr4KTestBtn.type = "button";
+  sonarr4KTestBtn.className = "monwui-arr-4k-test-btn";
+  sonarr4KTestBtn.setAttribute("data-arr-4k-action", "1");
+  sonarr4KTestBtn.textContent = L(labels, "arrSonarr4KTestConnection", "4K Sonarr Bağlantısını Test Et");
+  sonarr4KTestBtn.addEventListener("click", async () => {
+    const old = sonarr4KTestBtn.textContent;
+    try {
+      setBusy(panel, true);
+      await saveArrSettings(readArrValues(panel));
+      sonarr4KTestBtn.textContent = L(labels, "serrTesting", "Test ediliyor...");
+      const data = await testSonarr4KConnection();
+      applySonarrOptions(panel, data?.options || {}, labels, SONARR_4K_FIELDS);
+      showNotification(
+        `<i class="fas fa-check" style="margin-right:8px;"></i>${L(labels, "arrSonarr4KConnectionOk", "4K Sonarr bağlantısı başarılı.")}`,
+        2800,
+        "success"
+      );
+    } catch (error) {
+      showNotification(
+        `<i class="fas fa-triangle-exclamation" style="margin-right:8px;"></i>${error?.message || L(labels, "arrSonarr4KConnectionFailed", "4K Sonarr bağlantısı başarısız.")}`,
+        4200,
+        "error"
+      );
+    } finally {
+      sonarr4KTestBtn.textContent = old;
+      setBusy(panel, false);
+    }
+  });
+  sonarr4KActions.appendChild(sonarr4KTestBtn);
+  arrSection.appendChild(sonarr4KActions);
+
+  const radarr4KHeading = document.createElement("div");
+  radarr4KHeading.className = "description-text";
+  radarr4KHeading.textContent = L(labels, "arrRadarr4KSection", "4K Radarr");
+  arrSection.appendChild(mark4KField(radarr4KHeading));
+  arrSection.appendChild(mark4KField(createCheckbox(
+    "arrRadarr4KEnabled",
+    L(labels, "arrRadarr4KEnabled", "4K Radarr'ı etkinleştir"),
+    false
+  )));
+  arrSection.appendChild(mark4KField(createInput(
+    "arrRadarr4KBaseUrl",
+    L(labels, "arrRadarr4KBaseUrl", "4K Radarr URL"),
+    "",
+    { placeholder: "http://localhost:7879" }
+  )));
+  arrSection.appendChild(mark4KField(createInput(
+    "arrRadarr4KApiKey",
+    L(labels, "arrRadarr4KApiKey", "4K Radarr API anahtarı"),
+    "",
+    { type: "password", placeholder: L(labels, "arrRadarrApiKeyPlaceholder", "Radarr ayarlarındaki API anahtarı") }
+  )));
+  arrSection.appendChild(mark4KField(createSelect(
+    "arrRadarr4KRootFolderPath",
+    L(labels, "arrRadarr4KRootFolderPath", "4K Radarr root folder path"),
+    [{ value: "", label: L(labels, "arrSelectRootFolder", "Dizin seçmek için bağlantıyı test et") }]
+  )));
+  arrSection.appendChild(mark4KField(createSelect(
+    "arrRadarr4KQualityProfileId",
+    L(labels, "arrRadarr4KQualityProfileId", "4K Radarr quality profile ID"),
+    [{ value: "", label: L(labels, "arrSelectQualityProfile", "Kalite seçmek için bağlantıyı test et") }]
+  )));
+  arrSection.appendChild(mark4KField(createCheckbox(
+    "arrRadarr4KSearchOnRequest",
+    L(labels, "arrRadarr4KSearchOnRequest", "4K fallback isteğinde filmi hemen ara"),
+    true
+  )));
+
+  const radarr4KActions = document.createElement("div");
+  radarr4KActions.className = "setting-item";
+  radarr4KActions.setAttribute("data-arr-4k-field", "1");
+  const radarr4KTestBtn = document.createElement("button");
+  radarr4KTestBtn.type = "button";
+  radarr4KTestBtn.className = "monwui-arr-radarr-4k-test-btn";
+  radarr4KTestBtn.setAttribute("data-arr-4k-action", "1");
+  radarr4KTestBtn.textContent = L(labels, "arrRadarr4KTestConnection", "4K Radarr Bağlantısını Test Et");
+  radarr4KTestBtn.addEventListener("click", async () => {
+    const old = radarr4KTestBtn.textContent;
+    try {
+      setBusy(panel, true);
+      await saveArrSettings(readArrValues(panel));
+      radarr4KTestBtn.textContent = L(labels, "serrTesting", "Test ediliyor...");
+      const data = await testRadarr4KConnection();
+      applyRadarrOptions(panel, data?.options || {}, labels, RADARR_4K_FIELDS);
+      showNotification(
+        `<i class="fas fa-check" style="margin-right:8px;"></i>${L(labels, "arrRadarr4KConnectionOk", "4K Radarr bağlantısı başarılı.")}`,
+        2800,
+        "success"
+      );
+    } catch (error) {
+      showNotification(
+        `<i class="fas fa-triangle-exclamation" style="margin-right:8px;"></i>${error?.message || L(labels, "arrRadarr4KConnectionFailed", "4K Radarr bağlantısı başarısız.")}`,
+        4200,
+        "error"
+      );
+    } finally {
+      radarr4KTestBtn.textContent = old;
+      setBusy(panel, false);
+    }
+  });
+  radarr4KActions.appendChild(radarr4KTestBtn);
+  arrSection.appendChild(radarr4KActions);
+
   const arrHint = document.createElement("div");
   arrHint.className = "description-text";
   arrHint.textContent = L(
@@ -549,11 +803,13 @@ export function createSerrPanel(config, labels) {
   arrSection.appendChild(arrHint);
   panel.appendChild(arrSection);
 
+  panel.querySelector('[name="serrEnable4KRequests"]')?.addEventListener("change", () => sync4KControls(panel));
+  panel.querySelector('[name="serrConfirmRequests"]')?.addEventListener("change", () => sync4KControls(panel));
+  sync4KControls(panel);
+
   panel.__monwuiSave = async () => {
-    await Promise.all([
-      saveSerrSettings(readValues(panel)),
-      saveArrSettings(readArrValues(panel))
-    ]);
+    await saveSerrSettings(readValues(panel));
+    await saveArrSettings(readArrValues(panel));
   };
 
   panel.__monwuiLoad = async () => {
@@ -561,17 +817,25 @@ export function createSerrPanel(config, labels) {
       getSerrSettings().catch(() => null),
       getArrSettings().catch(() => null)
     ]);
-    setValues(panel, serrData?.settings || {});
-    setArrValues(panel, arrData?.settings || {});
+    if (serrData?.settings) setValues(panel, serrData.settings);
+    if (arrData?.settings) setArrValues(panel, arrData.settings);
+    const arrSettings = arrData?.settings || {};
     await Promise.all([
-      text(arrData?.settings?.sonarrBaseUrl) && text(arrData?.settings?.sonarrApiKey)
+      text(arrSettings?.sonarrBaseUrl) && text(arrSettings?.sonarrApiKey)
         ? refreshSonarrOptions(panel, labels).catch(() => {})
         : Promise.resolve(),
-      text(arrData?.settings?.radarrBaseUrl) && text(arrData?.settings?.radarrApiKey)
+      text(arrSettings?.radarrBaseUrl) && text(arrSettings?.radarrApiKey)
         ? refreshRadarrOptions(panel, labels).catch(() => {})
+        : Promise.resolve(),
+      text(arrSettings?.sonarr4KBaseUrl) && text(arrSettings?.sonarr4KApiKey)
+        ? refreshSonarrOptions(panel, labels, { is4K: true }).catch(() => {})
+        : Promise.resolve(),
+      text(arrSettings?.radarr4KBaseUrl) && text(arrSettings?.radarr4KApiKey)
+        ? refreshRadarrOptions(panel, labels, { is4K: true }).catch(() => {})
         : Promise.resolve()
     ]);
-    setArrValues(panel, arrData?.settings || {});
+    if (arrData?.settings) setArrValues(panel, arrData.settings);
+    sync4KControls(panel);
   };
 
   setTimeout(() => {

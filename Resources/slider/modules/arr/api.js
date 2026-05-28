@@ -79,8 +79,22 @@ export async function testSonarrConnection() {
   });
 }
 
+export async function testSonarr4KConnection() {
+  return request("/sonarr4k/test", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export async function testRadarrConnection() {
   return request("/radarr/test", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function testRadarr4KConnection() {
+  return request("/radarr4k/test", {
     method: "POST",
     body: JSON.stringify({})
   });
@@ -90,8 +104,16 @@ export async function getSonarrOptions() {
   return request("/sonarr/options");
 }
 
+export async function getSonarr4KOptions() {
+  return request("/sonarr4k/options");
+}
+
 export async function getRadarrOptions() {
   return request("/radarr/options");
+}
+
+export async function getRadarr4KOptions() {
+  return request("/radarr4k/options");
 }
 
 export async function getArrCalendar({ start = "", end = "" } = {}) {

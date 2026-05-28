@@ -51,13 +51,37 @@ const MODAL_ANIM = {
   translateToY: 0
 };
 
-function canUseYTOriginAndJSAPI() {
+function getYTParentOrigin({ forParam = false } = {}) {
   try {
-    const origin = window.location?.origin || '';
-    return /^https?:\/\//i.test(origin);
+    const protocol = window.location?.protocol || '';
+    const host = window.location?.host || '';
+    if (!host || (protocol !== 'http:' && protocol !== 'https:')) return '';
+    if (forParam && protocol !== 'https:') return '';
+    return `${protocol}//${host}`;
   } catch {
-    return false;
+    return '';
   }
+}
+
+function canUseYTOriginAndJSAPI() {
+  return !!getYTParentOrigin();
+}
+
+function applyYTOriginParams(params, enableJsApi) {
+  params.set('enablejsapi', enableJsApi ? '1' : '0');
+  params.delete('origin');
+  params.delete('widget_referrer');
+  if (!enableJsApi) return;
+
+  const origin = getYTParentOrigin({ forParam: true });
+  if (!origin) return;
+  params.set('origin', origin);
+  params.set('widget_referrer', origin);
+}
+
+function getYTPlayerVars() {
+  const origin = getYTParentOrigin({ forParam: true });
+  return origin ? { origin } : {};
 }
 
 const CAN_USE_YT_API = canUseYTOriginAndJSAPI();
@@ -227,7 +251,15 @@ function hardWipeModalDom(modal = modalState.videoModal) {
   const backdrop = modal.querySelector?.('.preview-backdrop');
   if (backdrop) { try { backdrop.style.opacity = '0'; backdrop.removeAttribute('src'); backdrop.removeAttribute('srcset'); } catch {} }
   const iframe = modal.querySelector?.('.preview-trailer-iframe');
-  if (iframe) { try { iframe.src = ''; iframe.style.display = 'none'; iframe.__wrapper && (iframe.__wrapper.style.display = 'none'); } catch {} }
+  if (iframe) {
+    try { destroyYTPlayerForIframe(iframe); } catch {}
+    try {
+      iframe.src = 'about:blank';
+      iframe.removeAttribute('src');
+      iframe.style.display = 'none';
+      iframe.__wrapper && (iframe.__wrapper.style.display = 'none');
+    } catch {}
+  }
   const v = modalState.modalVideo;
   if (v) {
     try {
@@ -278,7 +310,10 @@ export async function updateModalContent(item, videoUrl) {
   const isYTValid = !!trailerUrl && (trailerInfo.level === 'item' || trailerInfo.level === 'series');
 
   const showYT = (labelText) => {
-    const iframe = getOrCreateTrailerIframe(modal);
+    let iframe = getOrCreateTrailerIframe(modal);
+    destroyYTPlayerForIframe(iframe);
+    iframe = getOrCreateTrailerIframe(modal);
+    if (!iframe) return;
     const audioState = getPreviewTrailerAudioState({
       config: cfg,
       soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
@@ -291,7 +326,7 @@ export async function updateModalContent(item, videoUrl) {
     iframe.__wrapper && (iframe.__wrapper.style.display = 'block');
     iframe.style.display = 'block';
     showYTFirstTouchShield(iframe, 380);
-    sizeYTToCover(iframe);
+    sizeYTToFrame(iframe);
     setTimeout(() => postPreviewTrailerAudioToYouTubeIframe(iframe, {
       config: cfg,
       soundOn: (isMobileAppEnv() || !isTouchRuntime()) && !!modalState._soundOn
@@ -632,9 +667,25 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
   infoButton.innerHTML = '<i class="fa-solid fa-chevron-down"></i>';
 
   const volumeButton = document.createElement('button');
+  const volumeWrap = document.createElement('div');
+  volumeWrap.className = 'preview-volume-wrap';
+
+  const volumeSlider = document.createElement('input');
+  volumeSlider.type = 'range';
+  volumeSlider.className = 'preview-volume-slider';
+  volumeSlider.min = '0';
+  volumeSlider.max = '100';
+  volumeSlider.step = '1';
+  volumeSlider.value = Math.round(getPreviewTrailerAudioState({
+    config: getConfig(),
+    soundOn: true,
+    ignoreStartMuted: true
+  }).effectivePercent || 50);
+
+  volumeWrap.append(volumeSlider, volumeButton);
   volumeButton.className = 'preview-volume-button';
 
-  buttonsContainer.append(matchButton, playButton, favoriteButton, infoButton, volumeButton);
+  buttonsContainer.append(matchButton, playButton, favoriteButton, infoButton, volumeWrap);
 
   const closeMobileBtn = document.createElement('button');
   closeMobileBtn.className = 'preview-close-mobile';
@@ -758,11 +809,77 @@ export function createVideoModal({ showButtons = true, context = 'monwui-dot' } 
     }
   };
 
+  volumeSlider.addEventListener('input', (e) => {
+  e.stopPropagation();
+
+  const percent = Math.max(0, Math.min(100, Number(volumeSlider.value) || 0));
+  modalState._soundOn = percent > 0;
+
+  const trailerIframe = modalState.videoModal?.querySelector?.('.preview-trailer-iframe');
+  const trailerVisible = trailerIframe && trailerIframe.style.display !== 'none';
+
+  if (trailerVisible) {
+    const player = _ytPlayers.get(trailerIframe);
+    if (player && typeof player.setVolume === 'function') {
+      if (percent <= 0) player.mute?.();
+      else {
+        player.unMute?.();
+        player.setVolume?.(percent);
+        player.playVideo?.();
+      }
+    }
+  } else if (modalState.modalVideo) {
+    modalState.modalVideo.muted = percent <= 0;
+    modalState.modalVideo.volume = percent / 100;
+  }
+
+  volumeButton.innerHTML = percent <= 0
+    ? '<i class="fa-solid fa-volume-xmark"></i>'
+    : '<i class="fa-solid fa-volume-high"></i>';
+});
+
   volumeButton.addEventListener('touchstart', onVolumeTap, { passive: false });
   volumeButton.addEventListener('click', onVolumeTap, { passive: false });
-  [playButton, favoriteButton, infoButton, volumeButton, matchButton].forEach(button => {
+  [playButton, favoriteButton, infoButton, matchButton].forEach(button => {
     button.addEventListener('mouseenter', () => button.style.transform = 'scale(1.11)');
     button.addEventListener('mouseleave', () => button.style.transform = '');
+});
+
+  let _volHideTimer = null;
+  let _volSliderActive = false;
+
+  const showSlider = () => {
+      clearTimeout(_volHideTimer);
+      volumeWrap.classList.add('vol-open');
+      volumeButton.style.transform = 'scale(1.11)';
+  };
+
+  const scheduleHideSlider = () => {
+      clearTimeout(_volHideTimer);
+      if (_volSliderActive) return;
+      _volHideTimer = setTimeout(() => {
+          volumeWrap.classList.remove('vol-open');
+          volumeButton.style.transform = '';
+      }, 200);
+  };
+
+  volumeWrap.addEventListener('mouseenter', showSlider);
+  volumeWrap.addEventListener('mouseleave', scheduleHideSlider);
+
+  volumeSlider.addEventListener('mousedown', () => { _volSliderActive = true; });
+  volumeSlider.addEventListener('touchstart', () => { _volSliderActive = true; }, { passive: true });
+
+  const onSliderRelease = () => {
+      _volSliderActive = false;
+      scheduleHideSlider();
+  };
+  volumeSlider.addEventListener('mouseup', onSliderRelease);
+  volumeSlider.addEventListener('touchend', onSliderRelease, { passive: true });
+  document.addEventListener('mouseup', () => {
+      if (_volSliderActive) {
+          _volSliderActive = false;
+          scheduleHideSlider();
+      }
   });
 
   modal.addEventListener('mouseenter', () => {
@@ -1487,11 +1604,9 @@ function getYTPlayerForIframe(iframe) {
      return null;
    }
    try {
-    p = new YT.Player(iframe, {
-      host: 'https://www.youtube-nocookie.com',
-      playerVars: {
-        origin: window.location.origin
-      },
+     p = new YT.Player(iframe, {
+       host: 'https://www.youtube-nocookie.com',
+       playerVars: getYTPlayerVars(),
       events: {
          onReady: (ev) => {
   try {
@@ -1686,21 +1801,7 @@ function ensureYTParams(url, { autoplay = true, muteInitial = true, enableJsApi 
     u.searchParams.set('modestbranding', '1');
     u.searchParams.set('mute', muteInitial ? '1' : '0');
 
-    if (enableJsApi) {
-      u.searchParams.set('enablejsapi', '1');
-      const origin = window.location.origin;
-      if (origin && origin !== 'null' && /^https?:\/\//i.test(origin)) {
-        u.searchParams.set('origin', origin);
-        u.searchParams.set('widget_referrer', origin);
-      } else {
-        u.searchParams.delete('origin');
-        u.searchParams.delete('widget_referrer');
-      }
-    } else {
-      u.searchParams.set('enablejsapi', '0');
-      u.searchParams.delete('origin');
-      u.searchParams.delete('widget_referrer');
-    }
+    applyYTOriginParams(u.searchParams, enableJsApi);
 
     return u.toString();
   } catch {
@@ -1813,33 +1914,20 @@ export function destroyVideoModal() {
   } catch {}
 }
 
-function sizeYTToCover(iframe) {
+function sizeYTToFrame(iframe) {
   try {
-    const wrap = iframe?.__wrapper;
-    if (!wrap) return;
-    const W = wrap.clientWidth || 0;
-    const H = wrap.clientHeight || 0;
-    if (!W || !H) return;
-
-    const TARGET = 16 / 9;
-    const r = W / H;
-
-    if (r >= TARGET) {
-      iframe.style.width = '100%';
-      iframe.style.height = Math.ceil(W * 9 / 16) + 'px';
-    } else {
-      iframe.style.height = '100%';
-      iframe.style.width = Math.ceil(H * 16 / 9) + 'px';
-    }
-    iframe.style.left = '50%';
-    iframe.style.top  = '50%';
-    iframe.style.transform = 'translate(-50%, -50%)';
+    if (!iframe) return;
+    iframe.style.width = '100%';
+    iframe.style.height = '100%';
+    iframe.style.left = '0';
+    iframe.style.top  = '0';
+    iframe.style.transform = 'none';
   } catch {}
 }
 
 window.addEventListener('resize', () => {
   try {
-    for (const [iframe] of _ytPlayers) sizeYTToCover(iframe);
+    for (const [iframe] of _ytPlayers) sizeYTToFrame(iframe);
   } catch {}
 });
 
@@ -1872,9 +1960,11 @@ function getOrCreateTrailerIframe(modal = modalState.videoModal) {
       position: 'absolute',
       border: 'none',
       display: 'none',
-      left: '50%',
-      top: '50%',
-      transform: 'translate(-50%, -50%)',
+      left: '0',
+      top: '0',
+      width: '100%',
+      height: '100%',
+      transform: 'none',
       pointerEvents: 'auto'
     });
     wrap.appendChild(iframe);
@@ -1884,17 +1974,25 @@ function getOrCreateTrailerIframe(modal = modalState.videoModal) {
   return iframe;
 }
 
+function destroyYTPlayerForIframe(iframe) {
+  if (!iframe) return;
+  const p = _ytPlayers.get(iframe);
+  if (p) {
+    try { p.pauseVideo?.(); } catch {}
+    try { p.stopVideo?.(); } catch {}
+    try { p.mute?.(); } catch {}
+    try { p.destroy?.(); } catch {}
+  }
+  _ytPlayers.delete(iframe);
+  _ytReadyMap.delete(iframe);
+}
+
 function hideTrailerIframe(modal = modalState.videoModal) {
   if (!modal) return;
   const iframe = modal.querySelector?.('.preview-trailer-iframe');
   if (!iframe) return;
 
-  const p = _ytPlayers.get(iframe);
-  if (p) {
-    try { if (p.stopVideo) p.stopVideo(); if (p.mute) p.mute(); if (p.destroy) p.destroy(); } catch {}
-    _ytPlayers.delete(iframe);
-    _ytReadyMap.delete(iframe);
-  }
+  destroyYTPlayerForIframe(iframe);
 
   try {
     iframe.src = 'about:blank';
@@ -1948,9 +2046,7 @@ function installYTPlayer(iframe) {
   try {
     p = new YT.Player(iframe, {
       host: 'https://www.youtube-nocookie.com',
-      playerVars: {
-        origin: window.location.origin
-      },
+      playerVars: getYTPlayerVars(),
       events: {
         onReady: (ev) => {
           try {
@@ -2108,7 +2204,7 @@ function injectOrUpdateModalStyle() {
     .video-preview-modal {
       position: absolute;
       width: 400px;
-      height: 330px;
+      height: 350px;
       background: rgba(28, 28, 46, 0.97);
       border-radius: 20px;
       box-shadow:
@@ -2143,15 +2239,15 @@ function injectOrUpdateModalStyle() {
     }
 
     .video-preview-modal .preview-iframe-wrapper {
-      position: absolute;
-      inset: 10px;
-      border-radius: 12px;
-      overflow: hidden;
-      z-index: 2;
+      position: absolute !important;
+      inset: 0 !important;
+      border-radius: 12px 12px 0 0 !important;
+      overflow: hidden !important;
+      z-index: 2 !important;
       box-shadow: 0 2px 12px rgba(0, 0, 0, 0.21);
       opacity: 1;
       transition: opacity 0.3s ease;
-    }
+  }
 
     .video-preview-modal .preview-iframe-wrapper--hidden {
       opacity: 0;
@@ -2161,9 +2257,11 @@ function injectOrUpdateModalStyle() {
       position: absolute;
       border: none;
       display: none;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      transform: none;
       pointer-events: auto;
     }
 
@@ -2263,6 +2361,7 @@ function injectOrUpdateModalStyle() {
       gap: 6px 16px;
       align-items: end;
       opacity: 1;
+      font-family: "Roboto Condensed",sans-serif;
     }
 
     .video-preview-modal .preview-title {
@@ -2301,6 +2400,7 @@ function injectOrUpdateModalStyle() {
       opacity: 0.95;
       align-items: center;
       margin: 0 0 -6px 0;
+      padding: 4px 0;
     }
 
     .video-preview-modal .preview-meta .monwui-quality-group {
@@ -2328,7 +2428,6 @@ function injectOrUpdateModalStyle() {
     .video-preview-modal .preview-genres {
       grid-column: 1 / 3;
       display: flex;
-      gap: 8px;
       margin-top: 2px;
       font-size: 12.7px;
       color: #a8aac7;
@@ -2513,6 +2612,43 @@ function injectOrUpdateModalStyle() {
       background: transparent;
       pointer-events: auto;
       touch-action: manipulation;
+    }
+
+    .preview-volume-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+    }
+
+    .preview-volume-slider {
+      position: absolute;
+      top: 100%;
+      left: 140%;
+      transform: translateX(-50%) rotate(-90deg);
+      width: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: width .18s ease, opacity .18s ease;
+      accent-color: #fff;
+    }
+
+    .preview-volume-wrap::after {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 48px;
+      height: 20px;
+    }
+
+    .preview-volume-wrap.vol-open .preview-volume-slider,
+    .preview-volume-wrap:focus-within .preview-volume-slider {
+      width: 80px;
+      opacity: 1;
+      pointer-events: auto;
     }
 
     @media (max-width: 750px) {
@@ -2880,8 +3016,13 @@ function softStopPlayback() {
   try {
     const iframe = modalState.videoModal?.querySelector?.('.preview-trailer-iframe');
     if (iframe) {
-      const p = _ytPlayers.get(iframe);
-      try { if (p?.pauseVideo) p.pauseVideo(); if (p?.mute) p.mute(); } catch {}
+      destroyYTPlayerForIframe(iframe);
+      try {
+        iframe.src = 'about:blank';
+        iframe.removeAttribute('src');
+        iframe.style.display = 'none';
+        iframe.__wrapper && (iframe.__wrapper.style.display = 'none');
+      } catch {}
     }
     if (modalState.modalVideo) {
       try { modalState.modalVideo.pause(); } catch {}
@@ -2891,13 +3032,10 @@ function softStopPlayback() {
   } catch {}
 }
 
-
-
-
 export function positionModalRelativeToItem(modal, item, options = {}) {
   const defaults = {
     modalWidth: 400,
-    modalHeight: 330,
+    modalHeight: 350,
     windowPadding: 16,
     preferredPosition: 'center',
     autoReposition: true

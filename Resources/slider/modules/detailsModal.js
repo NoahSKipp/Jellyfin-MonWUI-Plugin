@@ -3,7 +3,7 @@ import { withServer } from "./jfUrl.js";
 import { getConfig, getDetailsModalRuntimeConfig } from "./config.js";
 import { getLanguageLabels } from "../language/index.js";
 import { CollectionCacheDB } from "./collectionCacheDb.js";
-import { formatOfficialRatingLabel, getYoutubeEmbedUrl } from "./utils.js";
+import { formatOfficialRatingLabel, getYoutubeEmbedUrl, applyPreviewTrailerAudioToVideo, applyPreviewTrailerAudioToYouTubePlayer, getPreviewTrailerAudioState } from "./utils.js";
 import { getGlobalTmdbApiKey, sanitizeTmdbApiKey } from "./jmsPluginConfig.js";
 import { ensureStudioHubLogoFromTmdb, ensureStudioHubManualEntry, JMS_STUDIO_HUB_MANUAL_ENTRY_ADDED_EVENT } from "./studioHubsShared.js";
 import { showNotification } from "./player/ui/notification.js";
@@ -306,6 +306,15 @@ async function wireYoutubeEndedToBackdrop(iframeEl, onEnd, { signal } = {}) {
 
     const player = new window.YT.Player(iframeEl.id, {
       events: {
+        onReady: (ev) => {
+          try {
+            applyPreviewTrailerAudioToYouTubePlayer(ev.target, {
+              config: getConfig(),
+              soundOn: true
+            });
+          } catch {}
+        },
+
         onStateChange: (ev) => {
           if (signal?.aborted) return;
           if (ev?.data === window.YT.PlayerState.ENDED) onEnd?.();
@@ -1663,9 +1672,13 @@ async function startHeroTrailer(root, item, { signal } = {}) {
           const v = document.createElement("video");
           v.dataset.jmsHeroPreview = "1";
           v.autoplay = true;
-          v.muted = false;
           v.playsInline = true;
           v.loop = false;
+
+          applyPreviewTrailerAudioToVideo(v, {
+            config: getConfig(),
+            soundOn: true
+          });
 
           v.controls = true;
           v.preload = "metadata";
@@ -1721,7 +1734,18 @@ async function startHeroTrailer(root, item, { signal } = {}) {
     f.allow = "autoplay; encrypted-media; clipboard-write; accelerometer; gyroscope; picture-in-picture";
     f.referrerPolicy = "origin-when-cross-origin";
     f.allowFullscreen = true;
-    f.src = embed;
+    const audioState = getPreviewTrailerAudioState({
+      config: getConfig(),
+      soundOn: true
+    });
+
+    const u = new URL(embed, window.location.href);
+    u.searchParams.set("autoplay", "1");
+    u.searchParams.set("mute", audioState.muted ? "1" : "0");
+    u.searchParams.set("enablejsapi", "1");
+    u.searchParams.set("playsinline", "1");
+
+    f.src = u.toString();
     Object.assign(f.style, {
       width: "100%",
       height: "100%",

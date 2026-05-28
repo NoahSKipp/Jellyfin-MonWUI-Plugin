@@ -124,6 +124,18 @@ function requestMediaId(req) {
   return Number.isFinite(id) && id > 0 ? Math.floor(id) : 0;
 }
 
+function requestIs4K(req) {
+  const value = req?.Is4K ?? req?.is4K ?? req?.is4k;
+  if (value === true || value === 1) return true;
+  return text(value).toLowerCase() === "true";
+}
+
+function renderRequest4KBadge(req) {
+  if (!requestIs4K(req)) return "";
+  const label = L("serrRequest4KBadge", "4K");
+  return `<span class="monwui-serr-4k-badge" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`;
+}
+
 function requestNotificationKey(req) {
   const id = text(req?.Id || req?.id);
   if (id) return id;
@@ -271,6 +283,22 @@ function ensureSerrProgressStyles() {
       height: 100%;
       min-width: 2px;
       transition: width .25s ease;
+    }
+    #jfNotifModal .monwui-serr-4k-badge,
+    .monwui-serr-requests-modal .monwui-serr-4k-badge {
+      align-items: center;
+      background: color-mix(in srgb, var(--jf-notif-warning, var(--ntf-warning, #ffbf5f)) 84%, #fff);
+      border: 1px solid color-mix(in srgb, var(--jf-notif-warning, var(--ntf-warning, #ffbf5f)) 72%, #111);
+      border-radius: 6px;
+      color: #111;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 900;
+      justify-content: center;
+      letter-spacing: 0;
+      line-height: 1;
+      padding: 3px 7px;
+      white-space: nowrap;
     }
   `;
   document.head.appendChild(style);
@@ -1391,6 +1419,8 @@ function serviceLabel(value) {
   const clean = text(value).toLowerCase();
   if (clean === "radarr") return L("serrCalendarRadarr", "Radarr");
   if (clean === "sonarr") return L("serrCalendarSonarr", "Sonarr");
+  if (clean === "radarr4k" || clean === "4k radarr") return L("arrRadarr4KSection", "4K Radarr");
+  if (clean === "sonarr4k" || clean === "4k sonarr") return L("arrSonarr4KSection", "4K Sonarr");
   return clean ? clean : "Arr";
 }
 
@@ -1462,7 +1492,7 @@ async function approveSerrRequestWithArrFallback(id) {
     const request = result?.request || result?.Request || {};
     const mediaId = requestMediaId(request);
     const title = text(request?.Title || request?.title, L("serrMovie", "Film"));
-    const arrResult = await requestMovieFromArr({ __tmdbId: mediaId, Name: title }, { tmdbId: mediaId, title });
+    const arrResult = await requestMovieFromArr({ __tmdbId: mediaId, Name: title }, { tmdbId: mediaId, title, is4K: requestIs4K(request) });
     notify(arrStatusMessage(arrResult), "success");
   }
   return result;
@@ -1812,6 +1842,7 @@ function renderRequest(req, isAdmin) {
         <div class="monwui-serr-notif-main">
           <div class="monwui-serr-title-row">
             <span class="monwui-serr-status ${escapeHtml(status || "pending")}">${escapeHtml(statusLabel(status))}</span>
+            ${renderRequest4KBadge(req)}
             ${time ? `<span class="monwui-serr-state">${escapeHtml(time)}</span>` : ""}
           </div>
           <div class="monwui-serr-name">${escapeHtml(title)}</div>
@@ -1970,6 +2001,7 @@ function renderManagerRequest(req, isAdmin) {
         <div class="monwui-serr-request-content">
           <div class="monwui-serr-title-row">
             <span class="monwui-serr-status ${escapeHtml(status)}" data-serr-status>${escapeHtml(statusLabel(status))}</span>
+            ${renderRequest4KBadge(req)}
             <span class="monwui-serr-state" data-serr-updated ${updated ? "" : "hidden"}>${escapeHtml(updated)}</span>
           </div>
           <div class="monwui-serr-request-name">${escapeHtml(title)}</div>

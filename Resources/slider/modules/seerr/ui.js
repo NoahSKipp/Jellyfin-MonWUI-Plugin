@@ -1,4 +1,5 @@
 import { getConfig } from "../config.js";
+import { withServer } from "../jfUrl.js";
 import { getEffectiveLanguage, getLanguageLabels } from "../../language/index.js";
 import { showNotification } from "../player/ui/notification.js";
 import { requestMovieFromArr } from "../arr/requestFallback.js";
@@ -6,6 +7,7 @@ import { createSerrRequest, getSerrAccess, getSerrCollectionDetails, getSerrMovi
 import { openSerrCollectionRequestModal } from "./itemPageBridge.js";
 import { ensureSerrStyles } from "./styles.js";
 
+const SERR_IMAGE_BASE = "https://image.tmdb.org/t/p";
 let modalSearchAbort = null;
 let searchTimer = 0;
 
@@ -70,11 +72,20 @@ function accessHasSerr(access) {
   return access?.serrEnabled !== false && access?.enabled === true;
 }
 
-function accessCanRequestMedia(access, mediaType) {
+function access4KEnabled(access) {
+  return access?.settings?.enable4KRequests === true;
+}
+
+function accessCanRequestMedia(access, mediaType, is4K = false) {
   const type = text(mediaType).toLowerCase();
+  if (is4K && !access4KEnabled(access)) return false;
   if (accessHasSerr(access)) return true;
-  if (type === "movie") return access?.arrRadarrEnabled === true;
-  if (type === "tv") return access?.arrSonarrEnabled === true;
+  if (type === "movie") return is4K
+    ? (access?.arrRadarr4KEnabled === true || access?.arrRadarrEnabled === true)
+    : access?.arrRadarrEnabled === true;
+  if (type === "tv") return is4K
+    ? (access?.arrSonarr4KEnabled === true || access?.arrSonarrEnabled === true)
+    : access?.arrSonarrEnabled === true;
   return false;
 }
 
@@ -88,6 +99,73 @@ function inferTmdbId(item) {
 function inferTvdbId(item) {
   const id = providerId(item, "Tvdb", "TVDB", "tvdb");
   return Number.isFinite(Number(id)) && Number(id) > 0 ? Number(id) : undefined;
+}
+
+function tmdbImageUrl(path, size = "w342") {
+  const clean = text(path);
+  if (!clean) return "";
+  if (/^https?:\/\//i.test(clean) || /^blob:/i.test(clean)) return clean;
+  if (/^\/(?:Items|Users|Videos|web|Plugins)\//i.test(clean)) return withServer(clean);
+  return `${SERR_IMAGE_BASE}/${size}${clean.startsWith("/") ? clean : `/${clean}`}`;
+}
+
+function jellyfinPrimaryImageUrl(item, maxHeight = 420) {
+  const tags = item?.ImageTags || item?.imageTags || {};
+  const primaryTag = text(item?.PrimaryImageTag || item?.primaryImageTag || tags?.Primary || tags?.primary);
+  const itemId = text(item?.Id || item?.id);
+  const hasPrimary = primaryTag || item?.HasPrimaryImage === true || item?.hasPrimaryImage === true;
+  if (itemId && hasPrimary) return buildJellyfinPrimaryImageUrl(itemId, primaryTag, maxHeight);
+
+  const series = item?.Series || item?.series || {};
+  const seriesTag = text(item?.SeriesPrimaryImageTag || item?.seriesPrimaryImageTag || series?.PrimaryImageTag || series?.ImageTags?.Primary);
+  const seriesId = text(item?.SeriesId || item?.seriesId || series?.Id || series?.id);
+  if (seriesId && seriesTag) return buildJellyfinPrimaryImageUrl(seriesId, seriesTag, maxHeight);
+
+  const parentTag = text(item?.ParentPrimaryImageTag || item?.parentPrimaryImageTag);
+  const parentId = text(item?.ParentPrimaryImageItemId || item?.parentPrimaryImageItemId || item?.ParentId || item?.parentId);
+  if (parentId && parentTag) return buildJellyfinPrimaryImageUrl(parentId, parentTag, maxHeight);
+
+  return "";
+}
+
+function buildJellyfinPrimaryImageUrl(itemId, tag = "", maxHeight = 420) {
+  const cleanId = text(itemId);
+  if (!cleanId) return "";
+  const qs = new URLSearchParams();
+  qs.set("quality", "88");
+  qs.set("maxHeight", String(maxHeight));
+  if (tag) qs.set("tag", tag);
+  return withServer(`/Items/${encodeURIComponent(cleanId)}/Images/Primary?${qs.toString()}`);
+}
+
+function requestPosterUrl(item, options = {}) {
+  return tmdbImageUrl(
+    options.posterUrl ||
+      options.imageUrl ||
+      item?.posterUrl ||
+      item?.PosterUrl ||
+      item?.imageUrl ||
+      item?.ImageUrl,
+    "w342"
+  ) || tmdbImageUrl(
+    item?.PosterPath ||
+      item?.posterPath ||
+      item?.poster_path ||
+      item?.__monwuiSerrPosterPath ||
+      item?.StillPath ||
+      item?.stillPath,
+    "w342"
+  ) || jellyfinPrimaryImageUrl(item);
+}
+
+function requestPosterUrlFromPayload(payload = {}) {
+  return tmdbImageUrl(
+    payload?.posterUrl ||
+      payload?.imageUrl ||
+      payload?.posterPath ||
+      payload?.poster_path,
+    "w342"
+  );
 }
 
 function inferSeasonNumbers(item, explicitSeasons = null) {
@@ -147,6 +225,7 @@ function buildPayloadFromItem(item, options = {}) {
     requestAllSeasons: mediaType === "tv" ? (options.requestAllSeasons === true || !seasons.length) : false,
     is4K: options.is4K === true,
     title,
+    posterUrl: requestPosterUrl(item, options),
     source: text(options.source, "jellyfin"),
     jellyfinItemId: text(options.jellyfinItemId || item?.Id || item?.id)
   };
@@ -262,8 +341,11 @@ function requestMatchesPayload(req, payload) {
   const payloadType = text(payload?.mediaType).toLowerCase();
   const reqId = Number(req?.MediaId || req?.mediaId || 0);
   const payloadId = Number(payload?.mediaId || 0);
+  const reqIs4K = req?.Is4K === true || req?.is4K === true;
+  const payloadIs4K = payload?.is4K === true;
   if (!reqType || !payloadType || reqType !== payloadType) return false;
   if (!Number.isFinite(reqId) || !Number.isFinite(payloadId) || reqId <= 0 || payloadId <= 0 || reqId !== payloadId) return false;
+  if (reqIs4K !== payloadIs4K) return false;
   if (payloadType !== "tv") return true;
   if (req?.RequestAllSeasons === true || req?.requestAllSeasons === true || payload?.requestAllSeasons === true) return true;
   const reqSeasons = Array.isArray(req?.seasons) ? req.seasons.map(Number).filter(Number.isFinite) : [];
@@ -283,6 +365,7 @@ async function markButtonIfAlreadyRequested(button, item, options = {}) {
 }
 
 function shouldConfirmRequests(access = null) {
+  if (access4KEnabled(access)) return true;
   return access?.settings?.confirmRequests !== false;
 }
 
@@ -305,6 +388,7 @@ function requestConfirmMeta(payload = {}) {
   const mediaType = text(payload?.mediaType).toLowerCase();
   const seasons = Array.isArray(payload?.seasons) ? payload.seasons : [];
   const parts = [
+    payload?.is4K === true ? L("serrRequest4KBadge", "4K") : "",
     mediaType === "tv" ? L("serrTv", "Dizi") : L("serrMovie", "Film"),
     payload?.requestAllSeasons === true
       ? L("serrAllSeasons", "Tüm sezonlar")
@@ -349,16 +433,27 @@ function ensureRequestConfirmModal() {
         </button>
       </div>
       <div class="monwui-serr-confirm-body">
-        <div class="monwui-serr-confirm-eyebrow">${escapeHtml(L("serrRequestConfirmHint", "İstek onayı"))}</div>
-        <div class="monwui-serr-confirm-name" data-serr-confirm-name></div>
-        <div class="monwui-serr-confirm-meta" data-serr-confirm-meta></div>
-        <div class="monwui-serr-confirm-hint" data-serr-confirm-hint></div>
-        <div class="monwui-serr-confirm-info" data-serr-confirm-info></div>
+        <div class="monwui-serr-confirm-layout">
+          <div class="monwui-serr-confirm-poster" data-serr-confirm-poster-wrap hidden>
+            <img data-serr-confirm-poster alt="">
+            <i class="fas fa-clapperboard" aria-hidden="true"></i>
+          </div>
+          <div class="monwui-serr-confirm-summary">
+            <div class="monwui-serr-confirm-eyebrow">${escapeHtml(L("serrRequestConfirmHint", "İstek onayı"))}</div>
+            <div class="monwui-serr-confirm-name" data-serr-confirm-name></div>
+            <div class="monwui-serr-confirm-meta" data-serr-confirm-meta></div>
+            <div class="monwui-serr-confirm-hint" data-serr-confirm-hint></div>
+            <div class="monwui-serr-confirm-info" data-serr-confirm-info></div>
+          </div>
+        </div>
       </div>
       <div class="monwui-serr-footer">
         <button type="button" class="monwui-serr-mini-btn" data-serr-confirm-cancel>${escapeHtml(L("cancel", "İptal"))}</button>
         <button type="button" class="monwui-serr-btn" data-serr-confirm-submit>
           <i class="fas fa-paper-plane" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestButton", "İste"))}</span>
+        </button>
+        <button type="button" class="monwui-serr-btn monwui-serr-4k-btn" data-serr-confirm-submit-4k hidden>
+          <i class="fas fa-film" aria-hidden="true"></i><span>${escapeHtml(L("serrRequest4KButton", "4K İste"))}</span>
         </button>
       </div>
     </div>
@@ -371,6 +466,10 @@ function ensureRequestConfirmModal() {
     }
     if (event.target?.closest?.("[data-serr-confirm-submit]")) {
       closeRequestConfirmModal(true);
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-confirm-submit-4k]")) {
+      closeRequestConfirmModal("4k");
     }
   });
   modal.addEventListener("keydown", (event) => {
@@ -393,11 +492,44 @@ async function confirmRequestBeforeSend(payload = {}, access = null) {
   const metaNode = modal.querySelector("[data-serr-confirm-meta]");
   const hintNode = modal.querySelector("[data-serr-confirm-hint]");
   const infoNode = modal.querySelector("[data-serr-confirm-info]");
+  const layoutNode = modal.querySelector(".monwui-serr-confirm-layout");
+  const posterWrapNode = modal.querySelector("[data-serr-confirm-poster-wrap]");
+  const posterNode = modal.querySelector("[data-serr-confirm-poster]");
+  const submitNode = modal.querySelector("[data-serr-confirm-submit] span");
+  const submit4KNode = modal.querySelector("[data-serr-confirm-submit-4k]");
+  const poster = requestPosterUrlFromPayload(payload);
   if (titleNode) titleNode.textContent = title;
   if (nameNode) nameNode.textContent = name;
   if (metaNode) metaNode.textContent = meta;
   if (hintNode) hintNode.textContent = requestConfirmHint(payload);
   if (infoNode) infoNode.textContent = requestConfirmInfo(access);
+  if (posterWrapNode && posterNode) {
+    posterNode.onerror = null;
+    if (poster) {
+      layoutNode?.classList?.add("has-poster");
+      posterWrapNode.removeAttribute("hidden");
+      posterNode.alt = name;
+      posterNode.onerror = () => {
+        posterNode.removeAttribute("src");
+        posterWrapNode.setAttribute("hidden", "hidden");
+        layoutNode?.classList?.remove("has-poster");
+      };
+      posterNode.src = poster;
+    } else {
+      posterNode.removeAttribute("src");
+      posterNode.alt = "";
+      posterWrapNode.setAttribute("hidden", "hidden");
+      layoutNode?.classList?.remove("has-poster");
+    }
+  }
+  if (submitNode) submitNode.textContent = payload?.is4K === true
+    ? L("serrRequest4KButton", "4K İste")
+    : L("serrRequestButton", "İste");
+  if (submit4KNode) {
+    const allow4KChoice = payload?.is4K !== true && accessCanRequestMedia(access, payload?.mediaType, true);
+    if (allow4KChoice) submit4KNode.removeAttribute("hidden");
+    else submit4KNode.setAttribute("hidden", "hidden");
+  }
 
   if (typeof modal.__serrResolve === "function") {
     modal.__serrResolve(false);
@@ -414,7 +546,7 @@ async function confirmRequestBeforeSend(payload = {}, access = null) {
 export async function requestSerrFromItem(item, options = {}) {
   const access = await getSerrAccess().catch(() => null);
   const requestedMediaType = options.mediaType || normalizeItemType(item);
-  if (!access?.enabled || !accessCanRequestMedia(access, requestedMediaType)) {
+  if (!access?.enabled || !accessCanRequestMedia(access, requestedMediaType, options.is4K === true)) {
     throw new Error(L("serrDisabled", "Seerr entegrasyonu etkin değil."));
   }
 
@@ -434,6 +566,7 @@ export async function requestSerrFromItem(item, options = {}) {
 
   const confirmed = await confirmRequestBeforeSend(payload, access);
   if (!confirmed) return { cancelled: true };
+  if (confirmed === "4k") payload.is4K = true;
 
   let submitStarted = false;
   const notifySubmitStarting = () => {
@@ -447,7 +580,8 @@ export async function requestSerrFromItem(item, options = {}) {
     const arrResult = await requestMovieFromArr(item, {
       tmdbId: payload.mediaId,
       title: payload.title,
-      year: item?.ProductionYear || item?.productionYear
+      year: item?.ProductionYear || item?.productionYear,
+      is4K: payload.is4K === true
     });
     notify(arrStatusMessage(arrResult), "success");
     return arrResult;
@@ -480,8 +614,9 @@ export function createSerrRequestButton(item, options = {}) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = options.className || "monwui-serr-btn";
-  button.innerHTML = `<i class="fas fa-clapperboard" aria-hidden="true"></i><span>${escapeHtml(options.label || L("serrRequestButton", "İste"))}</span>`;
-  button.title = options.title || L("serrRequestButtonTitle", "Bu içeriği iste");
+  const defaultLabel = options.is4K === true ? L("serrRequest4KButton", "4K İste") : L("serrRequestButton", "İste");
+  button.innerHTML = `<i class="fas fa-clapperboard" aria-hidden="true"></i><span>${escapeHtml(options.label || defaultLabel)}</span>`;
+  button.title = options.title || (options.is4K === true ? L("serrRequest4KButtonTitle", "Bu içeriği 4K iste") : L("serrRequestButtonTitle", "Bu içeriği iste"));
 
   button.addEventListener("click", async (event) => {
     event.preventDefault();
@@ -520,12 +655,12 @@ export async function appendSerrRequestButton(host, item, options = {}) {
   if (!moduleEnabled()) return null;
   const access = await getSerrAccess().catch(() => null);
   const requestedMediaType = options.mediaType || normalizeItemType(item);
-  if (!access?.enabled || !accessCanRequestMedia(access, requestedMediaType)) return null;
+  if (!access?.enabled || !accessCanRequestMedia(access, requestedMediaType, options.is4K === true)) return null;
   const label = accessHasSerr(access)
-    ? (options.label || L("serrRequestButton", "İste"))
+    ? (options.label || (options.is4K === true ? L("serrRequest4KButton", "4K İste") : L("serrRequestButton", "İste")))
     : L("arrRequestButton", "İste");
   const title = accessHasSerr(access)
-    ? (options.title || L("serrRequestButtonTitle", "Bu içeriği iste"))
+    ? (options.title || (options.is4K === true ? L("serrRequest4KButtonTitle", "Bu içeriği 4K iste") : L("serrRequestButtonTitle", "Bu içeriği iste")))
     : L("arrRequestButtonTitle", "Bu içeriği iste");
   const button = createSerrRequestButton(item, { ...options, label, title });
   host.appendChild(button);
@@ -804,14 +939,16 @@ function renderSearchResults(host, results, options = {}) {
         <div class="monwui-serr-meta">${escapeHtml(resultMeta(result))}</div>
         ${text(result?.overview) ? `<div class="monwui-serr-overview">${escapeHtml(result.overview)}</div>` : ""}
       </div>
-      <button type="button" class="monwui-serr-btn">
+      <div class="monwui-serr-result-actions">
+        <button type="button" class="monwui-serr-btn" data-serr-result-request>
           <i class="fas fa-paper-plane" aria-hidden="true"></i><span>${escapeHtml(accessHasSerr(options.access) ? L("serrRequestButton", "İste") : L("arrRequestButton", "İste"))}</span>
-      </button>
+        </button>
+      </div>
     `;
 
-    const btn = row.querySelector(".monwui-serr-btn");
-    btn?.addEventListener("click", async () => {
+    const handleRequest = async (btn, is4K = false) => {
       const old = btn.innerHTML;
+      let effectiveIs4K = is4K === true;
       try {
         btn.disabled = true;
         if (mediaType === "collection") {
@@ -824,12 +961,18 @@ function renderSearchResults(host, results, options = {}) {
           mediaId: id,
           tvdbId: Number(result?.tvdbId || result?.tvdb_id || 0) || undefined,
           title,
+          posterUrl: img,
           requestAllSeasons: mediaType === "tv",
           seasons: [],
-          source: text(options.source, "search")
+          source: text(options.source, "search"),
+          is4K: effectiveIs4K
         };
         const confirmed = await confirmRequestBeforeSend(payload, options.access);
         if (!confirmed) return;
+        if (confirmed === "4k") {
+          payload.is4K = true;
+          effectiveIs4K = true;
+        }
 
         btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span>${escapeHtml(L("serrRequestSending", "Gönderiliyor..."))}</span>`;
         const response = await createSerrRequest(payload);
@@ -839,7 +982,7 @@ function renderSearchResults(host, results, options = {}) {
           throw err;
         }
         if (mediaType === "movie" && shouldUseDirectArrMovieFallback(options.access) && shouldFallbackMovieToArr(response)) {
-          const arrResult = await requestMovieFromArr({ __tmdbId: id, Name: title }, { tmdbId: id, title });
+          const arrResult = await requestMovieFromArr({ __tmdbId: id, Name: title }, { tmdbId: id, title, is4K: payload.is4K === true });
           notify(arrStatusMessage(arrResult), "success");
           try { window.dispatchEvent(new CustomEvent("monwui:serr-requests-changed")); } catch {}
           return;
@@ -849,7 +992,7 @@ function renderSearchResults(host, results, options = {}) {
       } catch (error) {
         if (mediaType === "movie" && shouldUseDirectArrMovieFallback(options.access) && !isJellyfinAlreadyAvailableError(error)) {
           try {
-            const arrResult = await requestMovieFromArr({ __tmdbId: id, Name: title }, { tmdbId: id, title });
+            const arrResult = await requestMovieFromArr({ __tmdbId: id, Name: title }, { tmdbId: id, title, is4K: effectiveIs4K });
             notify(arrStatusMessage(arrResult), "success");
             try { window.dispatchEvent(new CustomEvent("monwui:serr-requests-changed")); } catch {}
             return;
@@ -863,6 +1006,10 @@ function renderSearchResults(host, results, options = {}) {
         btn.disabled = false;
         btn.innerHTML = old;
       }
+    };
+
+    row.querySelector("[data-serr-result-request]")?.addEventListener("click", (event) => {
+      handleRequest(event.currentTarget, false).catch(() => {});
     });
 
     frag.appendChild(row);
