@@ -10,7 +10,7 @@
     "versions": [
     {
         "version": "3.4.0.0",
-        "changelog": "v3.4.1\n\nChanges:\n- Enabled 4K request support for Seerr & Arr integration\n- Updated detail modal trailer previews to respect trailer volume settings configured in the MonWUI panel\n- Fixed multiple issues and inconsistencies in the HoverTrailer modal\n- Improved trailer modal stability and playback behavior\n- Applied various UI, compatibility, and performance refinements across the plugin\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
+        "changelog": "v3.4.0\n\nChanges:\n- Enabled 4K request support for Seerr & Arr integration\n- Updated detail modal trailer previews to respect trailer volume settings configured in the MonWUI panel\n- Fixed multiple issues and inconsistencies in the HoverTrailer modal\n- Improved trailer modal stability and playback behavior\n- Applied various UI, compatibility, and performance refinements across the plugin\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/download/v3.4.0/JMSFusion-3.4.0.0-server.zip",
         "checksum": "aec7f39a66bdbe156b226cb07d331482",
