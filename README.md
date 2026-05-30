@@ -21,7 +21,7 @@
   <a href="https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/latest">
     <img
       alt="Version"
-      src="https://img.shields.io/github/v/release/G-grbz/Jellyfin-MonWUI-Plugin?style=for-the-badge"
+      src="https://img.shields.io/github/v/release/G-grbz/Jellyfin-MonWUI-Plugin?style=for-the-badge&cacheSeconds=3600"
     />
   </a>
 
