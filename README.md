@@ -41,7 +41,8 @@
   <a href="docs/seerr-arr-integration.md">Seerr & Arr Integration</a> •
   <a href="#installation">Installation</a> •
   <a href="#notes">Notes</a> •
-  <a href="#license">License</a>
+  <a href="#license">License</a> •
+  <a href="https://github.com/G-grbz/G-TMCE">G-TMCE</a>
 </p>
 
 ---
