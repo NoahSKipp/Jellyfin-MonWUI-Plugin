@@ -1034,6 +1034,7 @@ function installHeaderButton(open, L, { isOverlayOpen } = {}) {
   let headerObserver = null;
   let bodyObserver = null;
   let rootObserver = null;
+  let observedHeaderRight = null;
   let cancelled = false;
   let warmupRefreshIds = [];
 
@@ -1212,30 +1213,48 @@ function installHeaderButton(open, L, { isOverlayOpen } = {}) {
 
   const tick = timeoutThrottle(() => {
     if (cancelled) return;
-    if (!document.getElementById(HEADER_BTN_ID)) mountOnce();
+    const headerRight = findHeaderRight();
+    const btn = document.getElementById(HEADER_BTN_ID);
+    if (headerRight && headerRight !== observedHeaderRight) observeHeaderRight(headerRight);
+    if (!btn || (headerRight && btn.parentElement !== headerRight)) mountOnce(headerRight);
     refreshHeaderButton();
   }, 350);
 
-  const onHash = () => tick();
-  window.addEventListener("hashchange", onHash);
+  function observeHeaderRight(headerRight) {
+    if (!headerRight || headerRight === observedHeaderRight) return;
+    observedHeaderRight = headerRight;
+    try { headerObserver?.disconnect?.(); } catch {}
+    try {
+      headerObserver = new MutationObserver(() => {
+        if (cancelled) return;
+        const currentHeaderRight = findHeaderRight() || observedHeaderRight;
+        const btn = document.getElementById(HEADER_BTN_ID);
+        if (!btn || (currentHeaderRight && btn.parentElement !== currentHeaderRight)) {
+          mountOnce(currentHeaderRight);
+        }
+        refreshHeaderButton();
+      });
+      headerObserver.observe(headerRight, { childList: true, subtree: false });
+    } catch {}
+  }
+
+  const onRouteSignal = () => tick();
+  window.addEventListener("hashchange", onRouteSignal);
+  window.addEventListener("popstate", onRouteSignal);
+  window.addEventListener("pageshow", onRouteSignal, { passive: true });
+  document.addEventListener("viewshow", onRouteSignal, { passive: true });
+  document.addEventListener("viewshown", onRouteSignal, { passive: true });
 
   (async () => {
     try {
-      const headerRight =
+      const foundHeaderRight =
         findHeaderRight() ||
         await waitForElement(getHeaderMountWaitSelector("profile"), 10000);
+      const headerRight = findHeaderRight() || foundHeaderRight;
       if (cancelled) return;
+      observeHeaderRight(headerRight);
       mountOnce(headerRight);
       refreshHeaderButton();
-
-      try {
-        headerObserver?.disconnect?.();
-        headerObserver = new MutationObserver(() => {
-          if (cancelled) return;
-          if (!document.getElementById(HEADER_BTN_ID)) mountOnce(headerRight);
-        });
-        headerObserver.observe(headerRight, { childList: true, subtree: false });
-      } catch {}
 
       try {
         bodyObserver?.disconnect?.();
@@ -1243,18 +1262,12 @@ function installHeaderButton(open, L, { isOverlayOpen } = {}) {
           if (cancelled) return;
           const hr = findHeaderRight();
           if (!hr) return;
-          if (hr !== headerRight) {
-            try { headerObserver?.disconnect?.(); } catch {}
-            try {
-              headerObserver = new MutationObserver(() => {
-                if (cancelled) return;
-                if (!document.getElementById(HEADER_BTN_ID)) mountOnce(hr);
-              });
-              headerObserver.observe(hr, { childList: true, subtree: false });
-            } catch {}
+          const btn = document.getElementById(HEADER_BTN_ID);
+          if (hr !== observedHeaderRight) observeHeaderRight(hr);
+          if (!btn || btn.parentElement !== hr) {
             mountOnce(hr);
-            refreshHeaderButton();
           }
+          refreshHeaderButton();
         }, 300);
 
         bodyObserver = new MutationObserver(() => onBodyMut());
@@ -1283,7 +1296,11 @@ function installHeaderButton(open, L, { isOverlayOpen } = {}) {
   return () => {
     cancelled = true;
     clearWarmupRefreshes();
-    try { window.removeEventListener("hashchange", onHash); } catch {}
+    try { window.removeEventListener("hashchange", onRouteSignal); } catch {}
+    try { window.removeEventListener("popstate", onRouteSignal); } catch {}
+    try { window.removeEventListener("pageshow", onRouteSignal); } catch {}
+    try { document.removeEventListener("viewshow", onRouteSignal); } catch {}
+    try { document.removeEventListener("viewshown", onRouteSignal); } catch {}
     try { headerObserver?.disconnect?.(); } catch {}
     try { bodyObserver?.disconnect?.(); } catch {}
     try { rootObserver?.disconnect?.(); } catch {}

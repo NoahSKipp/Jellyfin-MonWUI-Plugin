@@ -963,6 +963,11 @@ function applyDotStateClasses(dots, currentIndex, config, lowPower = false) {
     config?.metaIconColors && activeDotColorSeed
       ? getMetaVibrantColor(`${activeDotColorSeed}-active-dot`)
       : "";
+  const dotContainer = dotArray[0]?.closest?.(".monwui-dot-navigation-container") || null;
+  if (dotContainer) {
+    if (activeDotColor) dotContainer.style.setProperty("--monwui-active-dot-bg", activeDotColor);
+    else dotContainer.style.removeProperty("--monwui-active-dot-bg");
+  }
   const { start, end } = getDotWindowBounds(
     dotArray.length,
     safeCurrentIndex,

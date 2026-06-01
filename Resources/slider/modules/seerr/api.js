@@ -161,6 +161,13 @@ export async function approveSerrRequest(id) {
   });
 }
 
+export async function upgradeSerrRequest4K(id) {
+  return request(`/requests/${encodeURIComponent(String(id || ""))}/upgrade4k`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export async function declineSerrRequest(id) {
   return request(`/requests/${encodeURIComponent(String(id || ""))}/decline`, {
     method: "POST",

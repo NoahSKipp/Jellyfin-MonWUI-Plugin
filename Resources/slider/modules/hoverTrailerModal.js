@@ -232,6 +232,67 @@ function isMobileAppEnv() {
     return !!(standalone || isWV || hasBridge);
   } catch { return false; }
 }
+
+function shouldDisableTouchLongPressPreview() {
+  return isMobileAppEnv();
+}
+
+function installTouchContextMenuGuard() {
+  if (window.__jmsTouchContextMenuGuardInstalled) return;
+  window.__jmsTouchContextMenuGuardInstalled = true;
+
+  const root = document.documentElement;
+  try { root?.classList?.add('jms-touch-context-guard'); } catch {}
+
+  if (!document.getElementById('jms-touch-context-menu-guard-style')) {
+    const style = document.createElement('style');
+    style.id = 'jms-touch-context-menu-guard-style';
+    style.textContent = `
+      html.jms-touch-context-guard,
+      html.jms-touch-context-guard body {
+        -webkit-touch-callout: none;
+      }
+
+      html.jms-touch-context-guard body :not(input):not(textarea):not(select):not(option):not([contenteditable="true"]):not([contenteditable=""]) {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      html.jms-touch-context-guard input,
+      html.jms-touch-context-guard textarea,
+      html.jms-touch-context-guard select,
+      html.jms-touch-context-guard option,
+      html.jms-touch-context-guard [contenteditable="true"],
+      html.jms-touch-context-guard [contenteditable=""] {
+        -webkit-touch-callout: default;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+    `;
+    try { document.head?.appendChild(style); } catch {}
+  }
+
+  const isEditableTarget = (target) => {
+    try {
+      return !!target?.closest?.('input, textarea, select, option, [contenteditable="true"], [contenteditable=""]');
+    } catch {
+      return false;
+    }
+  };
+
+  const blockNonEditableTouchContext = (event) => {
+    if (isEditableTarget(event.target)) return;
+    if (event.cancelable) event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+  };
+
+  document.addEventListener('contextmenu', blockNonEditableTouchContext, { capture: true, passive: false });
+  document.addEventListener('selectstart', blockNonEditableTouchContext, { capture: true, passive: false });
+  document.addEventListener('dragstart', blockNonEditableTouchContext, { capture: true, passive: false });
+}
+
 function suppressHoverOpens(ms = 1000) {
   modalState.__suppressOpenUntil = Date.now() + ms;
   try { if (modalState._hoverOpenTimer) { clearTimeout(modalState._hoverOpenTimer); modalState._hoverOpenTimer = null; } } catch {}
@@ -2792,12 +2853,19 @@ async function getItemTypeCached(itemId){
 
 export function setupHoverForAllItems() {
   if (isLiveTvRouteActive()) return;
+  const isTouch = isTouchRuntime();
+  if (isTouch && (shouldDisableTouchLongPressPreview() || config?.allPreviewModal !== false)) {
+    installTouchContextMenuGuard();
+  }
   if (!config || config.allPreviewModal === false) return;
   installHoverOpenSuppressors();
   scanAndMarkCardsForTrailers();
-  const isTouch = isTouchRuntime();
   const mode = config.globalPreviewMode || 'modal';
   if (isTouch) {
+    if (shouldDisableTouchLongPressPreview()) {
+      return;
+    }
+
     if (!__hoverTouchDelegatesBound) {
       __hoverTouchDelegatesBound = true;
 
@@ -2807,10 +2875,14 @@ export function setupHoverForAllItems() {
       const SUPPRESS_MS = 450;
 
       let lpTimer = null;
+      let touchSeq = 0;
+      let touchActive = false;
+      let touchMoved = false;
       let startX = 0;
       let startY = 0;
       let activeItem = null;
       let activeId = null;
+      let activeTouchAction = '';
       let longPressFiredAt = 0;
 
       const getId = (el) =>
@@ -2818,21 +2890,27 @@ export function setupHoverForAllItems() {
 
       const isSuppressionActive = () => (Date.now() - longPressFiredAt) < SUPPRESS_MS;
 
-      const fireLongPress = () => {
+      const fireLongPress = async (seq) => {
+        if (!touchActive || seq !== touchSeq || !activeItem || !activeId) return;
         longPressFiredAt = Date.now();
-        try { navigator.vibrate?.(10); } catch {}
-        if (activeItem && activeId) {
-          modalState.__suppressOpenUntil = 0;
-          openPreviewModalForItem(activeId, activeItem, { bypass: true });
+        modalState.__suppressOpenUntil = 0;
+        const opened = await openPreviewModalForItem(activeId, activeItem, { bypass: true });
+        if (opened) {
+          try { navigator.vibrate?.(10); } catch {}
+          return;
         }
+        cancelLP();
       };
 
       const cancelLP = () => {
         clearTimeout(lpTimer);
         lpTimer = null;
-        if (activeItem) activeItem.style.touchAction = '';
+        touchActive = false;
+        touchMoved = false;
+        if (activeItem) activeItem.style.touchAction = activeTouchAction;
         activeItem = null;
         activeId = null;
+        activeTouchAction = '';
       };
 
       const suppressIfNeeded = (e) => {
@@ -2854,35 +2932,45 @@ export function setupHoverForAllItems() {
       const onTouchStart = async (e) => {
         if (isLiveTvRouteActive()) return;
         if (e.target?.closest?.('.jms-trailer-badge')) return;
+        if ((e.touches?.length || 0) !== 1) return;
         const card = e.target?.closest?.('.cardImageContainer');
         if (!card) return;
         if (isLiveTvCardElement(card)) return;
         const itemId = getId(card);
         if (!itemId) return;
-        let type = getCardItemType(card);
-        if (!type) type = await getItemTypeCached(itemId);
-        if (!type || !ALLOWED_TYPES.has(type)) return;
-        activeItem = card;
-        activeId = itemId;
-        activeItem.style.touchAction = 'none';
+        const seq = ++touchSeq;
+        touchActive = true;
+        touchMoved = false;
         const t = e.touches?.[0];
         startX = t?.clientX ?? 0;
         startY = t?.clientY ?? 0;
+        let type = getCardItemType(card);
+        if (!type) type = await getItemTypeCached(itemId);
+        if (!touchActive || touchMoved || seq !== touchSeq) return;
+        if (!type || !ALLOWED_TYPES.has(type)) {
+          cancelLP();
+          return;
+        }
+        activeItem = card;
+        activeId = itemId;
+        activeTouchAction = activeItem.style.touchAction || '';
+        activeItem.style.touchAction = 'none';
         clearTimeout(lpTimer);
         lpTimer = setTimeout(() => {
-          fireLongPress();
+          void fireLongPress(seq);
         }, LONG_PRESS_MS);
       };
 
       const onTouchMove = (e) => {
-        if (!lpTimer) return;
+        if (!touchActive) return;
         const t = e.touches?.[0];
         if (!t) return;
         const dx = Math.abs((t.clientX ?? 0) - startX);
         const dy = Math.abs((t.clientY ?? 0) - startY);
         if (dx > MOVE_TOL || dy > MOVE_TOL) {
+          touchMoved = true;
           cancelLP();
-        } else if (e.cancelable) {
+        } else if (lpTimer && e.cancelable) {
           e.preventDefault();
         }
       };
@@ -3352,18 +3440,19 @@ export function animatedOpen(modal, anchorEl, pos = 'item') {
 }
 
 export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
-   const bypass = !!opts.bypass;
-   if (!bypass && Date.now() < (modalState.__suppressOpenUntil || 0)) return;
+  const bypass = !!opts.bypass;
+  if (!bypass && Date.now() < (modalState.__suppressOpenUntil || 0)) return false;
+  let openedModal = false;
   try {
     const cfg = getConfig();
     const mode = (cfg?.globalPreviewMode || 'modal');
-    if (mode !== 'modal' || cfg?.allPreviewModal === false || !itemId) return;
-    if (isLiveTvRouteActive() || isLiveTvCardElement(anchorEl)) return;
-    if (!canOpenItem(itemId)) return;
+    if (mode !== 'modal' || cfg?.allPreviewModal === false || !itemId) return false;
+    if (isLiveTvRouteActive() || isLiveTvCardElement(anchorEl)) return false;
+    if (!canOpenItem(itemId)) return false;
     if (modalIsVisible() && modalState.videoModal?.dataset?.itemId === String(itemId)) {
       if (anchorEl) positionModalRelativeToItem(modalState.videoModal, anchorEl);
       applyVolumePreference(modalState.videoModal);
-      return;
+      return true;
     }
     if (isMiniPopoverOpen()) {
       await closeMiniPopoverSafely();
@@ -3372,13 +3461,13 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
 
     await ensureOverlaysClosed();
     let modal = ensureGlobalModal();
-    if (!modal) return;
+    if (!modal) return false;
 
     const ac = new AbortController();
     const { signal } = ac;
     const item = await fetchItemDetails(itemId, { signal });
-    if (!item) return;
-    if (isLiveTvItemLike(item)) return;
+    if (!item) return false;
+    if (isLiveTvItemLike(item)) return false;
 
     let domBackdrop = null;
     try {
@@ -3391,22 +3480,23 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
 
     const itemBackdrop = getBackdropFromItem(item);
     modal = ensureGlobalModal();
-    if (!modal) return;
+    if (!modal) return false;
     modal = ensureGlobalModal();
-    if (!modal) return;
+    if (!modal) return false;
     hardWipeModalDom(modal);
     if (typeof modal.setBackdrop === 'function') {
-    const backdropUrl = domBackdrop || itemBackdrop;
-    if (backdropUrl && !backdropUrl.startsWith('http')) {
-      modal.setBackdrop(withServer(backdropUrl));
-    } else {
-      modal.setBackdrop(backdropUrl);
+      const backdropUrl = domBackdrop || itemBackdrop;
+      if (backdropUrl && !backdropUrl.startsWith('http')) {
+        modal.setBackdrop(withServer(backdropUrl));
+      } else {
+        modal.setBackdrop(backdropUrl);
+      }
     }
-  }
     const myToken = newRenderToken();
     modal.dataset.itemId = String(itemId);
     if (anchorEl) positionModalRelativeToItem(modalState.videoModal, anchorEl);
     animatedShow(modal);
+    openedModal = true;
 
     modalState.isMouseInModal = true;
     clearTimeout(modalState.modalHideTimeout);
@@ -3418,16 +3508,24 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
 
     let videoUrl = null;
     try { videoUrl = await preloadVideoPreview(itemId); } catch {}
-    if (!isTokenAlive(myToken) || modal.dataset.itemId !== String(itemId)) return;
+    if (!isTokenAlive(myToken) || modal.dataset.itemId !== String(itemId)) return false;
     await updateModalContent(item, videoUrl);
 
     const iframe = modal.querySelector('.preview-trailer-iframe');
     const hasIframe = !!(iframe && iframe.style.display !== 'none' && iframe.src);
     const hasVideo  = !!(modalState.modalVideo && modalState.modalVideo.style.display !== 'none');
     const hasPlayable = hasIframe || hasVideo;
-    if (!hasPlayable) closeVideoModal();
+    if (!hasPlayable) {
+      closeVideoModal();
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error('openPreviewModalForItem hatası:', e);
+    if (openedModal) {
+      try { closeVideoModal(); } catch {}
+    }
+    return false;
   }
 }
 

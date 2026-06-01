@@ -71,6 +71,7 @@ const HOVER_CLOSE_DELAY = 200;
 const CSS_READY_TIMEOUT_MS = 2000;
 const MAX_RECENT_TOAST_KEYS = 500;
 const CREATED_TS_CACHE_MAX = 2000;
+const LATEST_AUDIO_CACHE_MS = 5 * 60 * 1000;
 const TOAST_QUEUE_MAX = 60;
 const NOTIF_THEME_LINK_ID = "jfNotifCss";
 const NOTIF_THEME_HREF_FRAGMENT = "slider/src/notifications";
@@ -105,6 +106,9 @@ let notifState = {
 };
 let __castTabMount = null;
 let __castTabSyncPromise = null;
+let __initNotificationsPromise = null;
+let latestAudioCacheAt = 0;
+let latestAudioCacheItems = [];
 
 function isHoverCapable() {
   try {
@@ -509,17 +513,23 @@ async function fetchLatestAll() {
     return item;
   });
 
-  let latestAudioResp;
-  try {
-    latestAudioResp = await makeApiRequest(
-      `/Users/${userId}/Items?SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Audio&Recursive=true&Limit=50`
-    );
-  } catch (e) {
-    console.error("[notif] Latest(Audio) isteği hata:", e);
-    latestAudioResp = {};
-  }
+  let audioItems = latestAudioCacheItems;
+  const audioCacheFresh = (Date.now() - latestAudioCacheAt) < LATEST_AUDIO_CACHE_MS;
+  if (!audioCacheFresh) {
+    let latestAudioResp;
+    try {
+      latestAudioResp = await makeApiRequest(
+        `/Users/${userId}/Items?SortBy=DateCreated&SortOrder=Descending&IncludeItemTypes=Audio&Recursive=true&Limit=50`
+      );
+    } catch (e) {
+      console.error("[notif] Latest(Audio) isteği hata:", e);
+      latestAudioResp = {};
+    }
 
-  const audioItems = Array.isArray(latestAudioResp?.Items) ? latestAudioResp.Items : [];
+    audioItems = Array.isArray(latestAudioResp?.Items) ? latestAudioResp.Items : [];
+    latestAudioCacheItems = audioItems;
+    latestAudioCacheAt = Date.now();
+  }
   const combined = [...processedVideo, ...audioItems];
 
   const uniqMap = new Map();
@@ -1773,6 +1783,15 @@ function escapeHtml(s) {
 }
 
 export async function initNotifications() {
+  if (__initNotificationsPromise) return __initNotificationsPromise;
+  __initNotificationsPromise = initNotificationsOnce().catch((error) => {
+    __initNotificationsPromise = null;
+    throw error;
+  });
+  return __initNotificationsPromise;
+}
+
+async function initNotificationsOnce() {
   await waitForAuthReady(15000);
   migrateNouserToUser();
   notifState._systemAllowed = await canReadActivityLog();
@@ -1837,7 +1856,7 @@ export async function initNotifications() {
     }
   };
   document.addEventListener('visibilitychange', onVis);
- }
+}
 
 function schedulePollLatest(delay = POLL_INTERVAL_MS) {
   if (pollCtl.paused) return;

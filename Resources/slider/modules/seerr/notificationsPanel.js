@@ -1,9 +1,14 @@
 import {
   approveSerrRequest,
   declineSerrRequest,
+  getSerrAccess,
+  getSerrCollectionDetails,
   getSerrMovieDetails,
   getSerrTvDetails,
   listSerrRequests,
+  searchSerr,
+  searchSerrCollections,
+  upgradeSerrRequest4K,
   withdrawSerrRequest
 } from "./api.js";
 import { getConfig } from "../config.js";
@@ -11,6 +16,8 @@ import { getEffectiveLanguage, getLanguageLabels } from "../../language/index.js
 import { requestMovieFromArr } from "../arr/requestFallback.js";
 import { getArrCalendar } from "../arr/api.js";
 import { showNotification } from "../player/ui/notification.js";
+import { openSerrCollectionRequestModal } from "./itemPageBridge.js";
+import { requestSerrFromItem } from "./ui.js";
 
 let cachedCount = 0;
 let cachedRequests = [];
@@ -18,6 +25,15 @@ let lastIsAdmin = false;
 let managerRequests = [];
 let managerIsAdmin = false;
 let managerRefreshPromise = null;
+let managerSearchTimer = 0;
+let managerSearchSeq = 0;
+const managerSearchState = {
+  query: "",
+  results: [],
+  loading: false,
+  searched: false,
+  error: ""
+};
 let refreshPromise = null;
 let pollTimer = 0;
 let pollEventsBound = false;
@@ -29,6 +45,8 @@ const SERR_IMAGE_BASE = "https://image.tmdb.org/t/p";
 const CALENDAR_IMAGE_READY_TIMEOUT_MS = 3500;
 const posterCache = new Map();
 const posterPromises = new Map();
+const metadataCache = new Map();
+const metadataPromises = new Map();
 
 function currentUserId() {
   try { return text(window.ApiClient?.getCurrentUserId?.()); } catch {}
@@ -114,6 +132,191 @@ function imageUrl(path, size = "w342") {
   return `${SERR_IMAGE_BASE}/${size}${clean.startsWith("/") ? clean : `/${clean}`}`;
 }
 
+function resultMediaType(result) {
+  const type = text(result?.mediaType || result?.media_type || result?.MediaType).toLowerCase();
+  if (["tv", "series", "show", "tvshow"].includes(type)) return "tv";
+  if (["movie", "film"].includes(type)) return "movie";
+  if (["collection", "boxset", "box_set", "box set"].includes(type)) return "collection";
+  return "";
+}
+
+function resultTitle(result) {
+  return text(
+    result?.title ||
+    result?.name ||
+    result?.Title ||
+    result?.Name ||
+    result?.originalTitle ||
+    result?.original_title ||
+    result?.originalName ||
+    result?.original_name,
+    L("serrUntitled", "İçerik")
+  );
+}
+
+function resultYear(result) {
+  const year = Number(result?.year || result?.Year);
+  if (Number.isFinite(year) && year > 1800) return String(Math.floor(year));
+  const date = text(
+    result?.releaseDate ||
+    result?.firstAirDate ||
+    result?.release_date ||
+    result?.first_air_date ||
+    result?.PremiereDate ||
+    result?.premiereDate
+  );
+  return date.length >= 4 ? date.slice(0, 4) : "";
+}
+
+function resultPosterUrl(result, size = "w154") {
+  return imageUrl(
+    result?.posterPath ||
+    result?.poster_path ||
+    result?.PosterPath ||
+    result?.remotePoster ||
+    result?.posterUrl ||
+    result?.PosterUrl,
+    size
+  );
+}
+
+function resultMeta(result) {
+  const mediaType = resultMediaType(result);
+  const type = mediaType === "tv"
+    ? L("serrTv", "Dizi")
+    : (mediaType === "collection" ? L("boxset", "Koleksiyon") : L("serrMovie", "Film"));
+  const tmdbId = Number(result?.id || result?.tmdbId || result?.tmdb_id || 0);
+  return [type, resultYear(result), Number.isFinite(tmdbId) && tmdbId > 0 ? `TMDb ${Math.floor(tmdbId)}` : ""].filter(Boolean).join(" • ");
+}
+
+function normalizeCollectionSearchResults(data) {
+  return (Array.isArray(data?.results) ? data.results : []).map((row) => ({
+    ...row,
+    mediaType: "collection",
+    media_type: "collection"
+  }));
+}
+
+function parseManagerTmdbSearch(value) {
+  const clean = text(value);
+  if (!clean) return null;
+  let type = "";
+  if (/\/movie\//i.test(clean) || /\b(movie|film)\b/i.test(clean)) type = "movie";
+  if (/\/tv\//i.test(clean) || /\b(tv|series|show|dizi)\b/i.test(clean)) type = "tv";
+  if (/\/collection\//i.test(clean) || /\b(collection|boxset|box\s*set|koleksiyon)\b/i.test(clean)) type = "collection";
+
+  let match = clean.match(/^(?:https?:\/\/(?:www\.)?themoviedb\.org\/(?:movie|tv|collection)\/|tmdb\s*[:#-]?\s*)?(\d{1,10})(?:[-/?#].*)?$/i);
+  if (!match && type === "collection") {
+    const ids = clean.match(/\b\d{1,10}\b/g) || [];
+    if (ids.length === 1) match = [ids[0], ids[0]];
+  }
+  if (!match) return null;
+
+  const id = Number(match[1]);
+  return Number.isFinite(id) && id > 0 ? { id: Math.floor(id), type } : null;
+}
+
+function normalizeManagerTmdbDetail(raw, mediaType, id) {
+  if (!raw || typeof raw !== "object") return null;
+  const title = resultTitle(raw);
+  const resolvedId = Number(raw?.id || raw?.tmdbId || raw?.tmdb_id || id);
+  if (!title || !Number.isFinite(resolvedId) || resolvedId <= 0) return null;
+  return {
+    ...raw,
+    id: Math.floor(resolvedId),
+    mediaType,
+    media_type: mediaType
+  };
+}
+
+async function searchManagerSerrByTmdbId({ id, type, language }) {
+  const jobs = [];
+  if (!type || type === "movie") {
+    jobs.push(getSerrMovieDetails(id, { language }).then((raw) => normalizeManagerTmdbDetail(raw, "movie", id)).catch(() => null));
+  }
+  if (!type || type === "tv") {
+    jobs.push(getSerrTvDetails(id, { language }).then((raw) => normalizeManagerTmdbDetail(raw, "tv", id)).catch(() => null));
+  }
+  if (!type || type === "collection") {
+    jobs.push(getSerrCollectionDetails(id, { language }).then((raw) => normalizeManagerTmdbDetail(raw, "collection", id)).catch(() => null));
+  }
+
+  const rows = (await Promise.all(jobs)).filter(Boolean);
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = `${resultMediaType(row)}:${Number(row?.id) || 0}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeManagerSearchResults(...lists) {
+  const seen = new Set();
+  const output = [];
+  for (const list of lists) {
+    for (const row of Array.isArray(list) ? list : []) {
+      const mediaType = resultMediaType(row);
+      if (!mediaType) continue;
+      const id = Number(row?.id || row?.tmdbId || row?.tmdb_id || 0);
+      const key = Number.isFinite(id) && id > 0
+        ? `${mediaType}:${Math.floor(id)}`
+        : `${mediaType}:${resultTitle(row).toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      output.push(row);
+    }
+  }
+  return output;
+}
+
+function balancedManagerSearchResults(results = [], limit = 24) {
+  const movies = [];
+  const tv = [];
+  const collections = [];
+  const other = [];
+  for (const row of Array.isArray(results) ? results : []) {
+    const mediaType = resultMediaType(row);
+    if (mediaType === "movie") movies.push(row);
+    else if (mediaType === "tv") tv.push(row);
+    else if (mediaType === "collection") collections.push(row);
+    else other.push(row);
+  }
+
+  const output = [];
+  while (output.length < limit && (collections.length || movies.length || tv.length)) {
+    if (collections.length) output.push(collections.shift());
+    if (output.length >= limit) break;
+    if (movies.length) output.push(movies.shift());
+    if (output.length >= limit) break;
+    if (tv.length) output.push(tv.shift());
+  }
+  return output.concat(other).slice(0, limit);
+}
+
+function managerSearchResultItem(result) {
+  const mediaType = resultMediaType(result);
+  const id = Number(result?.id || result?.tmdbId || result?.tmdb_id || 0);
+  const tvdbId = Number(result?.tvdbId || result?.tvdb_id || result?.TvdbId || 0);
+  const title = resultTitle(result);
+  return {
+    Id: `monwui-serr-search-${mediaType}-${Number.isFinite(id) && id > 0 ? Math.floor(id) : title}`,
+    Type: mediaType === "tv" ? "Series" : "Movie",
+    Name: title,
+    OriginalTitle: text(result?.originalTitle || result?.original_title || result?.originalName || result?.original_name, title),
+    Overview: text(result?.overview || result?.Overview),
+    ProductionYear: Number(resultYear(result)) || undefined,
+    PremiereDate: text(result?.releaseDate || result?.firstAirDate || result?.release_date || result?.first_air_date),
+    ProviderIds: {
+      Tmdb: Number.isFinite(id) && id > 0 ? String(Math.floor(id)) : undefined,
+      Tvdb: Number.isFinite(tvdbId) && tvdbId > 0 ? String(Math.floor(tvdbId)) : undefined
+    },
+    PosterPath: text(result?.posterPath || result?.poster_path || result?.PosterPath),
+    posterUrl: resultPosterUrl(result, "w342"),
+    __tmdbId: Number.isFinite(id) && id > 0 ? Math.floor(id) : 0
+  };
+}
+
 function requestMediaType(req) {
   const type = text(req?.MediaType || req?.mediaType).toLowerCase();
   return type === "tv" || type === "series" || type === "show" || type === "tvshow" ? "tv" : "movie";
@@ -153,6 +356,12 @@ function posterCacheKey(req) {
   return `${requestMediaType(req)}:${id}`;
 }
 
+function isGeneratedSerrTitle(value, req) {
+  const title = text(value);
+  const requestId = Number(req?.SerrRequestId || req?.serrRequestId || 0);
+  return requestId > 0 && title.toLowerCase() === `seerr #${requestId}`.toLowerCase();
+}
+
 function directPosterUrl(req) {
   return imageUrl(readFirst(req, "PosterUrl", "posterUrl", "PosterPath", "posterPath", "poster_path", "image", "Image"));
 }
@@ -163,8 +372,36 @@ async function resolvePosterUrl(req) {
 
   const key = posterCacheKey(req);
   if (!key) return "";
-  if (posterCache.has(key)) return posterCache.get(key) || "";
+  if (posterCache.has(key)) {
+    if (isGeneratedSerrTitle(req?.Title || req?.title, req)) {
+      return resolveRequestMetadata(req)
+        .catch(() => null)
+        .then(() => posterCache.get(key) || "");
+    }
+    return posterCache.get(key) || "";
+  }
   if (posterPromises.has(key)) return posterPromises.get(key);
+
+  const job = resolveRequestMetadata(req).then((details) => {
+    const poster = imageUrl(readFirst(details, "posterPath", "poster_path", "PosterPath"));
+    posterCache.set(key, poster || "");
+    return poster || "";
+  }).finally(() => {
+    posterPromises.delete(key);
+  });
+
+  posterPromises.set(key, job);
+  return job;
+}
+
+async function resolveRequestMetadata(req) {
+  const key = posterCacheKey(req);
+  if (!key) return null;
+  if (metadataCache.has(key)) {
+    applyMetadataTitleToRequest(req, metadataCache.get(key));
+    return metadataCache.get(key);
+  }
+  if (metadataPromises.has(key)) return metadataPromises.get(key);
 
   const job = (async () => {
     const id = requestMediaId(req);
@@ -173,15 +410,40 @@ async function resolvePosterUrl(req) {
     const details = mediaType === "tv"
       ? await getSerrTvDetails(id, { language }).catch(() => null)
       : await getSerrMovieDetails(id, { language }).catch(() => null);
-    const poster = imageUrl(readFirst(details, "posterPath", "poster_path", "PosterPath"));
-    posterCache.set(key, poster || "");
-    return poster || "";
+    applyMetadataTitleToRequest(req, details);
+    metadataCache.set(key, details || null);
+    return details || null;
   })().finally(() => {
-    posterPromises.delete(key);
+    metadataPromises.delete(key);
   });
 
-  posterPromises.set(key, job);
+  metadataPromises.set(key, job);
   return job;
+}
+
+function metadataTitle(details) {
+  if (!details || typeof details !== "object") return "";
+  const nested = readFirst(details, "media", "mediaInfo", "movie", "tv", "show", "item");
+  return text(
+    readFirst(details, "title", "name", "originalTitle", "original_title", "originalName", "original_name", "displayTitle", "mediaTitle") ||
+    readFirst(nested, "title", "name", "originalTitle", "original_title", "originalName", "original_name", "displayTitle", "mediaTitle")
+  );
+}
+
+function applyMetadataTitleToRequest(req, details) {
+  const title = metadataTitle(details);
+  if (!title || !isGeneratedSerrTitle(req?.Title || req?.title, req)) return;
+  req.Title = title;
+  req.title = title;
+}
+
+function updateHydratedRequestTitle(node, req) {
+  const title = text(req?.Title || req?.title);
+  if (!title || isGeneratedSerrTitle(title, req)) return;
+  const card = node.closest?.(".monwui-serr-request-card, .monwui-serr-notif-item");
+  card?.querySelectorAll?.(".monwui-serr-request-name, .monwui-serr-name").forEach((target) => {
+    target.textContent = title;
+  });
 }
 
 function posterFallbackLabel(req) {
@@ -220,7 +482,9 @@ function hydrateRequestPosters(scope = document) {
     if (!req) continue;
 
     resolvePosterUrl(req).then((url) => {
-      if (!url || !node.isConnected || node.getAttribute("data-serr-art-ready") === "1") return;
+      if (!node.isConnected) return;
+      updateHydratedRequestTitle(node, req);
+      if (!url || node.getAttribute("data-serr-art-ready") === "1") return;
       const title = text(req?.Title || req?.title, L("serrUntitled", "İçerik"));
       node.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`;
       node.setAttribute("data-serr-art-ready", "1");
@@ -299,6 +563,264 @@ function ensureSerrProgressStyles() {
       line-height: 1;
       padding: 3px 7px;
       white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-dialog {
+      width: min(1180px, calc(100vw - 32px));
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-head {
+      gap: 10px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-title {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-actions {
+      align-items: center;
+      display: flex;
+      flex: 0 0 auto;
+      gap: 8px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-switch {
+      align-items: center;
+      display: inline-flex;
+      gap: 7px;
+      justify-content: center;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-switch i {
+      margin: 0;
+      padding: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 14px;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-searchbar {
+      align-items: center;
+      background: var(--jf-notif-surface-2, var(--head-bg, rgba(255,255,255,.06)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 8px;
+      box-sizing: border-box;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 20px minmax(0, 1fr) auto;
+      min-width: 0;
+      padding: 8px 10px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-searchbar i {
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      text-align: center;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-input {
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      font: inherit;
+      min-height: 34px;
+      min-width: 0;
+      outline: none;
+      padding: 0;
+      width: 100%;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-input::placeholder {
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.62)));
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-run,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-btn {
+      align-items: center;
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 6px;
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      gap: 7px;
+      justify-content: center;
+      min-height: 34px;
+      padding: 7px 10px;
+      white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-run,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-btn {
+      background: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 20%, transparent);
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 36%, transparent);
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-run:hover,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-btn:hover {
+      background: var(--jf-notif-hover, var(--row-hover, rgba(255,255,255,.08)));
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-search-run:disabled,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-btn:disabled {
+      cursor: wait;
+      opacity: .72;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-results {
+      display: grid;
+      gap: 8px;
+      max-height: min(430px, 42vh);
+      min-width: 0;
+      overflow: auto;
+      padding-right: 2px;
+      scrollbar-color: var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) transparent;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-results[hidden] {
+      display: none;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-section {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-section-title {
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      font-size: 12px;
+      font-weight: 850;
+      line-height: 1.25;
+      padding: 2px 2px 0;
+      text-transform: uppercase;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result {
+      align-items: center;
+      background: color-mix(in srgb, var(--jf-notif-surface-2, var(--head-bg, #1f2937)) 82%, transparent);
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.1)));
+      border-radius: 8px;
+      box-sizing: border-box;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 52px minmax(0, 1fr) auto;
+      min-width: 0;
+      padding: 8px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result.requested {
+      border-color: color-mix(in srgb, var(--jf-notif-warning, var(--ntf-warning, #ffbf5f)) 42%, var(--jf-notif-border, rgba(255,255,255,.12)));
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-poster {
+      align-items: center;
+      aspect-ratio: 2 / 3;
+      background: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 16%, transparent);
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 6px;
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      display: flex;
+      font-size: 11px;
+      font-weight: 800;
+      justify-content: center;
+      overflow: hidden;
+      text-align: center;
+      width: 52px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-poster img {
+      display: block;
+      height: 100%;
+      object-fit: cover;
+      width: 100%;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-content {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-name {
+      color: var(--jf-notif-text, var(--nft-text-primary, #fff));
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-meta,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-overview {
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      font-size: 12px;
+      line-height: 1.35;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-result-overview {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      overflow: hidden;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card.monwui-serr-request-card-hit {
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 70%, transparent);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 28%, transparent);
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-list {
+      align-items: stretch;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card {
+      align-content: start;
+      box-sizing: border-box;
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-main {
+      align-items: start;
+      display: grid;
+      gap: 12px;
+      grid-template-columns: 74px minmax(0, 1fr);
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-poster.large {
+      width: 74px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-actions {
+      align-self: start;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      grid-column: 1 / -1;
+      justify-content: flex-start;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      margin-left: 0;
+      text-align: left;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details div {
+      align-items: flex-start;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details span,
+    .monwui-serr-requests-modal.open .monwui-serr-request-details b {
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 680px) {
+      .monwui-serr-requests-modal.open .monwui-serr-requests-dialog {
+        width: min(100vw - 18px, 520px);
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-body {
+        padding: 10px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-switch span {
+        display: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-manager-search-run span {
+        display: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-manager-result {
+        grid-template-columns: 46px minmax(0, 1fr);
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-manager-result-poster {
+        width: 46px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-manager-result-btn {
+        grid-column: 1 / -1;
+        justify-self: start;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-list {
+        grid-template-columns: 1fr;
+      }
     }
   `;
   document.head.appendChild(style);
@@ -453,7 +975,7 @@ function ensureSerrCalendarStyles() {
       border-bottom: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.1)));
       display: grid;
       gap: 10px;
-      grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+      grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
       padding: 12px 14px;
     }
     .monwui-serr-calendar-title {
@@ -463,6 +985,7 @@ function ensureSerrCalendarStyles() {
       text-align: center;
     }
     .monwui-serr-calendar-nav,
+    .monwui-serr-calendar-switch,
     .monwui-serr-calendar-close {
       align-items: center;
       background: var(--jf-notif-hover, var(--head-bg, rgba(255,255,255,.08)));
@@ -475,7 +998,18 @@ function ensureSerrCalendarStyles() {
       justify-content: center;
       width: 34px;
     }
+    .monwui-serr-calendar-switch {
+      gap: 7px;
+      padding: 0 10px;
+      width: auto;
+    }
+    .monwui-serr-calendar-switch i,
+    .monwui-serr-calendar-switch span {
+      margin: 0;
+      padding: 0;
+    }
     .monwui-serr-calendar-nav:hover,
+    .monwui-serr-calendar-switch:hover,
     .monwui-serr-calendar-close:hover {
       border-color: var(--jf-notif-accent, var(--notif-accent, #60a5fa));
       color: var(--jf-notif-accent, var(--notif-accent, #60a5fa));
@@ -760,6 +1294,7 @@ function ensureSerrCalendarStyles() {
         white-space: nowrap;
       }
       .monwui-serr-calendar-nav,
+      .monwui-serr-calendar-switch,
       .monwui-serr-calendar-close {
         box-sizing: border-box;
         font-size: 14px;
@@ -769,6 +1304,9 @@ function ensureSerrCalendarStyles() {
         min-width: 0 !important;
         padding: 0 !important;
         width: 32px;
+      }
+      .monwui-serr-calendar-switch span {
+        display: none;
       }
       .monwui-serr-calendar-close {
         font-size: 19px;
@@ -1267,6 +1805,10 @@ function ensureSerrCalendarModal() {
         <button type="button" class="monwui-serr-calendar-nav" data-serr-calendar-today aria-label="${escapeHtml(L("today", "Bugün"))}"><i class="fas fa-calendar-day" aria-hidden="true"></i></button>
         <div class="monwui-serr-calendar-title" data-serr-calendar-title></div>
         <button type="button" class="monwui-serr-calendar-nav" data-serr-calendar-next aria-label="${escapeHtml(L("next", "Sonraki"))}"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
+        <button type="button" class="monwui-serr-calendar-switch" data-serr-calendar-open-manager title="${escapeHtml(L("serrManageRequests", "İstekleri Yönet"))}" aria-label="${escapeHtml(L("serrManageRequests", "İstekleri Yönet"))}">
+          <i class="fas fa-list-ul" aria-hidden="true"></i>
+          <span>${escapeHtml(L("serrRequestsShort", "İstekler"))}</span>
+        </button>
         <button type="button" class="monwui-serr-calendar-close" data-serr-calendar-close aria-label="${escapeHtml(L("close", "Kapat"))}">×</button>
       </div>
       <div class="monwui-serr-calendar-body">
@@ -1284,6 +1826,10 @@ function ensureSerrCalendarModal() {
     }
     if (event.target?.closest?.("[data-serr-calendar-close]")) {
       closeSerrCalendarModal();
+      return;
+    }
+    if (event.target?.closest?.("[data-serr-calendar-open-manager]")) {
+      switchToSerrRequestsModal();
       return;
     }
     if (event.target?.closest?.("[data-serr-calendar-prev]")) {
@@ -1351,6 +1897,11 @@ async function openSerrCalendarModal() {
   modal.classList.add("open");
   modal.setAttribute("aria-hidden", "false");
   await renderSerrCalendarModal(modal);
+}
+
+function switchToSerrRequestsModal() {
+  closeSerrCalendarModal();
+  void openSerrRequestsModal();
 }
 
 async function renderSerrCalendarModal(modal) {
@@ -1863,6 +2414,7 @@ function renderRequest(req, isAdmin) {
 }
 
 function ensureSerrRequestsModal() {
+  ensureSerrProgressStyles();
   let modal = document.getElementById("monwuiSerrRequestsModal");
   if (modal) return modal;
 
@@ -1875,12 +2427,22 @@ function ensureSerrRequestsModal() {
     <div class="monwui-serr-requests-dialog" role="dialog" aria-modal="true">
       <div class="monwui-serr-requests-head">
         <div class="monwui-serr-requests-title">${escapeHtml(L("serrRequestsModalTitle", "Seerr İstek Yönetimi"))}</div>
-        <button type="button" class="monwui-serr-requests-close" data-serr-manager-close aria-label="${escapeHtml(L("close", "Kapat"))}">×</button>
+        <div class="monwui-serr-requests-actions">
+          <button type="button" class="monwui-serr-requests-switch monwui-serr-mini-btn" data-serr-manager-open-calendar title="${escapeHtml(L("serrCalendarTitle", "Arr Takvimi"))}" aria-label="${escapeHtml(L("serrCalendarTitle", "Arr Takvimi"))}">
+            <i class="fas fa-calendar-alt" aria-hidden="true"></i>
+            <span>${escapeHtml(L("serrCalendarButton", "Takvim"))}</span>
+          </button>
+          <button type="button" class="monwui-serr-requests-close" data-serr-manager-close aria-label="${escapeHtml(L("close", "Kapat"))}">×</button>
+        </div>
       </div>
       <div class="monwui-serr-requests-body"></div>
     </div>
   `;
   modal.addEventListener("click", (event) => {
+    if (event.target?.closest?.("[data-serr-manager-open-calendar]")) {
+      switchToSerrCalendarModal();
+      return;
+    }
     if (event.target?.closest?.("[data-serr-manager-close]")) {
       closeSerrRequestsModal();
     }
@@ -1908,6 +2470,11 @@ async function openSerrRequestsModal() {
   const data = await refreshSerrRequestManager({ render: false, showError: true });
   if (data) renderSerrRequestManager();
   scheduleNextPoll(nextPollDelay());
+}
+
+function switchToSerrCalendarModal() {
+  closeSerrRequestsModal();
+  void openSerrCalendarModal();
 }
 
 async function refreshSerrRequestManager({ render = false, showError = render } = {}) {
@@ -1948,28 +2515,475 @@ async function refreshSerrRequestManager({ render = false, showError = render } 
   return managerRefreshPromise;
 }
 
+function searchText(value) {
+  const clean = text(value);
+  if (!clean) return "";
+  const normalized = clean.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  try {
+    return normalized.toLocaleLowerCase(getEffectiveLanguage?.() || undefined);
+  } catch {
+    return normalized.toLowerCase();
+  }
+}
+
+function managerRequestId(req) {
+  return text(req?.Id || req?.id);
+}
+
+function managerRequestKey(req) {
+  const id = requestMediaId(req);
+  return id > 0 ? `${requestMediaType(req)}:${id}` : "";
+}
+
+function resultKey(result) {
+  const mediaType = resultMediaType(result);
+  const id = Number(result?.id || result?.tmdbId || result?.tmdb_id || 0);
+  return mediaType && Number.isFinite(id) && id > 0 ? `${mediaType}:${Math.floor(id)}` : "";
+}
+
+function managerRequestForResult(result) {
+  const key = resultKey(result);
+  if (!key) return null;
+  return managerRequests.find((req) => managerRequestKey(req) === key) || null;
+}
+
+function managerRequestDomTitle(req) {
+  const id = managerRequestId(req);
+  if (!id) return "";
+  const cards = Array.from(document.querySelectorAll("#monwuiSerrRequestsModal [data-serr-request-id]"));
+  const card = cards.find((node) => text(node.getAttribute("data-serr-request-id")) === id);
+  return text(card?.querySelector?.(".monwui-serr-request-name")?.textContent);
+}
+
+function managerRequestDisplayTitle(req) {
+  const requestId = Number(req?.SerrRequestId || req?.serrRequestId || 0);
+  const direct = text(
+    readFirst(req, "Title", "title", "Name", "name", "MediaTitle", "mediaTitle", "media_title", "OriginalTitle", "originalTitle", "original_title", "OriginalName", "originalName", "original_name")
+  );
+  if (direct && !isGeneratedSerrTitle(direct, { SerrRequestId: requestId })) return direct;
+
+  const cachedTitle = metadataTitle(metadataCache.get(posterCacheKey(req)));
+  if (cachedTitle) return cachedTitle;
+
+  const domTitle = managerRequestDomTitle(req);
+  if (domTitle && !isGeneratedSerrTitle(domTitle, { SerrRequestId: requestId })) return domTitle;
+
+  return direct || text(req?.Title || req?.title, L("serrUntitled", "Content"));
+}
+
+function addManagerRequestMatch(output, seen, req) {
+  const id = managerRequestId(req) || managerRequestKey(req);
+  if (!id || seen.has(id)) return;
+  seen.add(id);
+  output.push(req);
+}
+
+function managerRequestSearchBlob(req) {
+  const requestedBy = req?.requestedBy?.userName || req?.RequestedBy?.UserName || "";
+  const cachedTitle = metadataTitle(metadataCache.get(posterCacheKey(req)));
+  const domTitle = managerRequestDomTitle(req);
+  return [
+    managerRequestDisplayTitle(req),
+    cachedTitle,
+    domTitle,
+    readFirst(req, "Title", "title", "Name", "name", "MediaTitle", "mediaTitle", "media_title", "OriginalTitle", "originalTitle", "original_title", "OriginalName", "originalName", "original_name"),
+    mediaLabel(req),
+    statusLabel(req?.Status || req?.status),
+    req?.MediaId,
+    req?.mediaId,
+    req?.SerrRequestId ? `Seerr #${req.SerrRequestId}` : "",
+    req?.serrRequestId ? `Seerr #${req.serrRequestId}` : "",
+    requestedBy
+  ].filter(Boolean).join(" ");
+}
+
+function managerRequestSearchMatches(query, catalogResults = managerSearchState.results, limit = 10) {
+  const needle = searchText(query);
+  if (needle.length < 2) return [];
+  const output = [];
+  const seen = new Set();
+
+  for (const req of managerRequests) {
+    if (!searchText(managerRequestSearchBlob(req)).includes(needle)) continue;
+    addManagerRequestMatch(output, seen, req);
+    if (output.length >= limit) return output;
+  }
+
+  const catalogKeys = new Set(
+    (Array.isArray(catalogResults) ? catalogResults : [])
+      .map((result) => resultKey(result))
+      .filter(Boolean)
+  );
+  if (!catalogKeys.size) return output;
+
+  for (const req of managerRequests) {
+    const key = managerRequestKey(req);
+    if (!key || !catalogKeys.has(key)) continue;
+    addManagerRequestMatch(output, seen, req);
+    if (output.length >= limit) break;
+  }
+
+  return output;
+}
+
+function renderManagerSearchShell() {
+  const query = text(managerSearchState.query);
+  const resultsHtml = managerSearchResultsHtml();
+  return `
+    <div class="monwui-serr-manager-search">
+      <div class="monwui-serr-manager-searchbar">
+        <i class="fas fa-search" aria-hidden="true"></i>
+        <input
+          class="monwui-serr-manager-search-input"
+          data-serr-manager-search-input
+          type="search"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="${escapeHtml(L("serrManagerSearchPlaceholder", "Search movies, series, or boxsets"))}"
+          value="${escapeHtml(query)}">
+        <button type="button" class="monwui-serr-manager-search-run" data-serr-manager-search-run ${managerSearchState.loading ? "disabled" : ""}>
+          <i class="fas fa-search" aria-hidden="true"></i><span>${escapeHtml(L("search", "Search"))}</span>
+        </button>
+      </div>
+      <div class="monwui-serr-manager-results" data-serr-manager-search-results ${resultsHtml ? "" : "hidden"}>
+        ${resultsHtml}
+      </div>
+    </div>
+  `;
+}
+
+function managerSearchResultsHtml() {
+  const query = text(managerSearchState.query);
+  if (query && query.length < 2) {
+    return `<div class="monwui-serr-empty">${escapeHtml(L("serrSearchHint", "Type at least 2 characters to search."))}</div>`;
+  }
+  if (!query) return "";
+
+  const requestMatches = managerRequestSearchMatches(query);
+  const blocks = [];
+  if (requestMatches.length) {
+    blocks.push(`
+      <div class="monwui-serr-manager-result-section">
+        <div class="monwui-serr-manager-section-title">${escapeHtml(L("serrManagerRequestedSection", "Existing requests"))}</div>
+        ${requestMatches.map((req, index) => renderManagerRequestedSearchResult(req, index)).join("")}
+      </div>
+    `);
+  }
+  if (managerSearchState.loading) {
+    blocks.push(`<div class="monwui-serr-loading">${escapeHtml(L("loadingText", "Loading..."))}</div>`);
+  } else if (managerSearchState.error) {
+    blocks.push(`<div class="monwui-serr-error">${escapeHtml(managerSearchState.error)}</div>`);
+  }
+  if (managerSearchState.results.length) {
+    blocks.push(`
+      <div class="monwui-serr-manager-result-section">
+        <div class="monwui-serr-manager-section-title">${escapeHtml(L("serrManagerCatalogSection", "Seerr & Arr results"))}</div>
+        ${managerSearchState.results.map((result, index) => renderManagerSearchResult(result, index)).join("")}
+      </div>
+    `);
+  }
+  if (!blocks.length && managerSearchState.searched) {
+    return `<div class="monwui-serr-empty">${escapeHtml(L("serrNoResults", "No results found in Seerr & Arr."))}</div>`;
+  }
+  return blocks.join("");
+}
+
+function renderManagerRequestedSearchResult(req, index) {
+  const id = managerRequestId(req);
+  const status = text(req?.Status || req?.status).toLowerCase() || "pending";
+  const title = managerRequestDisplayTitle(req);
+  const requestedBy = req?.requestedBy?.userName || req?.RequestedBy?.UserName || "";
+  const updated = formatTime(req?.UpdatedAtUtc || req?.updatedAtUtc || req?.CreatedAtUtc || req?.createdAtUtc);
+  const meta = [mediaLabel(req), statusLabel(status), requestedBy, updated].filter(Boolean).join(" • ");
+  return `
+    <article class="monwui-serr-manager-result requested">
+      ${renderPoster(req, "monwui-serr-manager-result-poster")}
+      <div class="monwui-serr-manager-result-content">
+        <div class="monwui-serr-manager-result-name">${escapeHtml(title)}</div>
+        <div class="monwui-serr-manager-result-meta">${escapeHtml(meta)}</div>
+      </div>
+      <button type="button" class="monwui-serr-manager-result-btn" data-serr-manager-request-match="${escapeHtml(id)}" data-serr-manager-request-index="${escapeHtml(index)}" ${id ? "" : "disabled"}>
+        <i class="fas fa-eye" aria-hidden="true"></i>
+        <span>${escapeHtml(L("serrManagerShowRequest", "Show request"))}</span>
+      </button>
+    </article>
+  `;
+}
+
+function renderManagerSearchResult(result, index) {
+  const mediaType = resultMediaType(result);
+  const title = resultTitle(result);
+  const poster = resultPosterUrl(result);
+  const overview = text(result?.overview || result?.Overview);
+  const existingRequest = managerRequestForResult(result);
+  const existingRequestId = managerRequestId(existingRequest);
+  const fallback = mediaType === "tv"
+    ? L("serrTv", "Series")
+    : (mediaType === "collection" ? L("boxset", "Collection") : L("serrMovie", "Movie"));
+  return `
+    <article class="monwui-serr-manager-result ${existingRequest ? "requested" : ""}">
+      <div class="monwui-serr-manager-result-poster">
+        ${poster ? `<img src="${escapeHtml(poster)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">` : `<span>${escapeHtml(fallback)}</span>`}
+      </div>
+      <div class="monwui-serr-manager-result-content">
+        <div class="monwui-serr-manager-result-name">${escapeHtml(title)}</div>
+        <div class="monwui-serr-manager-result-meta">${escapeHtml(resultMeta(result))}</div>
+        ${overview ? `<div class="monwui-serr-manager-result-overview">${escapeHtml(overview)}</div>` : ""}
+      </div>
+      ${existingRequestId ? `
+        <button type="button" class="monwui-serr-manager-result-btn" data-serr-manager-request-match="${escapeHtml(existingRequestId)}">
+          <i class="fas fa-eye" aria-hidden="true"></i>
+          <span>${escapeHtml(L("serrManagerShowRequest", "Show request"))}</span>
+        </button>
+      ` : `
+        <button type="button" class="monwui-serr-manager-result-btn" data-serr-manager-result-request="${escapeHtml(index)}">
+          <i class="fas ${mediaType === "collection" ? "fa-layer-group" : "fa-paper-plane"}" aria-hidden="true"></i>
+          <span>${escapeHtml(L("serrRequestButton", "Request"))}</span>
+        </button>
+      `}
+    </article>
+  `;
+}
+
+function renderManagerSearchResults(scope = document) {
+  const host = scope.querySelector?.("[data-serr-manager-search-results]");
+  const html = managerSearchResultsHtml();
+  if (host) {
+    host.innerHTML = html;
+    if (html) host.removeAttribute("hidden");
+    else host.setAttribute("hidden", "hidden");
+    bindManagerSearchResultButtons(host);
+  }
+
+  const query = text(managerSearchState.query);
+  const input = scope.querySelector?.("[data-serr-manager-search-input]");
+  if (input && input.value !== query && document.activeElement !== input) input.value = query;
+  const run = scope.querySelector?.("[data-serr-manager-search-run]");
+  if (run) run.disabled = managerSearchState.loading;
+}
+
+function bindManagerSearch(scope = document) {
+  const input = scope.querySelector?.("[data-serr-manager-search-input]");
+  const run = scope.querySelector?.("[data-serr-manager-search-run]");
+
+  if (input && !input.__monwuiSerrManagerSearchBound) {
+    input.__monwuiSerrManagerSearchBound = true;
+    input.addEventListener("input", () => {
+      managerSearchState.query = text(input.value);
+      managerSearchState.error = "";
+      if (managerSearchState.query.length < 2) {
+        managerSearchState.results = [];
+        managerSearchState.loading = false;
+        managerSearchState.searched = false;
+        managerSearchSeq += 1;
+        renderManagerSearchResults(scope);
+        return;
+      }
+      managerSearchState.results = [];
+      managerSearchState.searched = false;
+      clearTimeout(managerSearchTimer);
+      managerSearchTimer = setTimeout(() => runManagerSearch(scope).catch(() => {}), 350);
+      renderManagerSearchResults(scope);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      clearTimeout(managerSearchTimer);
+      runManagerSearch(scope).catch(() => {});
+    });
+  }
+
+  if (run && !run.__monwuiSerrManagerSearchBound) {
+    run.__monwuiSerrManagerSearchBound = true;
+    run.addEventListener("click", () => {
+      clearTimeout(managerSearchTimer);
+      runManagerSearch(scope).catch(() => {});
+    });
+  }
+
+  bindManagerSearchResultButtons(scope);
+}
+
+function bindManagerSearchResultButtons(scope = document) {
+  scope.querySelectorAll?.("[data-serr-manager-request-match]").forEach((button) => {
+    if (button.__monwuiSerrManagerMatchBound) return;
+    button.__monwuiSerrManagerMatchBound = true;
+    button.addEventListener("click", () => {
+      focusManagerRequestCard(button.getAttribute("data-serr-manager-request-match"));
+    });
+  });
+  scope.querySelectorAll?.("[data-serr-manager-result-request]").forEach((button) => {
+    if (button.__monwuiSerrManagerResultBound) return;
+    button.__monwuiSerrManagerResultBound = true;
+    button.addEventListener("click", () => {
+      const index = Number(button.getAttribute("data-serr-manager-result-request"));
+      const result = managerSearchState.results[index];
+      if (result) requestManagerSearchResult(button, result).catch(() => {});
+    });
+  });
+}
+
+function focusManagerRequestCard(id) {
+  const clean = text(id);
+  if (!clean) return;
+  const cards = Array.from(document.querySelectorAll("#monwuiSerrRequestsModal [data-serr-request-id]"));
+  const card = cards.find((node) => text(node.getAttribute("data-serr-request-id")) === clean);
+  if (!card) return;
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("monwui-serr-request-card-hit");
+  clearTimeout(card.__monwuiSerrHitTimer);
+  card.__monwuiSerrHitTimer = setTimeout(() => {
+    card.classList.remove("monwui-serr-request-card-hit");
+  }, 1800);
+}
+
+async function runManagerSearch(scope = document) {
+  const body = scope.closest?.(".monwui-serr-requests-body") || scope;
+  const input = body.querySelector?.("[data-serr-manager-search-input]");
+  const query = input ? text(input.value) : text(managerSearchState.query);
+  managerSearchState.query = query;
+
+  if (query.length < 2) {
+    managerSearchSeq += 1;
+    managerSearchState.results = [];
+    managerSearchState.loading = false;
+    managerSearchState.searched = query.length > 0;
+    managerSearchState.error = "";
+    renderManagerSearchResults(body);
+    return;
+  }
+
+  const seq = managerSearchSeq + 1;
+  managerSearchSeq = seq;
+  managerSearchState.loading = true;
+  managerSearchState.searched = true;
+  managerSearchState.error = "";
+  managerSearchState.results = [];
+  renderManagerSearchResults(body);
+
+  try {
+    const access = await getSerrAccess();
+    if (seq !== managerSearchSeq) return;
+    if (!access?.enabled) {
+      managerSearchState.error = L("serrDisabled", "Seerr integration is disabled.");
+      managerSearchState.results = [];
+      return;
+    }
+
+    const language = access?.settings?.defaultLanguage || serrLanguage();
+    const tmdbSearch = parseManagerTmdbSearch(query);
+    let results = [];
+
+    if (tmdbSearch) {
+      const [tmdbResults, textData, collectionData] = await Promise.all([
+        searchManagerSerrByTmdbId({ ...tmdbSearch, language }),
+        searchSerr(query, { language }).catch(() => null),
+        searchSerrCollections(query, { language }).catch(() => null)
+      ]);
+      results = mergeManagerSearchResults(
+        tmdbResults,
+        normalizeCollectionSearchResults(collectionData),
+        Array.isArray(textData?.results) ? textData.results : []
+      );
+    } else {
+      const [page1, page2, collections] = await Promise.all([
+        searchSerr(query, { page: 1, language }),
+        searchSerr(query, { page: 2, language }),
+        searchSerrCollections(query, { language }).catch(() => null)
+      ]);
+      results = mergeManagerSearchResults(
+        normalizeCollectionSearchResults(collections),
+        Array.isArray(page1?.results) ? page1.results : [],
+        Array.isArray(page2?.results) ? page2.results : []
+      );
+    }
+
+    if (seq !== managerSearchSeq) return;
+    managerSearchState.results = balancedManagerSearchResults(results);
+  } catch (error) {
+    if (seq !== managerSearchSeq) return;
+    managerSearchState.results = [];
+    managerSearchState.error = error?.message || L("serrSearchFailed", "Seerr & Arr search failed.");
+  } finally {
+    if (seq === managerSearchSeq) {
+      managerSearchState.loading = false;
+      renderManagerSearchResults(body);
+    }
+  }
+}
+
+async function requestManagerSearchResult(button, result) {
+  if (!button || button.disabled) return;
+  const mediaType = resultMediaType(result);
+  const id = Number(result?.id || result?.tmdbId || result?.tmdb_id || 0);
+  if (!mediaType || !Number.isFinite(id) || id <= 0) {
+    notify(L("serrTmdbMissing", "TMDb ID not found. Continue with Seerr & Arr search."), "error");
+    return;
+  }
+
+  const old = button.innerHTML;
+  try {
+    button.disabled = true;
+    if (mediaType === "collection") {
+      button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("loadingText", "Loading..."))}</span>`;
+      const response = await openSerrCollectionRequestModal(result, { source: "seerr-manager" });
+      if (response?.submitted || response?.empty) {
+        const data = await refreshSerrRequestManager({ render: false, showError: false });
+        if (data) renderSerrRequestManager();
+      }
+      return;
+    }
+
+    const tvdbId = Number(result?.tvdbId || result?.tvdb_id || result?.TvdbId || 0);
+    const response = await requestSerrFromItem(managerSearchResultItem(result), {
+      source: "seerr-manager",
+      mediaType,
+      mediaId: Math.floor(id),
+      tvdbId: Number.isFinite(tvdbId) && tvdbId > 0 ? Math.floor(tvdbId) : undefined,
+      title: resultTitle(result),
+      posterUrl: resultPosterUrl(result, "w342"),
+      requestAllSeasons: mediaType === "tv",
+      onBeforeSubmit: () => {
+        button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestSending", "Sending..."))}</span>`;
+      }
+    });
+
+    if (response?.cancelled) return;
+    const data = await refreshSerrRequestManager({ render: false, showError: false });
+    if (data) renderSerrRequestManager();
+  } catch (error) {
+    notify(error?.message || L("serrRequestFailed", "Unable to create the request."), "error");
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.innerHTML = old;
+    }
+  }
+}
+
 function renderSerrRequestManager() {
   ensureSerrProgressStyles();
   const modal = ensureSerrRequestsModal();
   const body = modal.querySelector(".monwui-serr-requests-body");
   if (!body) return;
 
-  if (!managerRequests.length) {
-    body.innerHTML = `<div class="monwui-serr-empty">${escapeHtml(L("serrNoRequestHistory", "Seerr istek geçmişi yok."))}</div>`;
-    return;
-  }
-
   body.innerHTML = `
-    <div class="monwui-serr-requests-list">
-      ${managerRequests.map((req) => renderManagerRequest(req, managerIsAdmin)).join("")}
-    </div>
+    ${renderManagerSearchShell()}
+    ${managerRequests.length
+      ? `<div class="monwui-serr-requests-list">${managerRequests.map((req) => renderManagerRequest(req, managerIsAdmin)).join("")}</div>`
+      : `<div class="monwui-serr-empty">${escapeHtml(L("serrNoRequestHistory", "Seerr istek geçmişi yok."))}</div>`}
   `;
+
+  bindManagerSearch(body);
 
   body.querySelectorAll("[data-serr-manager-approve]").forEach((btn) => {
     btn.addEventListener("click", () => runManagerAction(btn, () => approveSerrRequestWithArrFallback(btn.getAttribute("data-serr-manager-approve"))));
   });
   body.querySelectorAll("[data-serr-manager-decline]").forEach((btn) => {
     btn.addEventListener("click", () => runManagerAction(btn, () => declineSerrRequest(btn.getAttribute("data-serr-manager-decline"))));
+  });
+  body.querySelectorAll("[data-serr-manager-upgrade4k]").forEach((btn) => {
+    btn.addEventListener("click", () => runManagerAction(btn, () => upgradeSerrRequest4K(btn.getAttribute("data-serr-manager-upgrade4k"))));
   });
   body.querySelectorAll("[data-serr-manager-withdraw]").forEach((btn) => {
     btn.addEventListener("click", () => runManagerAction(btn, () => withdrawSerrRequest(btn.getAttribute("data-serr-manager-withdraw"))));
@@ -1988,14 +3002,19 @@ function renderManagerRequest(req, isAdmin) {
   const completed = formatTime(req?.CompletedAtUtc || req?.completedAtUtc);
   const error = text(req?.Error || req?.error);
   const canApprove = isAdmin && (status === "pending" || status === "failed");
-  const canDecline = isAdmin && status !== "declined" && status !== "withdrawn" && status !== "completed" && status !== "available";
+  const canDecline = isAdmin && (status === "pending" || status === "failed");
+  const canUpgrade4K = isAdmin && id && !requestIs4K(req) &&
+    status !== "completed" &&
+    status !== "available" &&
+    status !== "declined" &&
+    status !== "withdrawn";
   const canWithdraw = id && (
     (isAdmin && status !== "withdrawn" && status !== "completed" && status !== "available") ||
     (!isAdmin && status === "pending")
   );
 
   return `
-    <section class="monwui-serr-request-card" data-serr-request-id="${escapeHtml(id)}">
+    <section class="monwui-serr-request-card" data-serr-request-id="${escapeHtml(id)}" data-serr-request-status="${escapeHtml(status)}">
       <div class="monwui-serr-request-main">
         ${renderPoster(req, "large")}
         <div class="monwui-serr-request-content">
@@ -2011,6 +3030,7 @@ function renderManagerRequest(req, isAdmin) {
         <div class="monwui-serr-request-actions">
           ${canApprove ? `<button type="button" class="monwui-serr-mini-btn primary" data-serr-manager-approve="${escapeHtml(id)}">${escapeHtml(L("serrApprove", "Onayla"))}</button>` : ""}
           ${canDecline ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-decline="${escapeHtml(id)}">${escapeHtml(L("serrDecline", "Reddet"))}</button>` : ""}
+          ${canUpgrade4K ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-upgrade4k="${escapeHtml(id)}">${escapeHtml(L("serrRequest4KButton", "4K İste"))}</button>` : ""}
           ${canWithdraw ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-withdraw="${escapeHtml(id)}">${escapeHtml(L("serrWithdraw", "Geri Çek"))}</button>` : ""}
         </div>
       </div>
@@ -2038,6 +3058,10 @@ function updateVisibleSerrRequestManager() {
     if (managerRequests.length) renderSerrRequestManager();
     return;
   }
+  if (cards.length !== managerRequests.length) {
+    renderSerrRequestManager();
+    return;
+  }
 
   const requestsById = new Map(
     managerRequests
@@ -2051,6 +3075,10 @@ function updateVisibleSerrRequestManager() {
     if (!req) continue;
 
     const status = text(req?.Status || req?.status).toLowerCase() || "pending";
+    if (text(card.getAttribute("data-serr-request-status")) !== status) {
+      renderSerrRequestManager();
+      return;
+    }
     const statusNode = card.querySelector("[data-serr-status]");
     if (statusNode) {
       statusNode.className = `monwui-serr-status ${status}`;

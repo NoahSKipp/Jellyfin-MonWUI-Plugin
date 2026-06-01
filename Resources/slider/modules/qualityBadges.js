@@ -325,25 +325,27 @@ function ensureBadgeStyle() {
   style.textContent = `
     .quality-badge {
       position: absolute;
-      bottom: 40px;
+      top: 0;
       right: 0;
       padding: 4px;
       color: white;
       display: inline-flex;
-      flex-direction: column;
-      align-items: center;
+      flex-direction: row;
       z-index: 10;
       pointer-events: none;
       font-weight: 600;
       text-shadow: 0 1px 2px rgba(0,0,0,.6);
-    }
+      width: 100%;
+      box-sizing: border-box;
+      align-items: center;
+  }
     .quality-badge .quality-text {
       display: inline-flex;
       flex-direction: column;
       gap: 2px;
       line-height: 1;
-      align-items: flex-end;
-    }
+      align-items: flex-start;
+  }
   `;
   document.head.appendChild(style);
 }

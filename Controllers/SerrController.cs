@@ -38,6 +38,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
         private const int LocalAvailabilityScanCacheMs = 20_000;
         private const int ArrQueueCacheMs = 2_000;
         private const int ArrLookupCacheMs = 60_000;
+        private const int MaxSerrRequestLookupPages = 10;
         private static readonly object ArrRecordsCacheRoot = new();
         private static readonly Dictionary<string, ArrRecordCacheEntry> ArrRecordsCache = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, Task<List<JsonElement>>> ArrRecordsInFlight = new(StringComparer.OrdinalIgnoreCase);
@@ -474,6 +475,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 ShouldRunSerrListSync())
             {
                 await SyncActiveRequests(cancellationToken);
+                await SyncExternalSerrRequests(cancellationToken);
                 cfg = GetConfig();
             }
             if (includeDownloads && ShouldRunLocalAvailabilityScan() && CompleteLocallyAvailableRequests())
@@ -521,7 +523,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             {
                 var cfg = GetConfig();
                 SerrRequestStore.Save(cfg);
-                entry = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, id));
+                var found = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, id));
+                entry = found is null ? null : CloneEntry(found);
             }
 
             if (entry is null)
@@ -539,22 +542,19 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return StatusCode(409, new { ok = false, error = "Only pending requests can be withdrawn by the requester." });
             }
 
-            var warning = string.Empty;
-            if (isAdmin && entry.SerrRequestId.HasValue && entry.SerrRequestId.Value > 0)
+            var warnings = new List<string>();
+            if (isAdmin)
             {
                 var cfgForDelete = GetConfig();
-                var delete = await SendSerrAsync(
-                    cfgForDelete,
-                    HttpMethod.Delete,
-                    "/request/" + entry.SerrRequestId.Value.ToString(CultureInfo.InvariantCulture),
-                    null,
-                    cancellationToken);
-                if (!delete.Ok)
-                {
-                    warning = delete.Error;
-                }
+
+                var serrWarning = await WithdrawFromSerr(cfgForDelete, entry, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(serrWarning)) warnings.Add(serrWarning);
+
+                var arrWarning = await WithdrawFromArr(cfgForDelete, entry, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(arrWarning)) warnings.Add(arrWarning);
             }
 
+            var warning = string.Join(" | ", warnings.Where(value => !string.IsNullOrWhiteSpace(value)));
             lock (SyncRoot)
             {
                 var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
@@ -613,7 +613,15 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 });
             }
 
-            var submission = await SubmitAndPersist(entry.Id, adminCheck.UserId, cancellationToken);
+            RequestSubmissionResult submission;
+            if (entry.SerrRequestId.HasValue && entry.SerrRequestId.Value > 0)
+            {
+                submission = await UpdateExistingSerrRequestAndPersist(entry.Id, "approve", cancellationToken);
+            }
+            else
+            {
+                submission = await SubmitAndPersist(entry.Id, adminCheck.UserId, cancellationToken);
+            }
             entry = GetRequestById(id) ?? entry;
 
             NoCache();
@@ -627,8 +635,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             });
         }
 
-        [HttpPost("requests/{id}/decline")]
-        public IActionResult DeclineRequest(string id)
+        [HttpPost("requests/{id}/upgrade4k")]
+        public async Task<IActionResult> UpgradeRequestTo4K(string id, CancellationToken cancellationToken)
         {
             var adminCheck = TryGetAdminUser();
             if (adminCheck.Result is not null)
@@ -636,7 +644,165 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return adminCheck.Result;
             }
 
-            SerrRequestEntry? entry = null;
+            var cfg = GetConfig();
+            if (!cfg.SerrEnable4KRequests)
+            {
+                return StatusCode(403, new { ok = false, error = "4K requests are disabled." });
+            }
+
+            var entry = GetRequestById(id);
+            if (entry is null)
+            {
+                return NotFound(new { ok = false, error = "Request not found." });
+            }
+
+            if (entry.Is4K)
+            {
+                NoCache();
+                return Ok(new { ok = true, request = ToRequestDto(entry, includeAdminFields: true) });
+            }
+
+            if (!CanUpgradeTo4K(entry))
+            {
+                return StatusCode(409, new { ok = false, error = "This request cannot be converted to 4K." });
+            }
+
+            var upgradeEntry = CloneEntry(entry);
+            upgradeEntry.Is4K = true;
+            if (!CanSubmitTo4KBackend(cfg, upgradeEntry))
+            {
+                return StatusCode(412, new { ok = false, error = "No configured 4K Seerr or Arr backend can handle this request." });
+            }
+
+            var blocker = FindBlockingDuplicate(upgradeEntry, includePending: true);
+            if (blocker is not null)
+            {
+                NoCache();
+                return StatusCode(409, new
+                {
+                    ok = false,
+                    duplicate = true,
+                    duplicateOwnedByCurrentUser = Same(blocker.JellyfinUserId, adminCheck.UserId.ToString("D")),
+                    duplicateStatus = blocker.Status,
+                    error = BuildDuplicateMessage(blocker, adminCheck.UserId),
+                    request = ToRequestDto(blocker, includeAdminFields: true)
+                });
+            }
+
+            if (Same(entry.Status, "pending"))
+            {
+                lock (SyncRoot)
+                {
+                    var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
+                    cfg = plugin.Configuration;
+                    SerrRequestStore.Save(cfg);
+                    var current = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, id));
+                    if (current is null)
+                    {
+                        return NotFound(new { ok = false, error = "Request not found." });
+                    }
+
+                    current.Is4K = true;
+                    current.Error = string.Empty;
+                    current.UpdatedAtUtc = NowMs();
+                    TouchSerr(cfg);
+                    SerrRequestStore.Save(cfg);
+                    plugin.UpdateConfiguration(cfg);
+                    entry = CloneEntry(current);
+                }
+
+                NoCache();
+                return Ok(new { ok = true, pendingApproval = true, request = ToRequestDto(entry, includeAdminFields: true) });
+            }
+
+            var cleanupWarnings = new List<string>();
+            if (ShouldCleanupArrOnWithdraw(entry))
+            {
+                var cleanupCfg = GetConfig();
+                var serrWarning = await WithdrawFromSerr(cleanupCfg, entry, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(serrWarning)) cleanupWarnings.Add(serrWarning);
+                var arrWarning = await WithdrawFromArr(cleanupCfg, entry, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(arrWarning)) cleanupWarnings.Add(arrWarning);
+            }
+
+            if (cleanupWarnings.Any())
+            {
+                return StatusCode(502, new
+                {
+                    ok = false,
+                    error = string.Join(" | ", cleanupWarnings)
+                });
+            }
+
+            lock (SyncRoot)
+            {
+                var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
+                cfg = plugin.Configuration;
+                SerrRequestStore.Save(cfg);
+                var current = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, id));
+                if (current is null)
+                {
+                    return NotFound(new { ok = false, error = "Request not found." });
+                }
+
+                current.Is4K = true;
+                current.Status = "approved";
+                current.SerrRequestId = null;
+                current.SerrMediaStatus = null;
+                current.SerrRequestStatus = null;
+                current.CompletedAtUtc = 0;
+                current.Error = string.Empty;
+                current.UpdatedAtUtc = NowMs();
+                TouchSerr(cfg);
+                SerrRequestStore.Save(cfg);
+                plugin.UpdateConfiguration(cfg);
+            }
+
+            var submission = await SubmitAndPersist(id, adminCheck.UserId, cancellationToken, strict4KArr: true);
+            entry = GetRequestById(id) ?? upgradeEntry;
+
+            NoCache();
+            return Ok(new
+            {
+                ok = string.IsNullOrWhiteSpace(entry.Error),
+                request = ToRequestDto(entry, includeAdminFields: true),
+                backend = string.IsNullOrWhiteSpace(submission.Backend) ? null : submission.Backend,
+                service = string.IsNullOrWhiteSpace(submission.Service) ? null : submission.Service,
+                error = string.IsNullOrWhiteSpace(entry.Error) ? null : entry.Error
+            });
+        }
+
+        [HttpPost("requests/{id}/decline")]
+        public async Task<IActionResult> DeclineRequest(string id, CancellationToken cancellationToken)
+        {
+            var adminCheck = TryGetAdminUser();
+            if (adminCheck.Result is not null)
+            {
+                return adminCheck.Result;
+            }
+
+            var entry = GetRequestById(id);
+            if (entry is null)
+            {
+                return NotFound(new { ok = false, error = "Request not found." });
+            }
+
+            if (entry.SerrRequestId.HasValue && entry.SerrRequestId.Value > 0)
+            {
+                var submission = await UpdateExistingSerrRequestAndPersist(entry.Id, "decline", cancellationToken);
+                entry = GetRequestById(id) ?? entry;
+
+                NoCache();
+                return Ok(new
+                {
+                    ok = string.IsNullOrWhiteSpace(entry.Error),
+                    request = ToRequestDto(entry, includeAdminFields: true),
+                    backend = string.IsNullOrWhiteSpace(submission.Backend) ? null : submission.Backend,
+                    service = string.IsNullOrWhiteSpace(submission.Service) ? null : submission.Service,
+                    error = string.IsNullOrWhiteSpace(entry.Error) ? null : entry.Error
+                });
+            }
+
             lock (SyncRoot)
             {
                 var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
@@ -972,7 +1138,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return fallback;
         }
 
-        private async Task<RequestSubmissionResult> SubmitAndPersist(string entryId, Guid adminUserId, CancellationToken cancellationToken)
+        private async Task<RequestSubmissionResult> SubmitAndPersist(
+            string entryId,
+            Guid adminUserId,
+            CancellationToken cancellationToken,
+            bool strict4KArr = false)
         {
             SerrRequestEntry? entry;
             JMSFusionConfiguration cfg;
@@ -984,7 +1154,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             if (entry is null) return default;
 
-            var submission = await SubmitRequestBackend(cfg, entry, adminUserId, cancellationToken);
+            var submission = await SubmitRequestBackend(cfg, entry, adminUserId, cancellationToken, strict4KArr);
             var response = submission.Response;
             lock (SyncRoot)
             {
@@ -1025,18 +1195,20 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             JMSFusionConfiguration cfg,
             SerrRequestEntry entry,
             Guid adminUserId,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool strict4KArr = false)
         {
+            var canSubmitToArr = strict4KArr ? CanSubmitTo4KArr(cfg, entry) : CanSubmitToArr(cfg, entry);
             if (IsSerrConnectionConfigured(cfg))
             {
                 var serr = await SubmitToSeerr(cfg, entry, adminUserId, cancellationToken);
-                if (serr.Ok || !CanSubmitToArr(cfg, entry))
+                if (serr.Ok || !canSubmitToArr)
                 {
                     return new RequestSubmissionResult(serr, "serr", string.Empty);
                 }
             }
 
-            if (CanSubmitToArr(cfg, entry))
+            if (canSubmitToArr)
             {
                 return await SubmitToArr(cfg, entry, cancellationToken);
             }
@@ -1067,6 +1239,785 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 "arr",
                 string.Empty);
         }
+
+        private async Task<string> WithdrawFromSerr(JMSFusionConfiguration cfg, SerrRequestEntry entry, CancellationToken cancellationToken)
+        {
+            if (entry is null || !IsSerrConnectionConfigured(cfg)) return string.Empty;
+
+            var requestIds = new List<int>();
+            if (entry.SerrRequestId.HasValue && entry.SerrRequestId.Value > 0)
+            {
+                requestIds.Add(entry.SerrRequestId.Value);
+            }
+            else
+            {
+                var lookup = await FindMatchingSerrRequestIds(cfg, entry, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(lookup.Error)) return "Seerr: " + lookup.Error;
+                requestIds.AddRange(lookup.Ids);
+            }
+
+            var warnings = new List<string>();
+            foreach (var requestId in requestIds.Where(id => id > 0).Distinct())
+            {
+                var delete = await SendSerrAsync(
+                    cfg,
+                    HttpMethod.Delete,
+                    "/request/" + requestId.ToString(CultureInfo.InvariantCulture),
+                    null,
+                    cancellationToken);
+                if (!delete.Ok)
+                {
+                    warnings.Add("#" + requestId.ToString(CultureInfo.InvariantCulture) + ": " + delete.Error);
+                }
+            }
+
+            return warnings.Any() ? "Seerr: " + string.Join(" | ", warnings) : string.Empty;
+        }
+
+        private async Task<(List<int> Ids, string Error)> FindMatchingSerrRequestIds(
+            JMSFusionConfiguration cfg,
+            SerrRequestEntry entry,
+            CancellationToken cancellationToken)
+        {
+            var records = await FetchSerrRequestRecords(cfg, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(records.Error)) return (new List<int>(), records.Error);
+
+            var ids = records.Records
+                .Where(record => SerrRequestMatchesEntry(record, entry))
+                .Select(record => ReadIntValue(record, "id"))
+                .Where(id => id > 0)
+                .Distinct()
+                .ToList();
+
+            return (ids, string.Empty);
+        }
+
+        private async Task<RequestSubmissionResult> UpdateExistingSerrRequestAndPersist(
+            string entryId,
+            string action,
+            CancellationToken cancellationToken)
+        {
+            SerrRequestEntry? entry;
+            JMSFusionConfiguration cfg;
+            lock (SyncRoot)
+            {
+                cfg = GetConfig();
+                entry = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, entryId)) is { } found
+                    ? CloneEntry(found)
+                    : null;
+            }
+
+            if (entry is null || !entry.SerrRequestId.HasValue || entry.SerrRequestId.Value <= 0)
+            {
+                return new RequestSubmissionResult(
+                    SerrCallResult.Fail(404, "Request not found."),
+                    string.Empty,
+                    string.Empty);
+            }
+
+            if (!IsSerrConnectionConfigured(cfg))
+            {
+                return new RequestSubmissionResult(
+                    SerrCallResult.Fail(412, "Seerr URL and API key are required."),
+                    "serr",
+                    string.Empty);
+            }
+
+            var response = await SendSerrRequestAction(cfg, entry.SerrRequestId.Value, action, cancellationToken);
+            lock (SyncRoot)
+            {
+                var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
+                cfg = plugin.Configuration;
+                var current = cfg.SerrRequests.FirstOrDefault(x => Same(x.Id, entryId));
+                if (current is null) return new RequestSubmissionResult(response, "serr", string.Empty);
+
+                if (response.Ok)
+                {
+                    ApplySerrResponsePayload(current, response.Payload);
+                    if (Same(action, "approve") && Same(current.Status, "pending"))
+                    {
+                        current.Status = "approved";
+                    }
+                    else if (Same(action, "decline"))
+                    {
+                        current.Status = "declined";
+                    }
+                    MarkCompletedIfLocalAvailable(current);
+                    current.Error = string.Empty;
+                }
+                else
+                {
+                    current.Error = response.Error;
+                }
+
+                current.UpdatedAtUtc = NowMs();
+                TouchSerr(cfg);
+                SerrRequestStore.Save(cfg);
+                plugin.UpdateConfiguration(cfg);
+            }
+
+            return new RequestSubmissionResult(response, "serr", string.Empty);
+        }
+
+        private async Task<SerrCallResult> SendSerrRequestAction(
+            JMSFusionConfiguration cfg,
+            int requestId,
+            string action,
+            CancellationToken cancellationToken)
+        {
+            var cleanAction = Same(action, "decline") ? "decline" : "approve";
+            var id = requestId.ToString(CultureInfo.InvariantCulture);
+            var response = await SendSerrAsync(cfg, HttpMethod.Post, "/request/" + id + "/" + cleanAction, null, cancellationToken);
+            if (response.Ok || !Same(cleanAction, "approve")) return response;
+
+            return await SendSerrAsync(cfg, HttpMethod.Post, "/request/" + id + "/retry", null, cancellationToken);
+        }
+
+        private async Task SyncExternalSerrRequests(CancellationToken cancellationToken)
+        {
+            JMSFusionConfiguration cfg;
+            Dictionary<int, string> knownTitles;
+            lock (SyncRoot)
+            {
+                cfg = GetConfig();
+                if (!IsSerrConnectionConfigured(cfg)) return;
+                knownTitles = (cfg.SerrRequests ?? new List<SerrRequestEntry>())
+                    .Where(entry =>
+                        entry.SerrRequestId.HasValue &&
+                        entry.SerrRequestId.Value > 0 &&
+                        !IsGeneratedSerrTitle(entry.Title, entry.SerrRequestId.Value))
+                    .GroupBy(entry => entry.SerrRequestId!.Value)
+                    .ToDictionary(group => group.Key, group => group.First().Title);
+            }
+
+            var recordsResult = await FetchSerrRequestRecords(cfg, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(recordsResult.Error) || !recordsResult.Records.Any()) return;
+            var resolvedTitles = await ResolveSerrRequestTitles(cfg, recordsResult.Records, knownTitles, cancellationToken);
+
+            var changed = false;
+            var now = NowMs();
+            var usedLocalIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (SyncRoot)
+            {
+                var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
+                cfg = plugin.Configuration;
+                SerrRequestStore.Save(cfg);
+                NormalizeSerrRequests(cfg);
+
+                foreach (var record in recordsResult.Records)
+                {
+                    var requestId = ReadIntValue(record, "id");
+                    if (requestId <= 0) continue;
+
+                    var current = cfg.SerrRequests.FirstOrDefault(entry => entry.SerrRequestId == requestId);
+                    if (current is null)
+                    {
+                        current = cfg.SerrRequests.FirstOrDefault(entry =>
+                            !usedLocalIds.Contains(entry.Id) &&
+                            !entry.SerrRequestId.HasValue &&
+                            SerrRequestMatchesEntry(record, entry));
+                    }
+
+                    if (current is null)
+                    {
+                        var imported = BuildEntryFromSerrRecord(record, now, resolvedTitles.GetValueOrDefault(requestId));
+                        if (imported is null) continue;
+                        cfg.SerrRequests.Add(imported);
+                        usedLocalIds.Add(imported.Id);
+                        changed = true;
+                        continue;
+                    }
+
+                    var before = JsonSerializer.Serialize(current, JsonOptions);
+                    ApplySerrRecord(current, record, now, resolvedTitles.GetValueOrDefault(requestId));
+                    MarkCompletedIfLocalAvailable(current);
+                    var after = JsonSerializer.Serialize(current, JsonOptions);
+                    if (string.Equals(before, after, StringComparison.Ordinal)) continue;
+
+                    usedLocalIds.Add(current.Id);
+                    changed = true;
+                }
+
+                if (changed)
+                {
+                    PruneRequests(cfg);
+                    TouchSerr(cfg);
+                    SerrRequestStore.Save(cfg);
+                    plugin.UpdateConfiguration(cfg);
+                }
+            }
+        }
+
+        private async Task<Dictionary<int, string>> ResolveSerrRequestTitles(
+            JMSFusionConfiguration cfg,
+            IReadOnlyList<JsonElement> records,
+            IReadOnlyDictionary<int, string> knownTitles,
+            CancellationToken cancellationToken)
+        {
+            var output = new Dictionary<int, string>();
+            foreach (var record in records)
+            {
+                var requestId = ReadIntValue(record, "id");
+                if (requestId <= 0 || knownTitles.ContainsKey(requestId)) continue;
+
+                var media = TryReadObject(record, "media", out var mediaObject) ? mediaObject : default;
+                var inline = CleanText(ReadSerrRequestTitle(record, media, requestId), MaxTitleLength);
+                if (!IsGeneratedSerrTitle(inline, requestId))
+                {
+                    output[requestId] = inline;
+                    continue;
+                }
+
+                var mediaType = NormalizeMediaType(ReadStringAny(record, "mediaType", "media_type", "type"));
+                if (string.IsNullOrWhiteSpace(mediaType) && media.ValueKind == JsonValueKind.Object)
+                {
+                    mediaType = NormalizeMediaType(ReadStringAny(media, "mediaType", "media_type", "type"));
+                }
+
+                var mediaId = ReadSerrTmdbId(record, media);
+                if (mediaId <= 0 || (!Same(mediaType, "movie") && !Same(mediaType, "tv"))) continue;
+
+                var resolved = await ResolveSerrMetadataTitle(cfg, mediaType, mediaId, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    output[requestId] = CleanText(resolved, MaxTitleLength);
+                }
+            }
+
+            return output;
+        }
+
+        private async Task<string> ResolveSerrMetadataTitle(
+            JMSFusionConfiguration cfg,
+            string mediaType,
+            int mediaId,
+            CancellationToken cancellationToken)
+        {
+            var path = (Same(mediaType, "tv") ? "/tv/" : "/movie/") + mediaId.ToString(CultureInfo.InvariantCulture);
+            if (IsSerrConnectionConfigured(cfg))
+            {
+                var qs = new Dictionary<string, string>();
+                var lang = NormalizeLanguage(cfg.SerrDefaultLanguage);
+                if (!string.IsNullOrWhiteSpace(lang)) qs["language"] = lang;
+                var response = await SendSerrAsync(
+                    cfg,
+                    HttpMethod.Get,
+                    path + (qs.Count > 0 ? "?" + BuildQueryString(qs) : string.Empty),
+                    null,
+                    cancellationToken);
+                var title = ReadMetadataTitle(response.Payload, mediaType);
+                if (!string.IsNullOrWhiteSpace(title)) return title;
+            }
+
+            var apiKey = CleanText(cfg.TmdbApiKey, 200);
+            if (string.IsNullOrWhiteSpace(apiKey) || Same(apiKey, "CHANGE_ME")) return string.Empty;
+
+            var tmdbQs = new Dictionary<string, string>
+            {
+                ["api_key"] = apiKey
+            };
+            var tmdbLang = NormalizeTmdbLanguage(cfg.SerrDefaultLanguage);
+            if (!string.IsNullOrWhiteSpace(tmdbLang)) tmdbQs["language"] = tmdbLang;
+
+            var tmdb = await SendTmdbAsync(path + "?" + BuildQueryString(tmdbQs), cancellationToken);
+            return tmdb.Ok ? ReadMetadataTitle(tmdb.Payload, mediaType) : string.Empty;
+        }
+
+        private static SerrRequestEntry? BuildEntryFromSerrRecord(JsonElement record, long now, string? resolvedTitle)
+        {
+            var requestId = ReadIntValue(record, "id");
+            if (requestId <= 0) return null;
+
+            var media = TryReadObject(record, "media", out var mediaObject) ? mediaObject : default;
+            var mediaType = NormalizeMediaType(ReadStringAny(record, "mediaType", "media_type", "type"));
+            if (string.IsNullOrWhiteSpace(mediaType) && media.ValueKind == JsonValueKind.Object)
+            {
+                mediaType = NormalizeMediaType(ReadStringAny(media, "mediaType", "media_type", "type"));
+            }
+            if (!Same(mediaType, "movie") && !Same(mediaType, "tv")) return null;
+
+            var mediaId = ReadSerrTmdbId(record, media);
+            if (mediaId <= 0) return null;
+
+            var requestedBy = TryReadObject(record, "requestedBy", out var requestedByObject) ? requestedByObject : default;
+            var created = ReadTimestampMsAny(record, "createdAt", "created_at", "requestedAt", "requested_at");
+            var updated = ReadTimestampMsAny(record, "updatedAt", "updated_at", "modifiedAt", "modified_at");
+            var seasons = ReadSerrRequestSeasons(record)
+                .Where(season => season > 0)
+                .Distinct()
+                .OrderBy(season => season)
+                .ToList();
+
+            var entry = new SerrRequestEntry
+            {
+                Id = "seerr:" + requestId.ToString(CultureInfo.InvariantCulture),
+                JellyfinUserId = ReadStringAny(requestedBy, "jellyfinUserId", "jellyfinUserID", "jellyfinId", "jellyfin_id"),
+                JellyfinUserName = CleanText(ReadStringAny(requestedBy, "displayName", "username", "plexUsername", "jellyfinUsername", "email"), 80),
+                JellyfinUserIsAdmin = false,
+                Title = CleanText(string.IsNullOrWhiteSpace(resolvedTitle) ? ReadSerrRequestTitle(record, media, requestId) : resolvedTitle, MaxTitleLength),
+                MediaType = mediaType,
+                MediaId = mediaId,
+                TvdbId = ReadSerrIntAny(record, media, "tvdbId", "tvdb", "tvdb_id") is var tvdbId && tvdbId > 0 ? tvdbId : null,
+                Seasons = seasons,
+                Episodes = new List<SerrEpisodeSelectionEntry>(),
+                RequestAllSeasons = Same(mediaType, "tv") && seasons.Count == 0,
+                Is4K = ReadSerrRequestIs4K(record),
+                Source = "seerr",
+                Status = "approved",
+                SerrRequestId = requestId,
+                Error = CleanText(ReadStringAny(record, "error", "errorMessage"), 500),
+                CreatedAtUtc = created > 0 ? created : now,
+                UpdatedAtUtc = updated > 0 ? updated : (created > 0 ? created : now)
+            };
+
+            ApplySerrResponse(entry, record);
+            if (IsCompletedStatus(entry.Status))
+            {
+                entry.CompletedAtUtc = entry.UpdatedAtUtc > 0 ? entry.UpdatedAtUtc : now;
+            }
+            return entry;
+        }
+
+        private static void ApplySerrRecord(SerrRequestEntry entry, JsonElement record, long now, string? resolvedTitle)
+        {
+            var media = TryReadObject(record, "media", out var mediaObject) ? mediaObject : default;
+            var requestId = entry.SerrRequestId ?? ReadIntValue(record, "id");
+            var title = CleanText(string.IsNullOrWhiteSpace(resolvedTitle) ? ReadSerrRequestTitle(record, media, requestId) : resolvedTitle, MaxTitleLength);
+            if (!IsGeneratedSerrTitle(title, requestId) &&
+                (Same(entry.Source, "seerr") || string.IsNullOrWhiteSpace(entry.Title) || IsGeneratedSerrTitle(entry.Title, requestId)))
+            {
+                entry.Title = title;
+            }
+
+            var mediaType = NormalizeMediaType(ReadStringAny(record, "mediaType", "media_type", "type"));
+            if (string.IsNullOrWhiteSpace(mediaType) && media.ValueKind == JsonValueKind.Object)
+            {
+                mediaType = NormalizeMediaType(ReadStringAny(media, "mediaType", "media_type", "type"));
+            }
+            if (Same(mediaType, "movie") || Same(mediaType, "tv")) entry.MediaType = mediaType;
+
+            var mediaId = ReadSerrTmdbId(record, media);
+            if (mediaId > 0) entry.MediaId = mediaId;
+
+            var tvdbId = ReadSerrIntAny(record, media, "tvdbId", "tvdb", "tvdb_id");
+            if (tvdbId > 0) entry.TvdbId = tvdbId;
+
+            var seasons = ReadSerrRequestSeasons(record)
+                .Where(season => season > 0)
+                .Distinct()
+                .OrderBy(season => season)
+                .ToList();
+            if (Same(entry.MediaType, "tv"))
+            {
+                if (seasons.Count > 0)
+                {
+                    entry.Seasons = seasons;
+                    entry.RequestAllSeasons = false;
+                }
+                else if (Same(entry.Source, "seerr") && !IsEpisodeOnlyRequest(entry))
+                {
+                    entry.Seasons = new List<int>();
+                    entry.RequestAllSeasons = true;
+                }
+            }
+
+            if (TryReadSerrRequestIs4K(record, out var is4K))
+            {
+                entry.Is4K = is4K;
+            }
+            if (TryReadObject(record, "requestedBy", out var requestedBy))
+            {
+                var jellyfinUserId = ReadStringAny(requestedBy, "jellyfinUserId", "jellyfinUserID", "jellyfinId", "jellyfin_id");
+                if (!string.IsNullOrWhiteSpace(jellyfinUserId)) entry.JellyfinUserId = jellyfinUserId;
+
+                var userName = CleanText(ReadStringAny(requestedBy, "displayName", "username", "plexUsername", "jellyfinUsername", "email"), 80);
+                if (!string.IsNullOrWhiteSpace(userName)) entry.JellyfinUserName = userName;
+            }
+
+            ApplySerrResponse(entry, record);
+            entry.Error = CleanText(ReadStringAny(record, "error", "errorMessage"), 500);
+
+            var created = ReadTimestampMsAny(record, "createdAt", "created_at", "requestedAt", "requested_at");
+            if (created > 0) entry.CreatedAtUtc = created;
+
+            var updated = ReadTimestampMsAny(record, "updatedAt", "updated_at", "modifiedAt", "modified_at");
+            if (updated > 0) entry.UpdatedAtUtc = updated;
+            else if (entry.UpdatedAtUtc <= 0) entry.UpdatedAtUtc = now;
+            if (IsCompletedStatus(entry.Status) && entry.CompletedAtUtc <= 0)
+            {
+                entry.CompletedAtUtc = entry.UpdatedAtUtc > 0 ? entry.UpdatedAtUtc : now;
+            }
+        }
+
+        private async Task<(List<JsonElement> Records, string Error)> FetchSerrRequestRecords(
+            JMSFusionConfiguration cfg,
+            CancellationToken cancellationToken)
+        {
+            var output = new List<JsonElement>();
+            const int take = 100;
+
+            for (var page = 0; page < MaxSerrRequestLookupPages; page++)
+            {
+                var skip = page * take;
+                var response = await SendSerrAsync(
+                    cfg,
+                    HttpMethod.Get,
+                    "/request?take=" + take.ToString(CultureInfo.InvariantCulture) +
+                    "&skip=" + skip.ToString(CultureInfo.InvariantCulture) +
+                    "&filter=all&sort=added",
+                    null,
+                    cancellationToken);
+                if (!response.Ok)
+                {
+                    return (output, response.Error);
+                }
+
+                var records = ExtractSerrRequestRecords(response.Payload);
+                output.AddRange(records);
+                if (records.Count < take) break;
+            }
+
+            return (output, string.Empty);
+        }
+
+        private static List<JsonElement> ExtractSerrRequestRecords(JsonElement payload)
+        {
+            if (payload.ValueKind == JsonValueKind.Array)
+            {
+                return payload.EnumerateArray()
+                    .Where(item => item.ValueKind == JsonValueKind.Object)
+                    .Select(item => item.Clone())
+                    .ToList();
+            }
+
+            if (payload.ValueKind != JsonValueKind.Object) return new List<JsonElement>();
+            foreach (var property in new[] { "results", "requests", "items", "data" })
+            {
+                if (payload.TryGetProperty(property, out var arr) && arr.ValueKind == JsonValueKind.Array)
+                {
+                    return arr.EnumerateArray()
+                        .Where(item => item.ValueKind == JsonValueKind.Object)
+                        .Select(item => item.Clone())
+                        .ToList();
+                }
+            }
+
+            return new List<JsonElement>();
+        }
+
+        private static bool SerrRequestMatchesEntry(JsonElement request, SerrRequestEntry entry)
+            => request.ValueKind == JsonValueKind.Object &&
+               SerrRequestMediaMatchesEntry(request, entry) &&
+               SerrRequestQualityMatchesEntry(request, entry) &&
+               SerrRequestScopeMatchesEntry(request, entry);
+
+        private static bool SerrRequestMediaMatchesEntry(JsonElement request, SerrRequestEntry entry)
+        {
+            var media = TryReadObject(request, "media", out var mediaObject) ? mediaObject : default;
+            var requestMediaType = NormalizeMediaType(ReadStringAny(request, "mediaType", "media_type", "type"));
+            if (string.IsNullOrWhiteSpace(requestMediaType) && media.ValueKind == JsonValueKind.Object)
+            {
+                requestMediaType = NormalizeMediaType(ReadStringAny(media, "mediaType", "media_type", "type"));
+            }
+
+            if (!string.IsNullOrWhiteSpace(requestMediaType) && !Same(requestMediaType, entry.MediaType)) return false;
+
+            if (Same(entry.MediaType, "movie"))
+            {
+                return entry.MediaId > 0 && ReadSerrTmdbId(request, media) == entry.MediaId;
+            }
+
+            if (Same(entry.MediaType, "tv"))
+            {
+                if (entry.TvdbId.HasValue && entry.TvdbId.Value > 0 &&
+                    ReadSerrIntAny(request, media, "tvdbId", "tvdb", "tvdb_id") == entry.TvdbId.Value)
+                {
+                    return true;
+                }
+
+                return entry.MediaId > 0 && ReadSerrTmdbId(request, media) == entry.MediaId;
+            }
+
+            return false;
+        }
+
+        private static bool SerrRequestQualityMatchesEntry(JsonElement request, SerrRequestEntry entry)
+        {
+            if (!TryReadBoolAny(request, out var requestIs4K, "is4k", "is4K", "is4KRequest")) return true;
+            return requestIs4K == entry.Is4K;
+        }
+
+        private static bool SerrRequestScopeMatchesEntry(JsonElement request, SerrRequestEntry entry)
+        {
+            if (!Same(entry.MediaType, "tv")) return true;
+            if (entry.RequestAllSeasons) return true;
+
+            var entrySeasons = EntryRequestScope(entry).Seasons;
+            if (!entrySeasons.Any()) return true;
+
+            var requestSeasons = ReadSerrRequestSeasons(request);
+            return !requestSeasons.Any() || entrySeasons.Overlaps(requestSeasons);
+        }
+
+        private static HashSet<int> ReadSerrRequestSeasons(JsonElement request)
+        {
+            var seasons = new HashSet<int>();
+            AddSerrSeasonValues(request, seasons);
+            if (TryReadObject(request, "media", out var media)) AddSerrSeasonValues(media, seasons);
+            return seasons;
+        }
+
+        private static void AddSerrSeasonValues(JsonElement source, HashSet<int> output)
+        {
+            if (source.ValueKind != JsonValueKind.Object) return;
+            if (TryReadIntAny(source, out var directSeason, "seasonNumber", "season_number", "season"))
+            {
+                output.Add(directSeason);
+            }
+
+            foreach (var property in new[] { "seasons", "requestedSeasons" })
+            {
+                if (!source.TryGetProperty(property, out var arr) || arr.ValueKind != JsonValueKind.Array) continue;
+                foreach (var item in arr.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var number))
+                    {
+                        output.Add(number);
+                    }
+                    else if (item.ValueKind == JsonValueKind.String &&
+                             int.TryParse(item.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                    {
+                        output.Add(parsed);
+                    }
+                    else if (item.ValueKind == JsonValueKind.Object &&
+                             TryReadIntAny(item, out var seasonNumber, "seasonNumber", "season_number", "season"))
+                    {
+                        output.Add(seasonNumber);
+                    }
+                }
+            }
+        }
+
+        private static int ReadSerrIntAny(JsonElement request, JsonElement media, params string[] properties)
+        {
+            if (TryReadIntAny(request, out var value, properties)) return value;
+            return media.ValueKind == JsonValueKind.Object && TryReadIntAny(media, out value, properties) ? value : 0;
+        }
+
+        private static int ReadSerrTmdbId(JsonElement request, JsonElement media)
+        {
+            var value = ReadSerrIntAny(request, media, "tmdbId", "tmdb", "mediaTmdbId", "tmdb_id");
+            if (value > 0) return value;
+
+            return media.ValueKind != JsonValueKind.Object && TryReadInt(request, "mediaId", out value) ? value : 0;
+        }
+
+        private static bool ReadSerrRequestIs4K(JsonElement request)
+        {
+            return TryReadSerrRequestIs4K(request, out var is4K) && is4K;
+        }
+
+        private static bool TryReadSerrRequestIs4K(JsonElement request, out bool is4K)
+        {
+            if (TryReadBoolAny(request, out is4K, "is4k", "is4K", "is4KRequest")) return true;
+            if (TryReadObject(request, "media", out var media) &&
+                TryReadBoolAny(media, out is4K, "is4k", "is4K", "is4KRequest"))
+            {
+                return true;
+            }
+
+            is4K = false;
+            return false;
+        }
+
+        private static string ReadSerrRequestTitle(JsonElement request, JsonElement media, int requestId)
+        {
+            var title = ReadStringAny(request, "title", "name", "mediaTitle", "media_title", "originalTitle", "original_title", "originalName", "original_name");
+            if (string.IsNullOrWhiteSpace(title) && media.ValueKind == JsonValueKind.Object)
+            {
+                title = ReadStringAny(media, "title", "name", "mediaTitle", "media_title", "originalTitle", "original_title", "originalName", "original_name");
+            }
+
+            return string.IsNullOrWhiteSpace(title)
+                ? "Seerr #" + requestId.ToString(CultureInfo.InvariantCulture)
+                : title;
+        }
+
+        private static string ReadMetadataTitle(JsonElement payload, string mediaType)
+        {
+            if (payload.ValueKind != JsonValueKind.Object) return string.Empty;
+            var title = Same(mediaType, "tv")
+                ? ReadStringAny(payload, "name", "title", "originalName", "original_name", "originalTitle", "original_title")
+                : ReadStringAny(payload, "title", "name", "originalTitle", "original_title", "originalName", "original_name");
+            if (!string.IsNullOrWhiteSpace(title)) return title;
+
+            foreach (var property in new[] { "media", "mediaInfo", "movie", "tv", "show", "item", "result" })
+            {
+                if (!TryReadObject(payload, property, out var nested)) continue;
+                title = Same(mediaType, "tv")
+                    ? ReadStringAny(nested, "name", "title", "originalName", "original_name", "originalTitle", "original_title")
+                    : ReadStringAny(nested, "title", "name", "originalTitle", "original_title", "originalName", "original_name");
+                if (!string.IsNullOrWhiteSpace(title)) return title;
+            }
+
+            return string.Empty;
+        }
+
+        private static bool IsGeneratedSerrTitle(string? title, int requestId)
+        {
+            if (requestId <= 0) return false;
+            return Same(title, "Seerr #" + requestId.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private async Task<string> WithdrawFromArr(JMSFusionConfiguration cfg, SerrRequestEntry entry, CancellationToken cancellationToken)
+        {
+            if (entry is null || !ShouldCleanupArrOnWithdraw(entry)) return string.Empty;
+
+            var warnings = new List<string>();
+            if (Same(entry.MediaType, "movie"))
+            {
+                foreach (var use4K in RadarrCleanupTargets(cfg, entry))
+                {
+                    var warning = await WithdrawMovieFromRadarr(cfg, entry, use4K, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(warning)) warnings.Add(warning);
+                }
+            }
+            else if (Same(entry.MediaType, "tv"))
+            {
+                foreach (var use4K in SonarrCleanupTargets(cfg, entry))
+                {
+                    var warning = await WithdrawTvFromSonarr(cfg, entry, use4K, cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(warning)) warnings.Add(warning);
+                }
+            }
+
+            return string.Join(" | ", warnings.Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static bool ShouldCleanupArrOnWithdraw(SerrRequestEntry entry)
+            => Same(entry.Status, "approved") || Same(entry.Status, "processing");
+
+        private static IEnumerable<bool> RadarrCleanupTargets(JMSFusionConfiguration cfg, SerrRequestEntry entry)
+        {
+            if (entry.Is4K && IsRadarr4KSearchConfigured(cfg)) yield return true;
+            else if (IsRadarrSearchConfigured(cfg)) yield return false;
+        }
+
+        private static IEnumerable<bool> SonarrCleanupTargets(JMSFusionConfiguration cfg, SerrRequestEntry entry)
+        {
+            if (entry.Is4K && IsSonarr4KSearchConfigured(cfg)) yield return true;
+            else if (IsSonarrSearchConfigured(cfg)) yield return false;
+        }
+
+        private async Task<string> WithdrawMovieFromRadarr(
+            JMSFusionConfiguration cfg,
+            SerrRequestEntry entry,
+            bool use4K,
+            CancellationToken cancellationToken)
+        {
+            var serviceName = use4K ? "4K Radarr" : "Radarr";
+            var movie = await FindRadarrMovie(cfg, entry, cancellationToken, use4K);
+            if (movie.ValueKind != JsonValueKind.Object) return string.Empty;
+            if (!TryReadInt(movie, "id", out var movieId) || movieId <= 0)
+            {
+                return serviceName + ": movie id could not be resolved.";
+            }
+
+            var delete = await SendArrAsync(
+                RadarrBaseUrl(cfg, use4K),
+                RadarrApiKey(cfg, use4K),
+                serviceName,
+                HttpMethod.Delete,
+                "/movie/" + movieId.ToString(CultureInfo.InvariantCulture) + "?deleteFiles=false&addImportListExclusion=false",
+                null,
+                cancellationToken);
+            if (!delete.Ok) return serviceName + ": " + delete.Error;
+
+            ClearArrRecordsCache();
+            return string.Empty;
+        }
+
+        private async Task<string> WithdrawTvFromSonarr(
+            JMSFusionConfiguration cfg,
+            SerrRequestEntry entry,
+            bool use4K,
+            CancellationToken cancellationToken)
+        {
+            var serviceName = use4K ? "4K Sonarr" : "Sonarr";
+            var series = await FindSonarrSeries(cfg, entry, cancellationToken, use4K);
+            if (series.ValueKind != JsonValueKind.Object) return string.Empty;
+            if (!TryReadInt(series, "id", out var seriesId) || seriesId <= 0)
+            {
+                return serviceName + ": series id could not be resolved.";
+            }
+
+            if (ShouldDeleteSonarrSeriesOnWithdraw(entry))
+            {
+                var delete = await SendArrAsync(
+                    SonarrBaseUrl(cfg, use4K),
+                    SonarrApiKey(cfg, use4K),
+                    serviceName,
+                    HttpMethod.Delete,
+                    "/series/" + seriesId.ToString(CultureInfo.InvariantCulture) + "?deleteFiles=false&addImportListExclusion=false",
+                    null,
+                    cancellationToken);
+                if (!delete.Ok) return serviceName + ": " + delete.Error;
+
+                ClearArrRecordsCache();
+                return string.Empty;
+            }
+
+            if (IsEpisodeOnlyRequest(entry))
+            {
+                var episodeIds = await FindRequestedSonarrEpisodeIdsOnce(cfg, seriesId, entry, cancellationToken, use4K);
+                if (episodeIds.Count == 0) return string.Empty;
+
+                var monitor = await SendArrAsync(
+                    SonarrBaseUrl(cfg, use4K),
+                    SonarrApiKey(cfg, use4K),
+                    serviceName,
+                    HttpMethod.Put,
+                    "/episode/monitor",
+                    new Dictionary<string, object?>
+                    {
+                        ["episodeIds"] = episodeIds.ToArray(),
+                        ["monitored"] = false
+                    },
+                    cancellationToken);
+                if (!monitor.Ok) return serviceName + ": " + monitor.Error;
+
+                ClearArrRecordsCache();
+                return string.Empty;
+            }
+
+            var targetSeasons = GetArrTargetSeasons(entry);
+            if (targetSeasons.Count == 0) return string.Empty;
+
+            var body = JsonSerializer.Deserialize<Dictionary<string, object?>>(series.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
+            var seasons = BuildSonarrSeasonUnmonitorPayload(series, targetSeasons);
+            body["seasons"] = seasons;
+            if (!seasons.Any(season => season.TryGetValue("monitored", out var monitored) && ObjectBool(monitored)))
+            {
+                body["monitored"] = false;
+            }
+
+            var update = await SendArrAsync(
+                SonarrBaseUrl(cfg, use4K),
+                SonarrApiKey(cfg, use4K),
+                serviceName,
+                HttpMethod.Put,
+                "/series/" + seriesId.ToString(CultureInfo.InvariantCulture),
+                body,
+                cancellationToken);
+            if (!update.Ok) return serviceName + ": " + update.Error;
+
+            ClearArrRecordsCache();
+            return string.Empty;
+        }
+
+        private static bool ShouldDeleteSonarrSeriesOnWithdraw(SerrRequestEntry entry)
+            => entry.RequestAllSeasons ||
+               (!IsEpisodeOnlyRequest(entry) && NormalizeSeasons(entry.Seasons).Count == 0);
 
         private async Task<RequestSubmissionResult> SubmitMovieToRadarr(JMSFusionConfiguration cfg, SerrRequestEntry entry, CancellationToken cancellationToken)
         {
@@ -1552,6 +2503,45 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return output;
         }
 
+        private static List<Dictionary<string, object?>> BuildSonarrSeasonUnmonitorPayload(
+            JsonElement source,
+            IReadOnlyCollection<int> targetSeasons)
+        {
+            var targets = (targetSeasons ?? Array.Empty<int>())
+                .Where(season => season >= 0 && season <= 1000)
+                .ToHashSet();
+            var output = new List<Dictionary<string, object?>>();
+
+            if (source.ValueKind == JsonValueKind.Object &&
+                source.TryGetProperty("seasons", out var seasons) &&
+                seasons.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var season in seasons.EnumerateArray())
+                {
+                    if (!TryReadInt(season, "seasonNumber", out var seasonNumber)) continue;
+                    var row = JsonSerializer.Deserialize<Dictionary<string, object?>>(season.GetRawText(), JsonOptions) ?? new Dictionary<string, object?>();
+                    row["seasonNumber"] = seasonNumber;
+                    if (targets.Contains(seasonNumber))
+                    {
+                        row["monitored"] = false;
+                    }
+                    output.Add(row);
+                }
+            }
+
+            foreach (var seasonNumber in targets)
+            {
+                if (output.Any(row => Convert.ToInt32(row["seasonNumber"], CultureInfo.InvariantCulture) == seasonNumber)) continue;
+                output.Add(new Dictionary<string, object?>
+                {
+                    ["seasonNumber"] = seasonNumber,
+                    ["monitored"] = false
+                });
+            }
+
+            return output;
+        }
+
         private static List<int> GetArrTargetSeasons(SerrRequestEntry entry)
         {
             if (IsEpisodeOnlyRequest(entry))
@@ -1691,26 +2681,45 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             if (TryReadObject(payload, "media", out var media))
             {
-                if (TryReadInt(media, "status", out var mediaStatus))
+                if (entry.Is4K && TryReadIntAny(media, out var mediaStatus4K, "status4k", "status4K"))
+                {
+                    entry.SerrMediaStatus = mediaStatus4K;
+                }
+                else if (TryReadInt(media, "status", out var mediaStatus))
                 {
                     entry.SerrMediaStatus = mediaStatus;
                 }
             }
 
-            entry.Status = MapStatus(entry.SerrRequestStatus, entry.SerrMediaStatus);
+            entry.Status = AreRequestedSeasonsCompleted(entry, payload)
+                ? "completed"
+                : MapStatus(entry.SerrRequestStatus, entry.SerrMediaStatus);
             if (IsCompletedStatus(entry.Status) && entry.CompletedAtUtc <= 0)
             {
                 entry.CompletedAtUtc = NowMs();
             }
         }
 
+        private static void ApplySerrResponsePayload(SerrRequestEntry entry, JsonElement payload)
+        {
+            if (payload.ValueKind != JsonValueKind.Object) return;
+            if (TryReadObject(payload, "request", out var request))
+            {
+                ApplySerrResponse(entry, request);
+                return;
+            }
+
+            ApplySerrResponse(entry, payload);
+        }
+
         private static string MapStatus(int? requestStatus, int? mediaStatus)
         {
-            if (requestStatus == 5) return "approved";
-            if (requestStatus == 4) return "failed";
             if (requestStatus == 3) return "declined";
-            if (requestStatus == 2) return "approved";
+            if (requestStatus == 4) return "failed";
             if (requestStatus == 1) return "pending";
+            if (mediaStatus == 5) return "completed";
+            if (requestStatus == 5) return "approved";
+            if (requestStatus == 2) return "approved";
             return "approved";
         }
 
@@ -1911,6 +2920,20 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
         private static bool CanSubmitToArr(JMSFusionConfiguration cfg, SerrRequestEntry entry)
             => CanSubmitToArrRequest(cfg, entry.MediaType, entry.Is4K);
+
+        private static bool CanSubmitTo4KBackend(JMSFusionConfiguration cfg, SerrRequestEntry entry)
+            => IsSerrConnectionConfigured(cfg) || CanSubmitTo4KArr(cfg, entry);
+
+        private static bool CanSubmitTo4KArr(JMSFusionConfiguration cfg, SerrRequestEntry entry)
+            => entry.Is4K &&
+               ((Same(entry.MediaType, "movie") && IsRadarr4KRequestConfigured(cfg)) ||
+                (Same(entry.MediaType, "tv") && IsSonarr4KRequestConfigured(cfg)));
+
+        private static bool CanUpgradeTo4K(SerrRequestEntry entry)
+            => !entry.Is4K &&
+               !IsCompletedStatus(entry.Status) &&
+               !Same(entry.Status, "declined") &&
+               !Same(entry.Status, "withdrawn");
 
         private static bool ShouldUseRadarr4K(JMSFusionConfiguration cfg, bool is4K)
             => is4K && IsRadarr4KRequestConfigured(cfg);
@@ -2935,7 +3958,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 return "processing";
             }
 
-            return Same(clean, "processing") ? "approved" : clean;
+            return clean;
         }
 
         private static bool IsTerminalHiddenForDisplay(SerrRequestEntry entry, ArrDownloadSnapshot? download)
@@ -3248,6 +4271,14 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 pathAndQuery.Trim()
             });
 
+        private static void ClearArrRecordsCache()
+        {
+            lock (ArrRecordsCacheRoot)
+            {
+                ArrRecordsCache.Clear();
+            }
+        }
+
         private static void PruneArrRecordsCache(long now)
         {
             foreach (var key in ArrRecordsCache
@@ -3326,6 +4357,50 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return el.ValueKind == JsonValueKind.String && bool.TryParse(el.GetString(), out var value) && value;
         }
 
+        private static bool TryReadBoolAny(JsonElement source, out bool value, params string[] properties)
+        {
+            foreach (var property in properties)
+            {
+                if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty(property, out var el)) continue;
+                if (el.ValueKind == JsonValueKind.True)
+                {
+                    value = true;
+                    return true;
+                }
+                if (el.ValueKind == JsonValueKind.False)
+                {
+                    value = false;
+                    return true;
+                }
+                if (el.ValueKind == JsonValueKind.String && bool.TryParse(el.GetString(), out var parsed))
+                {
+                    value = parsed;
+                    return true;
+                }
+                if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var number))
+                {
+                    value = number != 0;
+                    return true;
+                }
+            }
+
+            value = false;
+            return false;
+        }
+
+        private static bool ObjectBool(object? value)
+        {
+            if (value is bool boolValue) return boolValue;
+            if (value is JsonElement element)
+            {
+                if (element.ValueKind == JsonValueKind.True) return true;
+                if (element.ValueKind == JsonValueKind.False) return false;
+                return element.ValueKind == JsonValueKind.String && bool.TryParse(element.GetString(), out var parsed) && parsed;
+            }
+
+            return value is string textValue && bool.TryParse(textValue, out var stringValue) && stringValue;
+        }
+
         private static long ReadLongAny(JsonElement source, params string[] properties)
         {
             foreach (var property in properties)
@@ -3338,6 +4413,39 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             return 0;
+        }
+
+        private static long ReadTimestampMsAny(JsonElement source, params string[] properties)
+        {
+            foreach (var property in properties)
+            {
+                if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty(property, out var el)) continue;
+                if (el.ValueKind == JsonValueKind.Number)
+                {
+                    if (el.TryGetInt64(out var numeric)) return NormalizeTimestampMs(numeric);
+                    if (el.TryGetDouble(out var numericDouble)) return NormalizeTimestampMs((long)Math.Max(0, numericDouble));
+                }
+
+                if (el.ValueKind != JsonValueKind.String) continue;
+                var raw = el.GetString();
+                if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedLong))
+                {
+                    return NormalizeTimestampMs(parsedLong);
+                }
+
+                if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsedDate))
+                {
+                    return parsedDate.ToUnixTimeMilliseconds();
+                }
+            }
+
+            return 0;
+        }
+
+        private static long NormalizeTimestampMs(long value)
+        {
+            if (value <= 0) return 0;
+            return value < 100_000_000_000L ? value * 1000L : value;
         }
 
         private static bool TryReadString(JsonElement source, string property, out string value)

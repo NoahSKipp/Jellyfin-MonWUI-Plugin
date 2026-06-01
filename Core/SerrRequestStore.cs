@@ -143,7 +143,6 @@ namespace Jellyfin.Plugin.JMSFusion
             }
             catch
             {
-                // Best-effort safety backup; the plugin configuration remains the primary store.
             }
         }
 

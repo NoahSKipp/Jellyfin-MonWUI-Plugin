@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
     {
+        "version": "3.5.0.0",
+        "changelog": "v3.5.0\n\nChanges:\n- Added search, request matching, and 4K upgrade actions to the Seerr request panel\n- Updated request approval, decline, and retract workflows to stay synchronized with Seerr and Arr states\n- Improved Arr cleanup handling for movies, seasons, and episodes\n- Fixed stability issues affecting hover trailers, notification startup, and quality badges\n- Fixed an issue in the Who's Watching? module (closes #59)\n- Updated manifest changelog and metadata timestamps\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/download/v3.5.0/JMSFusion-3.5.0.0-server.zip",
+        "checksum": "a40a5841ab5a85c01b650ee0036e38f1",
+        "timestamp": "2026-06-01T18:22:14.7748302Z"
+      },
+    {
         "version": "3.4.0.0",
         "changelog": "v3.4.0\n\nChanges:\n- Enabled 4K request support for Seerr & Arr integration\n- Updated detail modal trailer previews to respect trailer volume settings configured in the MonWUI panel\n- Fixed multiple issues and inconsistencies in the HoverTrailer modal\n- Improved trailer modal stability and playback behavior\n- Applied various UI, compatibility, and performance refinements across the plugin\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",
