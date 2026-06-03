@@ -346,6 +346,51 @@ export function getAdminTargetProfile() {
   return getDeviceProfileAuto();
 }
 
+function getSharedUserSettingsSnapshot(targetProfile) {
+  const profile = String(targetProfile || getDeviceProfileAuto() || "desktop").trim() || "desktop";
+
+  try {
+    const existingSnapshot = window.__JMS_USER_SETTINGS_SNAPSHOT__;
+    if (existingSnapshot?.profile === profile && existingSnapshot?.payload) {
+      return Promise.resolve(existingSnapshot.payload);
+    }
+
+    const existingPromise = window.__JMS_USER_SETTINGS_PROMISE__;
+    if (existingPromise?.profile === profile && existingPromise?.promise) {
+      return existingPromise.promise;
+    }
+
+    const promise = fetch(`/Plugins/JMSFusion/UserSettings?profile=${encodeURIComponent(profile)}&ts=${Date.now()}`, {
+      method: "GET",
+      cache: "no-store",
+      headers: { "Accept": "application/json" }
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`UserSettings HTTP ${response.status}`);
+        return response.json().catch(() => ({}));
+      })
+      .then((payload) => {
+        const normalized = payload || {};
+        window.__JMS_USER_SETTINGS_SNAPSHOT__ = {
+          profile,
+          payload: normalized,
+          at: Date.now()
+        };
+        return normalized;
+      })
+      .finally(() => {
+        if (window.__JMS_USER_SETTINGS_PROMISE__?.promise === promise) {
+          window.__JMS_USER_SETTINGS_PROMISE__ = null;
+        }
+      });
+
+    window.__JMS_USER_SETTINGS_PROMISE__ = { profile, promise };
+    return promise;
+  } catch {
+    return Promise.resolve({});
+  }
+}
+
 async function __fetchGlobalOverride(force = false) {
   if (!force && __globalOverride !== null) return __globalOverride;
   const managed = getManagedStorageBridge();
@@ -355,10 +400,7 @@ async function __fetchGlobalOverride(force = false) {
   }
   try {
     const profile = getDeviceProfileAuto();
-    const r = await fetch(`/Plugins/JMSFusion/UserSettings?ts=${Date.now()}&profile=${profile}`, {
-    });
-    if (!r.ok) throw new Error();
-    __globalOverride = await r.json();
+    __globalOverride = await getSharedUserSettingsSnapshot(profile);
   } catch {
     __globalOverride = { forceGlobal: false };
   }
@@ -737,7 +779,7 @@ export function getConfig() {
     useRandomContent: localStorage.getItem('useRandomContent') !== 'false',
     fullscreenMode: localStorage.getItem('fullscreenMode') === 'true' ? true : false,
     listLimit: 20,
-    version: "v3.5.0",
+    version: "v3.6.0",
     historySize: 20,
     updateInterval: 300000,
     nextTracksSource: localStorage.getItem('nextTracksSource') || 'playlist',
@@ -749,7 +791,7 @@ export function getConfig() {
     sliderAutoTrailerPlayback: localStorage.getItem('sliderAutoTrailerPlayback') === 'true',
     limit: parseInt(localStorage.getItem('limit'), 10) || 15,
     onlyUnwatchedRandom: localStorage.getItem('onlyUnwatchedRandom') === 'true',
-    maxShufflingLimit: parseInt(localStorage.getItem('maxShufflingLimit'), 10) || 10000,
+    maxShufflingLimit: Math.max(50, Math.min(500, parseInt(localStorage.getItem('maxShufflingLimit'), 10) || 500)),
     excludeEpisodesFromPlaying: localStorage.getItem('excludeEpisodesFromPlaying') !== 'false',
     showPlaybackProgress: localStorage.getItem('showPlaybackProgress') !== 'false',
     muziklimit: parseInt(localStorage.getItem('muziklimit'), 10) || 30,
@@ -1517,10 +1559,7 @@ export async function publishAdminSnapshotIfForced() {
     }
 
     const targetProfile = getAdminTargetProfile();
-    const r = await fetch(`/Plugins/JMSFusion/UserSettings?ts=${Date.now()}&profile=${targetProfile}`, {
-      cache: "no-store"
-    });
-    const j = r.ok ? await r.json() : null;
+    const j = await getSharedUserSettingsSnapshot(targetProfile);
     if (!j?.forceGlobal) {
       return { attempted: false, forced: false, ok: true, reason: "not-forced", profile: targetProfile };
     }

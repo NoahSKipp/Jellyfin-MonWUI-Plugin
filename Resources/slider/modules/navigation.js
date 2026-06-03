@@ -525,7 +525,7 @@ function promotePeakBackdrop(activeSlide) {
 
   try { backdrop.style.opacity = '1'; } catch {}
   try { backdrop.style.visibility = 'visible'; } catch {}
-  backdrop.__requestHi?.({ eagerLoad: true, fetchPriority: 'high' });
+  backdrop.__requestHi?.({ eagerLoad: true, fetchPriority: 'high', immediate: true });
 }
 
 function syncPeakBackdropForState(slide, prevState, nextState) {
@@ -948,6 +948,37 @@ function getDotWindowBounds(totalDots, currentIndex, rawVisibleCount) {
   return { start, end, visibleCount };
 }
 
+function prepareDotElement(dot, index, totalDots, posterMode = false) {
+  if (!dot) return;
+  const safeIndex = Number.isFinite(index) ? index : 0;
+  const safeTotal = Number.isFinite(totalDots) && totalDots > 0 ? totalDots : 0;
+
+  dot.tabIndex = 0;
+  dot.setAttribute("role", "button");
+  dot.setAttribute("aria-label", `${posterMode ? "Poster" : "Slide"} ${safeIndex + 1}${safeTotal ? ` / ${safeTotal}` : ""}`);
+}
+
+function bindDotKeyboard(dot, activate) {
+  if (!dot || typeof activate !== "function") return;
+  dot.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar") return;
+    event.preventDefault();
+    activate(event);
+  });
+}
+
+function syncDotAccessibilityState(dot, { isActive = false, isHidden = false, dotIndex = 0, totalDots = 0 } = {}) {
+  if (!dot) return;
+  const safeTotal = Number.isFinite(totalDots) && totalDots > 0 ? totalDots : 0;
+  const safeIndex = Number.isFinite(dotIndex) ? dotIndex : 0;
+  const posterMode = dot.classList.contains("monwui-poster-dot");
+
+  dot.tabIndex = isHidden ? -1 : 0;
+  dot.setAttribute("aria-current", isActive ? "true" : "false");
+  dot.setAttribute("aria-hidden", isHidden ? "true" : "false");
+  dot.setAttribute("aria-label", `${posterMode ? "Poster" : "Slide"} ${safeIndex + 1}${safeTotal ? ` / ${safeTotal}` : ""}${isActive ? ", current" : ""}`);
+}
+
 function applyDotStateClasses(dots, currentIndex, config, lowPower = false) {
   const dotArray = Array.from(dots || []);
   if (!dotArray.length) return;
@@ -979,6 +1010,7 @@ function applyDotStateClasses(dots, currentIndex, config, lowPower = false) {
     const parsedIndex = Number(dot.dataset.index);
     const dotIndex = Number.isFinite(parsedIndex) ? parsedIndex : arrayIndex;
     const isActive = dotIndex === safeCurrentIndex;
+    let isHidden = false;
 
     clearManagedDotStateClasses(dot);
 
@@ -993,7 +1025,7 @@ function applyDotStateClasses(dots, currentIndex, config, lowPower = false) {
       const distance = Math.abs(dotIndex - safeCurrentIndex);
       const styledDistance = Math.min(distance, maxStyledDistance);
       const direction = dotIndex < safeCurrentIndex ? "prev" : "next";
-      const isHidden = dotIndex < start || dotIndex > end;
+      isHidden = dotIndex < start || dotIndex > end;
       dot.style.removeProperty("--monwui-active-dot-bg");
 
       dot.dataset.dotState = isHidden ? "hidden" : direction;
@@ -1006,6 +1038,13 @@ function applyDotStateClasses(dots, currentIndex, config, lowPower = false) {
         dot.classList.add(`monwui-dot-${direction}`, `monwui-dot-${direction}-${styledDistance}`);
       }
     }
+
+    syncDotAccessibilityState(dot, {
+      isActive,
+      isHidden,
+      dotIndex,
+      totalDots: dotArray.length
+    });
 
     if (config.dotPosterMode && config.enableDotPosterAnimations && !lowPower) {
       if (wasActive !== isActive) applyDotPosterAnimation(dot, isActive);
@@ -1051,6 +1090,8 @@ export function createDotNavigation() {
     applyContainerStyles(dotContainer, 'existingDot');
     slidesContainer.appendChild(dotContainer);
   }
+  dotContainer.setAttribute("role", "navigation");
+  dotContainer.setAttribute("aria-label", "Slider navigation");
 
   const currentIndex = getCurrentIndex();
   const lowPower = isLowPowerPeakRuntime();
@@ -1075,6 +1116,7 @@ export function createDotNavigation() {
     dot.className = "monwui-dot monwui-poster-dot";
     dot.dataset.index = index;
     dot.dataset.itemId = itemId;
+    prepareDotElement(dot, index, slidesArray.length, true);
 
     const imageUrl = dotType === "useSlideBackground"
         ? slide.dataset.background
@@ -1141,7 +1183,9 @@ export function createDotNavigation() {
 
         const playButton = document.createElement("button");
         playButton.className = "monwui-dot-play-button";
+        playButton.type = "button";
         playButton.textContent = config.languageLabels.izle;
+        playButton.setAttribute("aria-label", config.languageLabels.izle || "Play");
 
         playButton.addEventListener('click', async (e) => {
         e.stopPropagation();
@@ -1174,11 +1218,13 @@ export function createDotNavigation() {
         if (config.dotPosterMode && config.enableDotPosterAnimations && !lowPower) {
             applyDotPosterAnimation(dot, index === currentIndex);
         }
-        dot.addEventListener("click", () => {
+        const activateDot = () => {
             if (index !== getCurrentIndex()) {
                 changeSlide(index - getCurrentIndex());
             }
-        });
+        };
+        dot.addEventListener("click", activateDot);
+        bindDotKeyboard(dot, activateDot);
 
       dot.addEventListener("mouseenter", () => {
       modalState.isMouseInItem = true;
@@ -1309,6 +1355,8 @@ export function createDotNavigation() {
 
     const leftArrow = document.createElement("button");
     leftArrow.className = "monwui-dot-arrow monwui-dot-arrow-left";
+    leftArrow.type = "button";
+    leftArrow.setAttribute("aria-label", "Previous dots");
     leftArrow.innerHTML = "&#10094;";
     leftArrow.addEventListener("click", () => {
         scrollWrapper.scrollBy({ left: -scrollWrapper.clientWidth, behavior: lowPower ? "auto" : "smooth" });
@@ -1316,6 +1364,8 @@ export function createDotNavigation() {
 
     const rightArrow = document.createElement("button");
     rightArrow.className = "monwui-dot-arrow monwui-dot-arrow-right";
+    rightArrow.type = "button";
+    rightArrow.setAttribute("aria-label", "Next dots");
     rightArrow.innerHTML = "&#10095;";
     rightArrow.addEventListener("click", () => {
         scrollWrapper.scrollBy({ left: scrollWrapper.clientWidth, behavior: lowPower ? "auto" : "smooth" });
@@ -1337,6 +1387,7 @@ export function createDotNavigation() {
     const dot = document.createElement("span");
     dot.className = "monwui-dot";
     dot.dataset.index = index;
+    prepareDotElement(dot, index, slides.length, false);
 
     const imageUrl = dotType === "useSlideBackground"
       ? slide.dataset.background
@@ -1354,11 +1405,13 @@ export function createDotNavigation() {
     }
 
     dot.classList.toggle("active", index === currentDotIndex);
-    dot.addEventListener("click", () => {
+    const activateDot = () => {
       if (index !== getCurrentIndex()) {
         changeSlide(index - getCurrentIndex());
       }
-    });
+    };
+    dot.addEventListener("click", activateDot);
+    bindDotKeyboard(dot, activateDot);
 
     dotContainer.appendChild(dot);
   });
@@ -1611,6 +1664,25 @@ export function displaySlide(index) {
   }
 
   showSlide(currentSlide);
+  const activeBackdrop =
+    currentSlide.__backdropImg ||
+    currentSlide.querySelector?.('img.monwui-backdrop') ||
+    currentSlide.querySelector?.('.monwui-backdrop') ||
+    null;
+  if (activeBackdrop) {
+    activeBackdrop.__requestHi?.({ eagerLoad: true, fetchPriority: 'high', immediate: true });
+  }
+  if (!isPeak && len > 1) {
+    for (let step = 1; step <= Math.min(2, len - 1); step++) {
+      const upcomingSlide = slidesArr[(index + step) % len];
+      const upcomingBackdrop =
+        upcomingSlide?.__backdropImg ||
+        upcomingSlide?.querySelector?.('img.monwui-backdrop') ||
+        upcomingSlide?.querySelector?.('.monwui-backdrop') ||
+        null;
+      upcomingBackdrop?.__requestHi?.({ fetchPriority: 'low' });
+    }
+  }
   requestAnimationFrame(() => {
     currentSlide.classList.add("active");
     currentSlide.dispatchEvent(new CustomEvent("slideActive", {

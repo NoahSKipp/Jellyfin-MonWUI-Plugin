@@ -7,11 +7,56 @@ const STORE_ITEM_DETAILS = "itemDetails";
 const STORE_QUERY_CACHE = "queryCache";
 const STORE_USER_DATA = "userData";
 const STORE_META = "meta";
-const MAX_ITEM_RECORDS = 5000;
-const MAX_QUERY_RECORDS = 1200;
-const MAX_USER_DATA_RECORDS = 5000;
-const MAX_META_RECORDS = 1500;
+const MAX_ITEM_RECORDS = 160;
+const MAX_QUERY_RECORDS = 20;
+const MAX_USER_DATA_RECORDS = 300;
+const MAX_META_RECORDS = 100;
 const META_TTL_MS = 45 * 24 * 60 * 60 * 1000;
+const PEOPLE_LIMITS = Object.freeze({
+  Actor: 12,
+  Director: 4,
+  Writer: 4,
+});
+const MEDIA_STREAM_LIMITS = Object.freeze({
+  Video: 1,
+  Audio: 4,
+  Subtitle: 8,
+});
+const DETAIL_ITEM_DROP_FIELDS = Object.freeze([
+  "ImageBlurHashes",
+  "GenreItems",
+  "MediaSources",
+  "Chapters",
+  "Path",
+]);
+const QUERY_POOL_ITEM_KEEP_FIELDS = Object.freeze([
+  "Name",
+  "OriginalTitle",
+  "ServerId",
+  "Id",
+  "Type",
+  "MediaType",
+  "RunTimeTicks",
+  "ProductionYear",
+  "CommunityRating",
+  "CriticRating",
+  "OfficialRating",
+  "ImageTags",
+  "BackdropImageTags",
+  "PrimaryImageAspectRatio",
+  "UserData",
+  "SeriesId",
+  "SeriesName",
+  "CollectionIds",
+  "AlbumId",
+  "Album",
+  "AlbumArtist",
+  "Artists",
+  "PrimaryImageTag",
+  "ChildCount",
+  "ParentIndexNumber",
+  "IndexNumber",
+]);
 
 const DEFAULTS = {
   itemTtlMs: 7 * 24 * 60 * 60 * 1000,
@@ -296,6 +341,29 @@ function pruneStore(store) {
   pruneMetaMap(store[STORE_META], MAX_META_RECORDS);
 }
 
+function compactStoreForPersist(store) {
+  for (const row of Object.values(store[STORE_ITEM_DETAILS] || {})) {
+    if (isRecord(row) && isRecord(row.data)) {
+      row.data = compactItemForCache(row.data);
+    }
+  }
+
+  for (const row of Object.values(store[STORE_QUERY_CACHE] || {})) {
+    if (!isRecord(row)) continue;
+    if (isRecord(row.data)) {
+      row.data = compactQueryDataForCache(row.data, row.meta);
+    }
+  }
+}
+
+function prepareStoreForPersist(data) {
+  const store = ensureStoreShape(data);
+  compactStoreForPersist(store);
+  pruneStore(store);
+  store[STORE_USER_DATA] = {};
+  return store;
+}
+
 function fnv1a(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -327,7 +395,10 @@ async function openDb() {
       saveDelayMs: 700,
       retryDelayMs: 2000,
       legacyDbNames: [DB_NAME],
-      stableIgnoreFields: ["fetchedAt", "updatedAt"]
+      stableIgnoreFields: ["fetchedAt", "updatedAt"],
+      stableIgnoreTopLevelKeys: [STORE_USER_DATA],
+      persistTransform: prepareStoreForPersist,
+      readRemoteOnColdStart: false
     }));
   }
 
@@ -364,21 +435,156 @@ function isRecord(value) {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function copyDefinedFields(source, fields) {
+  if (!isRecord(source)) return source;
+  const out = {};
+  for (const field of fields) {
+    if (source[field] !== undefined) out[field] = source[field];
+  }
+  return out;
+}
+
+function compactPersonForCache(person) {
+  if (!isRecord(person)) return null;
+  const out = copyDefinedFields(person, ["Name", "Id", "Role", "Type", "PrimaryImageTag"]);
+  return Object.keys(out).length ? out : null;
+}
+
+function compactPeopleForCache(people) {
+  if (!Array.isArray(people)) return people;
+  const counts = Object.create(null);
+  const out = [];
+
+  for (const person of people) {
+    const type = String(person?.Type || "").trim();
+    const limit = PEOPLE_LIMITS[type] || 0;
+    if (!limit) continue;
+    counts[type] = counts[type] || 0;
+    if (counts[type] >= limit) continue;
+
+    const compact = compactPersonForCache(person);
+    if (!compact) continue;
+
+    out.push(compact);
+    counts[type]++;
+  }
+
+  return out;
+}
+
+function compactMediaStreamForCache(stream) {
+  if (!isRecord(stream)) return null;
+  const out = copyDefinedFields(stream, [
+    "Type",
+    "Codec",
+    "Language",
+    "Title",
+    "DisplayTitle",
+    "IsDefault",
+    "IsForced",
+    "IsHearingImpaired",
+    "Height",
+    "Width",
+    "VideoRange",
+    "VideoRangeType",
+    "BitDepth",
+    "Profile",
+    "Channels",
+    "ChannelLayout",
+    "Index",
+  ]);
+  return Object.keys(out).length ? out : null;
+}
+
+function compactMediaStreamsForCache(streams) {
+  if (!Array.isArray(streams)) return streams;
+  const counts = Object.create(null);
+  const out = [];
+
+  for (const stream of streams) {
+    const type = String(stream?.Type || "").trim();
+    const limit = MEDIA_STREAM_LIMITS[type] || 0;
+    if (!limit) continue;
+    counts[type] = counts[type] || 0;
+    if (counts[type] >= limit) continue;
+
+    const compact = compactMediaStreamForCache(stream);
+    if (!compact) continue;
+
+    out.push(compact);
+    counts[type]++;
+  }
+
+  return out;
+}
+
+function compactStudiosForCache(studios) {
+  if (!Array.isArray(studios)) return studios;
+  return studios
+    .map((studio) => isRecord(studio) ? copyDefinedFields(studio, ["Name", "Id"]) : studio)
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function compactItemForCache(item) {
+  if (!isRecord(item)) return item;
+  const out = { ...item };
+
+  for (const field of DETAIL_ITEM_DROP_FIELDS) {
+    delete out[field];
+  }
+
+  if (Array.isArray(out.People)) out.People = compactPeopleForCache(out.People);
+  if (Array.isArray(out.MediaStreams)) out.MediaStreams = compactMediaStreamsForCache(out.MediaStreams);
+  if (Array.isArray(out.Studios)) out.Studios = compactStudiosForCache(out.Studios);
+
+  return out;
+}
+
+function compactItemsPoolItemForCache(item) {
+  if (!isRecord(item)) return item;
+  return copyDefinedFields(item, QUERY_POOL_ITEM_KEEP_FIELDS);
+}
+
+function compactItemsPoolPayloadForCache(payload) {
+  if (Array.isArray(payload)) {
+    return payload.map(compactItemsPoolItemForCache);
+  }
+
+  if (isRecord(payload) && Array.isArray(payload.Items)) {
+    return {
+      ...payload,
+      Items: payload.Items.map(compactItemsPoolItemForCache),
+    };
+  }
+
+  return payload;
+}
+
+function compactQueryDataForCache(data, entryMeta = null) {
+  if (!isRecord(data) || data.__type !== "json") return data;
+  if (String(entryMeta?.kind || "").trim() !== "itemsPool") return data;
+  return {
+    ...data,
+    data: compactItemsPoolPayloadForCache(data.data),
+  };
+}
+
 function createItemCacheEntry(id, data, ttlMs = DEFAULTS.itemTtlMs) {
   const fetchedAt = now();
   return {
     id,
-    data,
+    data: compactItemForCache(data),
     fetchedAt,
     expiresAt: fetchedAt + normalizeTtlMs(ttlMs, 5_000),
   };
 }
 
-function createQueryCacheEntry(key, data, ttlMs = DEFAULTS.queryTtlMs) {
+function createQueryCacheEntry(key, data, ttlMs = DEFAULTS.queryTtlMs, entryMeta = null) {
   const fetchedAt = now();
   return {
     key,
-    data,
+    data: compactQueryDataForCache(data, entryMeta),
     fetchedAt,
     expiresAt: fetchedAt + normalizeTtlMs(ttlMs, 3_000),
   };
@@ -835,7 +1041,7 @@ export async function cachePutItems(items, { ttlMs = DEFAULTS.itemTtlMs } = {}) 
     if (!id || !data) continue;
     entries.push({
       id: String(id),
-      data,
+      data: compactItemForCache(data),
       fetchedAt,
       expiresAt,
     });
@@ -877,7 +1083,7 @@ function cachePutItemsMemory(items, { ttlMs = DEFAULTS.itemTtlMs } = {}) {
     if (!id || !data) continue;
     setMemEntry(mem.item, scope, String(id), {
       id: String(id),
-      data,
+      data: compactItemForCache(data),
       fetchedAt,
       expiresAt,
     });
@@ -952,7 +1158,7 @@ export async function cacheGetQuery(key, { allowStale = false } = {}) {
 
 export async function cachePutQuery(key, data, { ttlMs = DEFAULTS.queryTtlMs, entryMeta = undefined } = {}) {
   if (!key) return false;
-  const entry = createQueryCacheEntry(key, data, ttlMs);
+  const entry = createQueryCacheEntry(key, data, ttlMs, entryMeta);
   if (entryMeta !== undefined) {
     entry.meta = isRecord(entryMeta) ? { ...entryMeta } : entryMeta;
   }

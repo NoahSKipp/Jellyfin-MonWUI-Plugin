@@ -786,7 +786,7 @@ function activateNotifTab(tabName = "new") {
   if (tabName === "serr") {
     if (isSerrArrIntegrationEnabled()) {
       markSerrNotificationsSeen();
-      void refreshSerrNotifications({ render: true }).then(() => markSerrNotificationsSeen());
+      void refreshSerrNotifications({ render: true, includeDownloads: true }).then(() => markSerrNotificationsSeen());
     }
   }
 }
@@ -1101,7 +1101,7 @@ function openModal() {
     renderSerrNotifications();
     const serrTabActive = document.querySelector('#jfNotifModal .jf-notif-tab.active[data-tab="serr"]') != null;
     if (serrTabActive) markSerrNotificationsSeen();
-    void refreshSerrNotifications({ render: true }).then(() => {
+    void refreshSerrNotifications({ render: true, includeDownloads: serrTabActive }).then(() => {
       if (serrTabActive) markSerrNotificationsSeen();
     });
   } else {

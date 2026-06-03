@@ -3906,9 +3906,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return Uri.TryCreate(raw.TrimEnd('/') + "/", UriKind.Absolute, out var api) ? api : null;
         }
 
-        private static object ToRequestDto(SerrRequestEntry entry, bool includeAdminFields, ArrDownloadSnapshot? download = null)
+        private static object ToRequestDto(SerrRequestEntry entry, bool includeAdminFields, ArrDownloadSnapshot? download = null, JMSFusionConfiguration? cfg = null)
         {
             var status = DisplayStatus(entry.Status, download);
+            var serrUrl = BuildSerrMediaWebUrl(cfg ?? GetConfig(), entry);
             return new
             {
                 entry.Id,
@@ -3931,6 +3932,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 Status = status,
                 rawStatus = entry.Status,
                 entry.SerrRequestId,
+                SerrUrl = serrUrl,
                 entry.SerrMediaStatus,
                 entry.SerrRequestStatus,
                 entry.CreatedAtUtc,
@@ -4125,6 +4127,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             return Uri.TryCreate(raw.TrimEnd('/') + "/", UriKind.Absolute, out var api) ? api : null;
+        }
+
+        private static string BuildSerrMediaWebUrl(JMSFusionConfiguration cfg, SerrRequestEntry entry)
+        {
+            if (!cfg.EnableSerrIntegration || string.IsNullOrWhiteSpace(cfg.SerrBaseUrl) || entry.MediaId <= 0) return string.Empty;
+            var webBase = BuildSerrWebBaseUrl(cfg.SerrBaseUrl);
+            if (string.IsNullOrWhiteSpace(webBase)) return string.Empty;
+            var section = Same(entry.MediaType, "tv") ? "tv" : "movie";
+            return webBase + "/" + section + "/" + entry.MediaId.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static string BuildSerrWebBaseUrl(string baseUrl)
+        {
+            var clean = NormalizeBaseUrlForStorage(baseUrl);
+            if (!Uri.TryCreate(clean, UriKind.Absolute, out var uri)) return string.Empty;
+            var raw = uri.ToString().TrimEnd('/');
+            const string apiSuffix = "/api/v1";
+            if (raw.EndsWith(apiSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                raw = raw[..^apiSuffix.Length].TrimEnd('/');
+            }
+            return raw;
         }
 
         private static string NormalizeBaseUrlForStorage(string? value)

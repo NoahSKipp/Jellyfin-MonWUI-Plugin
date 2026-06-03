@@ -3203,11 +3203,11 @@ function showNoTrailerMessage(modal, text) {
 export function getBackdropFromItem(item) {
   if (item?.BackdropImageTags?.length) {
     const tag = item.BackdropImageTags[0];
-    return withServer(`/Items/${item.Id}/Images/Backdrop?tag=${tag}`);
+    return withServer(`/Items/${item.Id}/Images/Backdrop?tag=${encodeURIComponent(tag)}&maxWidth=1280&quality=78&format=webp`);
   }
   if (item?.ImageTags?.Primary) {
     const tag = item.ImageTags.Primary;
-    return withServer(`/Items/${item.Id}/Images/Primary?tag=${tag}`);
+    return withServer(`/Items/${item.Id}/Images/Primary?tag=${encodeURIComponent(tag)}&maxHeight=540&quality=78&format=webp`);
   }
   return null;
 }

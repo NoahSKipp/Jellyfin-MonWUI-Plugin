@@ -319,19 +319,7 @@ function patchLocalStorage() {
 
 async function loadServerSnapshot() {
   try {
-    const response = await fetch(`${USER_SETTINGS_URL}?profile=${encodeURIComponent(profile)}&ts=${Date.now()}`, {
-      method: "GET",
-      cache: "no-store",
-      headers: {
-        "Accept": "application/json"
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`UserSettings HTTP ${response.status}`);
-    }
-
-    const payload = await response.json().catch(() => ({}));
+    const payload = await loadSharedUserSettingsSnapshot(profile);
     forceGlobal = payload?.forceGlobal === true;
     rev = Number(payload?.rev || 0);
 
@@ -347,6 +335,52 @@ async function loadServerSnapshot() {
   } finally {
     snapshotLoaded = true;
   }
+}
+
+function loadSharedUserSettingsSnapshot(targetProfile) {
+  const cleanProfile = String(targetProfile || "desktop").trim() || "desktop";
+  const existingSnapshot = window.__JMS_USER_SETTINGS_SNAPSHOT__;
+  if (existingSnapshot?.profile === cleanProfile && existingSnapshot?.payload) {
+    return Promise.resolve(existingSnapshot.payload);
+  }
+
+  const existingPromise = window.__JMS_USER_SETTINGS_PROMISE__;
+  if (existingPromise?.profile === cleanProfile && existingPromise?.promise) {
+    return existingPromise.promise;
+  }
+
+  const promise = fetch(`${USER_SETTINGS_URL}?profile=${encodeURIComponent(cleanProfile)}&ts=${Date.now()}`, {
+    method: "GET",
+    cache: "no-store",
+    headers: {
+      "Accept": "application/json"
+    }
+  })
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`UserSettings HTTP ${response.status}`);
+      }
+      return response.json().catch(() => ({}));
+    })
+    .then((payload) => {
+      window.__JMS_USER_SETTINGS_SNAPSHOT__ = {
+        profile: cleanProfile,
+        payload: payload || {},
+        at: Date.now()
+      };
+      return payload || {};
+    })
+    .finally(() => {
+      if (window.__JMS_USER_SETTINGS_PROMISE__?.promise === promise) {
+        window.__JMS_USER_SETTINGS_PROMISE__ = null;
+      }
+    });
+
+  window.__JMS_USER_SETTINGS_PROMISE__ = {
+    profile: cleanProfile,
+    promise
+  };
+  return promise;
 }
 
 const bridge = {

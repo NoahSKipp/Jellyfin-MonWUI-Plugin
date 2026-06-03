@@ -3,7 +3,8 @@ import {
   getDefaultLanguage,
   getStoredLanguagePreference,
   setLanguagePreference,
-  getEffectiveLanguage
+  getEffectiveLanguage,
+  ensureLanguageLabels
 } from './index.js';
 
 let translations = getLanguageLabels(getDefaultLanguage());
@@ -30,11 +31,11 @@ function wireSelectOnce() {
   const uiPref = getStoredLanguagePreference() || 'auto';
   if ([...sel.options].some(o => o.value === uiPref)) sel.value = uiPref;
 
-  sel.addEventListener('change', (e) => {
+  sel.addEventListener('change', async (e) => {
     const selected = e.target.value;
     setLanguagePreference(selected);
     const effective = getEffectiveLanguage();
-    translations = getLanguageLabels(effective);
+    translations = await ensureLanguageLabels(effective);
     applyTranslations();
   });
 

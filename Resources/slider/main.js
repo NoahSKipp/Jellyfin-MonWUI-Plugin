@@ -97,6 +97,7 @@ const HOME_ITEM_USERDATA_CACHE_TTL_MS = 5 * 60 * 1000;
 const HOME_RESUME_CACHE_TTL_MS = 5 * 60 * 1000;
 const HOME_LIBRARY_WATCH_INTERVAL_MS = 5 * 60 * 1000;
 const HOME_ITEMS_POOL_CACHE_TTL_MS = 30 * 60 * 1000;
+const HOME_ITEMS_POOL_MAX_LIMIT = 500;
 const FOCUSED_USERDATA_SYNC_MIN_GAP_MS = 45_000;
 let materialIconsRepairPromise = null;
 let __notificationsModulePromise = null;
@@ -1419,10 +1420,18 @@ function isCustomSplashSlideVisuallyReady(targetSlide = null) {
   const backdrop = slide.__backdropImg || slide.querySelector?.(".monwui-backdrop");
   if (!backdrop?.isConnected) return false;
 
+  const backdropReadyFlag = String(slide.dataset?.backdropReady || "").trim().toLowerCase();
   const backdropReady =
     slide.classList.contains("backdrop-ready") ||
-    !!String(slide.dataset?.backdropReady || "").trim() ||
-    (!!backdrop.complete && Number(backdrop.naturalWidth || 0) > 0);
+    backdropReadyFlag === "1" ||
+    backdropReadyFlag === "loaded" ||
+    backdrop.__hydrated === true ||
+    (
+      backdrop.__phase === "hi" &&
+      !!backdrop.complete &&
+      Number(backdrop.naturalWidth || 0) > 0 &&
+      !backdrop.classList.contains("is-lqip")
+    );
   if (!backdropReady) return false;
 
   try {
@@ -5042,7 +5051,8 @@ export async function slidesInit() {
           }
         }
 
-        const maxShufflingLimit = parseInt(config.maxShufflingLimit || "2000", 10);
+        const configuredShufflingLimit = parseInt(config.maxShufflingLimit || "500", 10);
+        const maxShufflingLimit = Math.max(50, Math.min(HOME_ITEMS_POOL_MAX_LIMIT, Number.isFinite(configuredShufflingLimit) ? configuredShufflingLimit : 500));
         const data = await cachedFetchJson({
         keyParts: ["itemsPool", userId, queryString, maxShufflingLimit],
         url: `/Users/${userId}/Items?${queryString}&Limit=${maxShufflingLimit}&EnableTotalRecordCount=false`,

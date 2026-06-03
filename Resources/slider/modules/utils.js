@@ -2289,22 +2289,27 @@ export function idleWarmImages(urls = []) {
 }
 
 export function buildBackdropResponsive(item, index = "0", cfg = getConfig()) {
-  const pixelRatio = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-  const maxTarget = Math.max(1280, (cfg.backdropMaxWidth || 1920) * pixelRatio);
+  const configuredMaxWidth = Number(cfg.backdropMaxWidth) || 1920;
+  const maxTarget = Math.max(1280, Math.min(3840, configuredMaxWidth));
   const fmt = supportsWebP() ? "&format=webp" : "";
-  const tag = (item.ImageTags?.Backdrop?.[index] || "").toString();
+  const indexNum = Math.max(0, Number(index) || 0);
+  const tag = (
+    (Array.isArray(item?.BackdropImageTags) && item.BackdropImageTags[indexNum]) ||
+    (Array.isArray(item?.ImageTags?.Backdrop) && item.ImageTags.Backdrop[indexNum]) ||
+    (typeof item?.ImageTags?.Backdrop === "string" ? item.ImageTags.Backdrop : "")
+  ).toString();
   const id = item.Id;
 
   const widths = [1280, 1920, 2560, 3840].filter((w) => w <= 1.25 * maxTarget);
 
-  const src = S(`/Items/${id}/Images/Backdrop/${index}?tag=${tag}&quality=90&maxWidth=${Math.floor(
+  const src = S(`/Items/${id}/Images/Backdrop/${indexNum}?tag=${tag}&quality=90&maxWidth=${Math.floor(
      maxTarget
   )}${fmt}`);
   const srcset = withServerSrcset(
   widths
     .map(
       (w) =>
-        `/Items/${id}/Images/Backdrop/${index}?tag=${tag}&quality=90&maxWidth=${w}${fmt} ${w}w`
+        `/Items/${id}/Images/Backdrop/${indexNum}?tag=${tag}&quality=90&maxWidth=${w}${fmt} ${w}w`
     )
     .join(", ")
 );
@@ -2486,12 +2491,13 @@ export function formatOfficialRatingLabel(rating) {
 export async function getHighResImageUrls(item, backdropIndex) {
   const itemId = item.Id;
   const logoTag = item.ImageTags?.Logo || "";
-  const pixelRatio = window.devicePixelRatio || 1;
+  const pixelRatio = Math.max(1, Math.min(2, Number(window.devicePixelRatio) || 1));
   const logoHeight = Math.floor(720 * pixelRatio);
   const fmtValue = supportsWebP() ? "webp" : "";
   const index = backdropIndex !== undefined ? backdropIndex : "0";
   const indexNum = Math.max(0, Number(index) || 0);
-  const backdropMaxWidth = (config.backdropMaxWidth || 1920) * pixelRatio;
+  const configuredBackdropMaxWidth = Number(config.backdropMaxWidth) || 1920;
+  const backdropMaxWidth = Math.max(1280, Math.min(3840, configuredBackdropMaxWidth));
   const backdropTags = Array.isArray(item?.BackdropImageTags) ? item.BackdropImageTags : [];
   const backdropTagFromImageTags = Array.isArray(item?.ImageTags?.Backdrop)
     ? item.ImageTags.Backdrop[indexNum]
@@ -2510,17 +2516,34 @@ export async function getHighResImageUrls(item, backdropIndex) {
   backdropQs.set("maxWidth", String(Math.floor(backdropMaxWidth)));
   if (fmtValue) backdropQs.set("format", fmtValue);
   let backdropUrl = "";
+  let backdropPath = "";
   if (backdropTag) {
-    backdropUrl = S(`/Items/${itemId}/Images/Backdrop/${index}?${backdropQs.toString()}`);
+    backdropQs.set("tag", backdropTag);
+    backdropPath = `/Items/${itemId}/Images/Backdrop/${index}`;
+    backdropUrl = S(`${backdropPath}?${backdropQs.toString()}`);
   } else if (thumbTag) {
     backdropQs.set("tag", thumbTag);
-    backdropUrl = S(`/Items/${itemId}/Images/Thumb?${backdropQs.toString()}`);
+    backdropPath = `/Items/${itemId}/Images/Thumb`;
+    backdropUrl = S(`${backdropPath}?${backdropQs.toString()}`);
   } else if (fallbackPrimaryTag) {
     backdropQs.set("tag", fallbackPrimaryTag);
-    backdropUrl = S(`/Items/${fallbackPrimaryItemId}/Images/Primary?${backdropQs.toString()}`);
+    backdropPath = `/Items/${fallbackPrimaryItemId}/Images/Primary`;
+    backdropUrl = S(`${backdropPath}?${backdropQs.toString()}`);
   } else {
-    backdropUrl = S(`/Items/${itemId}/Images/Primary?${backdropQs.toString()}`);
+    backdropPath = `/Items/${itemId}/Images/Primary`;
+    backdropUrl = S(`${backdropPath}?${backdropQs.toString()}`);
   }
+
+  const srcsetWidths = [1280, 1920, 2560, 3840].filter((w) => w <= 1.25 * backdropMaxWidth);
+  const srcset = withServerSrcset(
+    srcsetWidths
+      .map((width) => {
+        const qs = new URLSearchParams(backdropQs.toString());
+        qs.set("maxWidth", String(width));
+        return `${backdropPath}?${qs.toString()} ${width}w`;
+      })
+      .join(", ")
+  );
 
   const placeholderQs = new URLSearchParams();
   placeholderQs.set("quality", "20");
@@ -2529,6 +2552,7 @@ export async function getHighResImageUrls(item, backdropIndex) {
   if (fmtValue) placeholderQs.set("format", fmtValue);
   let placeholderUrl = "";
   if (backdropTag) {
+    placeholderQs.set("tag", backdropTag);
     placeholderUrl = S(`/Items/${itemId}/Images/Backdrop/${index}?${placeholderQs.toString()}`);
   } else if (thumbTag) {
     placeholderQs.set("tag", thumbTag);
@@ -2549,7 +2573,7 @@ export async function getHighResImageUrls(item, backdropIndex) {
   if (fmtValue) logoQs.set("format", fmtValue);
   const logoUrl = S(`/Items/${itemId}/Images/Logo?${logoQs.toString()}`);
 
-  return { backdropUrl, placeholderUrl, logoUrl };
+  return { backdropUrl, placeholderUrl, logoUrl, srcset };
 }
 
 export function createImageWarmQueue({ concurrency = 3 } = {}) {

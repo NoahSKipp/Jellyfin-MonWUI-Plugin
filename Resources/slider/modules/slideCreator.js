@@ -182,7 +182,7 @@ function hydrateBackdrop(img, { lqSrc, hqSrc, hqSrcset = '', fallback = '', eage
     img.__peakHiTimer = 0;
   };
 
-  img.__requestHi = ({ eagerLoad = false, fetchPriority = '' } = {}) => {
+  img.__requestHi = ({ eagerLoad = false, fetchPriority = '', immediate = false } = {}) => {
     const data = img.__bgData || {};
     if (!data.hqSrc || !img.isConnected) return;
     if (img.__phase === 'hi' && img.__hiRequested && (!data.hqSrcset || img.srcset === data.hqSrcset) && img.src === data.hqSrc) {
@@ -193,7 +193,7 @@ function hydrateBackdrop(img, { lqSrc, hqSrc, hqSrcset = '', fallback = '', eage
     img.__phase = 'hi';
     img.__fetchPriorityTarget = fetchPriority || '';
     img.classList.add('is-hi-pending');
-    bgQueueHydration(() => {
+    const applyHiSource = () => {
       if (!img.isConnected) return;
       try {
         if (fetchPriority) img.setAttribute('fetchpriority', fetchPriority);
@@ -203,7 +203,9 @@ function hydrateBackdrop(img, { lqSrc, hqSrc, hqSrcset = '', fallback = '', eage
       try { img.decoding = eagerLoad ? 'auto' : 'async'; } catch {}
       if (data.hqSrcset) img.srcset = data.hqSrcset;
       if (data.hqSrc) img.src = data.hqSrc;
-    });
+    };
+    if (immediate || eagerLoad || fetchPriority === 'high') applyHiSource();
+    else bgQueueHydration(applyHiSource);
   };
 
   img.__requestLq = () => {
@@ -295,7 +297,7 @@ function hydrateBackdrop(img, { lqSrc, hqSrc, hqSrcset = '', fallback = '', eage
 
   __bgIO.observe(img);
   if (eager && hqSrc) {
-    img.__requestHi({ eagerLoad: true, fetchPriority: 'high' });
+    img.__requestHi({ eagerLoad: true, fetchPriority: 'high', immediate: true });
   }
 }
 
@@ -500,7 +502,20 @@ async function createSlide(item, options = {}) {
     } catch {}
   }
 
-  const autoBackdropUrl = S(`/Items/${parentId}/Images/Backdrop/${highestQualityBackdropIndex}`);
+  function buildSlideBackdropUrl(id, index = "0") {
+    const idx = Math.max(0, Number(index) || 0);
+    const tag = Array.isArray(item?.BackdropImageTags) ? (item.BackdropImageTags[idx] || "") : "";
+    const configuredMaxWidth = Number(config.backdropMaxWidth) || 1920;
+    const maxWidth = Math.max(1280, Math.min(3840, configuredMaxWidth));
+    const qs = new URLSearchParams();
+    if (tag) qs.set("tag", tag);
+    qs.set("quality", "90");
+    qs.set("maxWidth", String(Math.floor(maxWidth)));
+    qs.set("format", "webp");
+    return S(`/Items/${id}/Images/Backdrop/${idx}?${qs.toString()}`);
+  }
+
+  const autoBackdropUrl = buildSlideBackdropUrl(parentId, highestQualityBackdropIndex);
   const landscapeUrl = S(`/Items/${parentId}/Images/Thumb/0`);
   const primaryUrl  = S(`/Items/${parentId}/Images/Primary`);
   let logoUrl = S(`/Items/${parentId}/Images/Logo`);
@@ -513,10 +528,10 @@ async function createSlide(item, options = {}) {
   storeBackdropUrl(parentId, autoBackdropUrl);
 
   const manualBackdropUrl = {
-    backdropUrl: S(`/Items/${parentId}/Images/Backdrop/0`),
+    backdropUrl: buildSlideBackdropUrl(parentId, 0),
     landscapeUrl,
     primaryUrl,
-    logoUrl: logoExists ? logoUrl : `/Items/${parentId}/Images/Backdrop/0`,
+    logoUrl: logoExists ? logoUrl : buildSlideBackdropUrl(parentId, 0),
     bannerUrl: S(`/Items/${parentId}/Images/Banner`),
     artUrl: S(`/Items/${parentId}/Images/Art`),
     discUrl: S(`/Items/${parentId}/Images/Disc`),
@@ -552,11 +567,16 @@ async function createSlide(item, options = {}) {
     resolveBackdropSync = resolve;
   });
   const finishBackdropSync = (reason = "loaded") => {
+    if (reason === "loaded") {
+      backdropSyncReason = "loaded";
+      slide.dataset.backdropReady = "1";
+      slide.classList.add("backdrop-ready");
+    } else if (!backdropSyncDone) {
+      backdropSyncReason = String(reason || "0");
+      slide.dataset.backdropReady = backdropSyncReason;
+    }
     if (backdropSyncDone) return backdropSyncReason;
     backdropSyncDone = true;
-    backdropSyncReason = reason;
-    slide.dataset.backdropReady = reason === "loaded" ? "1" : String(reason || "1");
-    slide.classList.add("backdrop-ready");
     try { resolveBackdropSync?.(backdropSyncReason); } catch {}
     return backdropSyncReason;
   };
@@ -618,7 +638,9 @@ async function createSlide(item, options = {}) {
     hqSrc: absBackdrop,
     hqSrcset: absSrcset,
     eager: isFirstSlide,
-    onHiLoaded: () => {  }
+    onHiLoaded: () => {
+      finishBackdropSync("loaded");
+    }
   });
 
   if ((!LOW_POWER_PEAK || isFirstSlide) && allowPeakWarm) {
@@ -643,12 +665,23 @@ async function createSlide(item, options = {}) {
     try { backdropImg.setAttribute('fetchpriority','high'); } catch {}
     try { backdropImg.loading = 'eager'; } catch {}
   };
+  const isHighQualityBackdropReady = () => (
+    backdropImg.__hydrated === true ||
+    (
+      backdropImg.__phase === "hi" &&
+      backdropImg.complete &&
+      Number(backdropImg.naturalWidth || 0) > 0 &&
+      !backdropImg.classList.contains("is-lqip")
+    )
+  );
   backdropImg.addEventListener('load', () => {
-    finishBackdropSync("loaded");
+    if (isHighQualityBackdropReady()) {
+      finishBackdropSync("loaded");
+    }
   }, { passive: true, signal });
   backdropImg.addEventListener('load', pinActiveIfNeeded, { once:true, passive:true, signal });
   requestAnimationFrame(() => {
-    if (backdropImg.complete && backdropImg.naturalWidth > 0) {
+    if (isHighQualityBackdropReady()) {
       finishBackdropSync("loaded");
     }
   });

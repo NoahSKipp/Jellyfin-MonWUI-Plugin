@@ -374,7 +374,7 @@ function buildBackdropUrl(it, idx = 0) {
   if (isLiveTvItemLike(it)) return null;
   const t = (it?.BackdropImageTags || [])[idx];
   if (!t) return null;
-  return `/Items/${it.Id}/Images/Backdrop/${idx}?tag=${encodeURIComponent(t)}&quality=90`;
+  return `/Items/${it.Id}/Images/Backdrop/${idx}?tag=${encodeURIComponent(t)}&quality=76&maxWidth=960&format=webp`;
 }
 
 async function getDetails(itemId, abortSignal) {

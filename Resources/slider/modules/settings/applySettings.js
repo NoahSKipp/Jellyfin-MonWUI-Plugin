@@ -390,7 +390,7 @@ const USER_ONLY_KEYS = [
             sliderDuration: parseInt(formData.get('sliderDuration'), 10),
             limit: parseInt(formData.get('limit'), 10),
             onlyUnwatchedRandom: formData.get('onlyUnwatchedRandom') === 'on',
-            maxShufflingLimit: parseInt(formData.get('maxShufflingLimit'), 10),
+            maxShufflingLimit: Math.max(50, Math.min(500, parseInt(formData.get('maxShufflingLimit'), 10) || 500)),
             excludeEpisodesFromPlaying: formData.get('excludeEpisodesFromPlaying') === 'on',
             showPlaybackProgress: formData.get('showPlaybackProgress') === 'on',
             playingLimit: parseFloat(formData.get('playingLimit')),

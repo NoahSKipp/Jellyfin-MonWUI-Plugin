@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
     {
+        "version": "3.6.0.0",
+        "changelog": "v3.6.0\n\nChanges:\n- Added pagination, enhanced card layouts, rating/provider links, and backdrop hydration to the Seerr request panel\n- Optimized slider cache storage with compression and automatic cleanup of stale entries\n- Added request deduplication and short-lived caching for API GET and item detail requests\n- Improved backdrop, studio hub, and hover image loading with optimized WebP handling and width limits\n- Reduced startup overhead through user settings snapshot sharing and lazy-loaded language resources\n- Limited shuffle ranges to 50-500 and optimized large query pool handling\n\nPerformance:\n- Reduced redundant network requests across media and Seerr views\n- Improved client and server cache efficiency\n- Lowered initial load times and memory usage\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/download/v3.6.0/JMSFusion-3.6.0.0-server.zip",
+        "checksum": "8f9c0ace0130cce221e6f9d31c95589f",
+        "timestamp": "2026-06-03T12:15:08.3177915Z"
+      },
+    {
         "version": "3.5.0.0",
         "changelog": "v3.5.0\n\nChanges:\n- Added search, request matching, and 4K upgrade actions to the Seerr request panel\n- Updated request approval, decline, and retract workflows to stay synchronized with Seerr and Arr states\n- Improved Arr cleanup handling for movies, seasons, and episodes\n- Fixed stability issues affecting hover trailers, notification startup, and quality badges\n- Fixed an issue in the Who's Watching? module (closes #59)\n- Updated manifest changelog and metadata timestamps\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",

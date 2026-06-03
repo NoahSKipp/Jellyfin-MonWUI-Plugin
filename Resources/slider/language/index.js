@@ -1,14 +1,22 @@
 import { languageLabels as turLabels } from './tur.js';
 import { languageLabels as engLabels } from './eng.js';
-import { languageLabels as deuLabels } from './deu.js';
-import { languageLabels as fraLabels } from './fre.js';
-import { languageLabels as rusLabels } from './rus.js';
-import { languageLabels as spaLabels } from './spa.js';
-import { languageLabels as itaLabels } from './ita.js';
-import { languageLabels as jpnLabels } from './jpn.js';
-import { languageLabels as porLabels } from './por.js';
 
 export const AUTO_LANGUAGE_CHANGE_EVENT = 'jms:auto-language-changed';
+
+const LABEL_CACHE = {
+  tur: turLabels,
+  eng: engLabels
+};
+const LABEL_LOADERS = {
+  deu: () => import('./deu.js'),
+  fre: () => import('./fre.js'),
+  rus: () => import('./rus.js'),
+  spa: () => import('./spa.js'),
+  ita: () => import('./ita.js'),
+  jpn: () => import('./jpn.js'),
+  por: () => import('./por.js')
+};
+const LABEL_LOAD_PROMISES = new Map();
 
 let __autoLanguageSyncStarted = false;
 let __autoLanguageReloadOnChange = false;
@@ -41,18 +49,36 @@ export function getLanguageLabels(lang) {
     lang || getEffectiveLanguage?.() || detectBrowserLanguage?.() || 'eng'
   );
 
-  switch (effective) {
-    case 'eng': return engLabels;
-    case 'deu': return deuLabels;
-    case 'fre': return fraLabels;
-    case 'rus': return rusLabels;
-    case 'spa': return spaLabels;
-    case 'ita': return itaLabels;
-    case 'jpn': return jpnLabels;
-    case 'por': return porLabels;
-    case 'tur': return turLabels;
-    default:    return engLabels;
+  if (LABEL_CACHE[effective]) return LABEL_CACHE[effective];
+  void ensureLanguageLabels(effective);
+  return engLabels;
+}
+
+export async function ensureLanguageLabels(lang) {
+  const effective = normalizeLanguageCode(
+    lang || getEffectiveLanguage?.() || detectBrowserLanguage?.() || 'eng'
+  );
+
+  if (LABEL_CACHE[effective]) return LABEL_CACHE[effective];
+
+  const loader = LABEL_LOADERS[effective];
+  if (!loader) return engLabels;
+
+  if (!LABEL_LOAD_PROMISES.has(effective)) {
+    LABEL_LOAD_PROMISES.set(
+      effective,
+      loader()
+        .then((mod) => {
+          const labels = mod?.languageLabels || engLabels;
+          LABEL_CACHE[effective] = labels;
+          return labels;
+        })
+        .catch(() => engLabels)
+        .finally(() => LABEL_LOAD_PROMISES.delete(effective))
+    );
   }
+
+  return LABEL_LOAD_PROMISES.get(effective);
 }
 
 export function detectBrowserLanguage() {
@@ -88,6 +114,10 @@ export function getEffectiveLanguage() {
 export function getDefaultLanguage() {
   return getEffectiveLanguage();
 }
+
+try {
+  await ensureLanguageLabels(getDefaultLanguage());
+} catch {}
 
 export function setLanguagePreference(value) {
   if (!value || value === 'auto') {

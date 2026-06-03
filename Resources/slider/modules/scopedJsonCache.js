@@ -124,9 +124,10 @@ function buildUrl(cacheType, scope) {
   return `${API_BASE}/${encodeURIComponent(String(cacheType || "").trim())}/${encodeURIComponent(String(scope || "").trim())}?ts=${Date.now()}`;
 }
 
-async function readScopePayload(cacheType, scope) {
+async function readScopePayload(cacheType, scope, { allowRemoteRead = true } = {}) {
   const mirrored = readSessionMirror(cacheType, scope);
   if (mirrored) return mirrored;
+  if (!allowRemoteRead) return null;
 
   const response = await fetch(buildUrl(cacheType, scope), {
     method: "GET",
@@ -240,7 +241,9 @@ async function ensureRecord(state, scope) {
 
     record.loadPromise = (async () => {
       try {
-        const loaded = await readScopePayload(state.cacheType, cleanScope);
+        const loaded = await readScopePayload(state.cacheType, cleanScope, {
+          allowRemoteRead: state.readRemoteOnColdStart
+        });
         record.data = normalizeLoadedData(loaded, state.defaultData);
         record.lastPersistedStableJson = stringifyStable(record.data, state.stableOptions);
       } catch (error) {
@@ -295,7 +298,17 @@ async function flushRecord(state, scope, record, options = {}) {
   }
 
   record.dirty = false;
-  const snapshot = deepClone(record.data) || {};
+  let snapshot = deepClone(record.data) || {};
+  if (typeof state.persistTransform === "function") {
+    try {
+      const transformed = state.persistTransform(snapshot);
+      if (transformed && typeof transformed === "object" && !Array.isArray(transformed)) {
+        snapshot = transformed;
+      }
+    } catch (error) {
+      console.warn(`[JMSFusion] ${state.cacheType} scope persist transform failed:`, error);
+    }
+  }
 
   record.savePromise = writeScopePayload(state.cacheType, scope, snapshot, options)
     .then((result) => {
@@ -329,7 +342,9 @@ export function createScopedJsonDb({
   retryDelayMs = 2000,
   legacyDbNames = [],
   stableIgnoreFields = DEFAULT_STABLE_IGNORE_FIELDS,
-  stableIgnoreTopLevelKeys = []
+  stableIgnoreTopLevelKeys = [],
+  persistTransform = null,
+  readRemoteOnColdStart = true
 } = {}) {
   const normalizedType = String(cacheType || "").trim();
   if (!normalizedType) {
@@ -351,6 +366,8 @@ export function createScopedJsonDb({
       ignoreFields: normalizeIgnoreSet(stableIgnoreFields),
       ignoreTopLevelKeys: normalizeIgnoreSet(stableIgnoreTopLevelKeys)
     },
+    persistTransform,
+    readRemoteOnColdStart: readRemoteOnColdStart !== false,
     records: new Map()
   };
 

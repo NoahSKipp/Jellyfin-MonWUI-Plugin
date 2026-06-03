@@ -25,6 +25,7 @@ let lastIsAdmin = false;
 let managerRequests = [];
 let managerIsAdmin = false;
 let managerRefreshPromise = null;
+let managerPage = 1;
 let managerSearchTimer = 0;
 let managerSearchSeq = 0;
 const managerSearchState = {
@@ -38,13 +39,18 @@ let refreshPromise = null;
 let pollTimer = 0;
 let pollEventsBound = false;
 let pollEnabled = false;
-const ACTIVE_DOWNLOAD_POLL_MS = 2_000;
-const OPEN_IDLE_POLL_MS = 5_000;
-const BACKGROUND_POLL_MS = 15_000;
+let lastPanelDownloadRefreshAt = 0;
+const ACTIVE_DOWNLOAD_POLL_MS = 5_000;
+const OPEN_IDLE_POLL_MS = 10_000;
+const BACKGROUND_POLL_MS = 60_000;
+const PANEL_DOWNLOAD_REFRESH_MIN_MS = 30_000;
+const MANAGER_REQUESTS_PAGE_SIZE = 18;
 const SERR_IMAGE_BASE = "https://image.tmdb.org/t/p";
 const CALENDAR_IMAGE_READY_TIMEOUT_MS = 3500;
 const posterCache = new Map();
 const posterPromises = new Map();
+const backdropCache = new Map();
+const backdropPromises = new Map();
 const metadataCache = new Map();
 const metadataPromises = new Map();
 
@@ -333,6 +339,51 @@ function requestIs4K(req) {
   return text(value).toLowerCase() === "true";
 }
 
+function requestTimestampValue(value) {
+  const clean = text(value);
+  if (!clean || clean === "0") return 0;
+  const direct = Number(clean);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const parsed = Date.parse(clean);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function requestLatestTimestamp(req) {
+  return Math.max(
+    requestTimestampValue(req?.UpdatedAtUtc || req?.updatedAtUtc),
+    requestTimestampValue(req?.CompletedAtUtc || req?.completedAtUtc),
+    requestTimestampValue(req?.CreatedAtUtc || req?.createdAtUtc)
+  );
+}
+
+function managerRequestContentKey(req) {
+  const mediaId = requestMediaId(req);
+  if (mediaId > 0) return `${requestMediaType(req)}:${mediaId}`;
+  const title = searchText(req?.Title || req?.title || req?.Name || req?.name);
+  return title ? `${requestMediaType(req)}:title:${title}` : "";
+}
+
+function normalizeManagerRequests(requests) {
+  const byContent = new Map();
+  (Array.isArray(requests) ? requests : []).forEach((req, index) => {
+    const key = managerRequestContentKey(req);
+    if (!key) {
+      byContent.set(`entry:${index}`, { req, index, ts: requestLatestTimestamp(req) });
+      return;
+    }
+
+    const current = { req, index, ts: requestLatestTimestamp(req) };
+    const previous = byContent.get(key);
+    if (!previous || current.ts > previous.ts || (current.ts === previous.ts && current.index > previous.index)) {
+      byContent.set(key, current);
+    }
+  });
+
+  return Array.from(byContent.values())
+    .sort((a, b) => (b.ts - a.ts) || (b.index - a.index))
+    .map((entry) => entry.req);
+}
+
 function renderRequest4KBadge(req) {
   if (!requestIs4K(req)) return "";
   const label = L("serrRequest4KBadge", "4K");
@@ -356,6 +407,12 @@ function posterCacheKey(req) {
   return `${requestMediaType(req)}:${id}`;
 }
 
+function findRequestByArtKey(key) {
+  const clean = text(key);
+  if (!clean) return null;
+  return [...cachedRequests, ...managerRequests].find((entry) => posterCacheKey(entry) === clean) || null;
+}
+
 function isGeneratedSerrTitle(value, req) {
   const title = text(value);
   const requestId = Number(req?.SerrRequestId || req?.serrRequestId || 0);
@@ -364,6 +421,24 @@ function isGeneratedSerrTitle(value, req) {
 
 function directPosterUrl(req) {
   return imageUrl(readFirst(req, "PosterUrl", "posterUrl", "PosterPath", "posterPath", "poster_path", "image", "Image"));
+}
+
+function directBackdropUrl(req) {
+  return imageUrl(readFirst(req, "BackdropUrl", "backdropUrl", "BackdropPath", "backdropPath", "backdrop_path", "FanartUrl", "fanartUrl", "fanart"), "w780");
+}
+
+function metadataImageUrl(details, size, ...keys) {
+  if (!details || typeof details !== "object") return "";
+  const nested = readFirst(details, "media", "mediaInfo", "movie", "tv", "show", "item");
+  return imageUrl(readFirst(details, ...keys) || readFirst(nested, ...keys), size);
+}
+
+function metadataPosterUrl(details) {
+  return metadataImageUrl(details, "w342", "posterPath", "poster_path", "PosterPath", "posterUrl", "PosterUrl");
+}
+
+function metadataBackdropUrl(details) {
+  return metadataImageUrl(details, "w780", "backdropPath", "backdrop_path", "BackdropPath", "backdropUrl", "BackdropUrl", "fanart", "Fanart");
 }
 
 async function resolvePosterUrl(req) {
@@ -383,7 +458,7 @@ async function resolvePosterUrl(req) {
   if (posterPromises.has(key)) return posterPromises.get(key);
 
   const job = resolveRequestMetadata(req).then((details) => {
-    const poster = imageUrl(readFirst(details, "posterPath", "poster_path", "PosterPath"));
+    const poster = metadataPosterUrl(details);
     posterCache.set(key, poster || "");
     return poster || "";
   }).finally(() => {
@@ -391,6 +466,30 @@ async function resolvePosterUrl(req) {
   });
 
   posterPromises.set(key, job);
+  return job;
+}
+
+async function resolveBackdropUrl(req) {
+  const direct = directBackdropUrl(req);
+  if (direct) return direct;
+
+  const key = posterCacheKey(req);
+  const posterFallback = directPosterUrl(req) || (key ? posterCache.get(key) : "");
+  if (!key) return posterFallback || "";
+  if (backdropCache.has(key)) return backdropCache.get(key) || posterFallback || "";
+  if (backdropPromises.has(key)) return backdropPromises.get(key);
+
+  const job = resolveRequestMetadata(req).then((details) => {
+    const poster = metadataPosterUrl(details);
+    const backdrop = metadataBackdropUrl(details) || poster || posterFallback;
+    if (poster && !posterCache.get(key)) posterCache.set(key, poster);
+    backdropCache.set(key, backdrop || "");
+    return backdrop || "";
+  }).finally(() => {
+    backdropPromises.delete(key);
+  });
+
+  backdropPromises.set(key, job);
   return job;
 }
 
@@ -446,11 +545,158 @@ function updateHydratedRequestTitle(node, req) {
   });
 }
 
+function requestMetadataSources(req, details) {
+  const sources = [];
+  const add = (value) => {
+    if (value && typeof value === "object" && !sources.includes(value)) sources.push(value);
+  };
+
+  add(req);
+  add(details);
+  add(readFirst(details, "media", "mediaInfo", "movie", "tv", "show", "item"));
+  add(readFirst(details, "externalIds", "external_ids", "ids", "Ids"));
+  add(readFirst(details, "providerIds", "ProviderIds"));
+  return sources;
+}
+
+function readRequestMetadataValue(req, details, ...keys) {
+  for (const source of requestMetadataSources(req, details)) {
+    const direct = readFirst(source, ...keys);
+    if (direct !== undefined && direct !== null && text(direct)) return direct;
+    const providerIds = readFirst(source, "providerIds", "ProviderIds", "externalIds", "external_ids", "ids", "Ids");
+    const providerValue = readFirst(providerIds, ...keys);
+    if (providerValue !== undefined && providerValue !== null && text(providerValue)) return providerValue;
+  }
+  return undefined;
+}
+
+function numericRating(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  const clean = text(value).replace(",", ".");
+  if (!clean) return NaN;
+  const match = clean.match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : NaN;
+}
+
+function formatRatingScore(value) {
+  const raw = numericRating(value);
+  if (!Number.isFinite(raw) || raw <= 0) return "";
+  const score = raw > 10 && raw <= 100 ? raw / 10 : raw;
+  if (!Number.isFinite(score) || score <= 0 || score > 10) return "";
+  return score >= 9.95 ? "10" : score.toFixed(1).replace(/\.0$/, "");
+}
+
+function ratingFromRatingsObject(ratings) {
+  if (!ratings || typeof ratings !== "object") return "";
+  const sources = [
+    ratings,
+    readFirst(ratings, "tmdb", "tmdbRating", "Tmdb", "TMDb", "theMovieDb"),
+    readFirst(ratings, "imdb", "imdbRating", "Imdb", "IMDb")
+  ].filter((value) => value && typeof value === "object");
+
+  for (const source of sources) {
+    const score = formatRatingScore(readFirst(source, "value", "score", "rating", "Rating", "average", "Average"));
+    if (score) return score;
+  }
+  return formatRatingScore(readFirst(ratings, "value", "score", "rating", "Rating", "average", "Average"));
+}
+
+function requestRatingScore(req, details) {
+  for (const source of requestMetadataSources(req, details)) {
+    const score = formatRatingScore(readFirst(
+      source,
+      "CommunityRating",
+      "communityRating",
+      "voteAverage",
+      "vote_average",
+      "VoteAverage",
+      "ratingValue",
+      "RatingValue",
+      "tmdbRating",
+      "TmdbRating"
+    ));
+    if (score) return score;
+
+    const nestedScore = ratingFromRatingsObject(readFirst(source, "ratings", "Ratings"));
+    if (nestedScore) return nestedScore;
+  }
+  return "";
+}
+
+function requestOfficialRating(req, details) {
+  const value = readRequestMetadataValue(
+    req,
+    details,
+    "OfficialRating",
+    "officialRating",
+    "certification",
+    "Certification",
+    "contentRating",
+    "content_rating",
+    "mpaaRating",
+    "MpaaRating",
+    "rated",
+    "Rated"
+  );
+  return text(value);
+}
+
+function renderRequestRatingContent(req, details) {
+  const score = requestRatingScore(req, details);
+  const official = requestOfficialRating(req, details);
+  const display = [score, official].filter(Boolean).join(" / ");
+  const label = [score ? `${L("rating", "Rating")} ${score}` : "", official].filter(Boolean).join(" / ");
+  if (!display) return "";
+  return `<span class="monwui-serr-rating-badge" title="${escapeHtml(label || display)}"><i class="fas fa-star" aria-hidden="true"></i><span>${escapeHtml(display)}</span></span>`;
+}
+
+function renderRequestRatingSlot(req, details) {
+  const html = renderRequestRatingContent(req, details);
+  return `<span class="monwui-serr-request-rating-slot" data-serr-rating-slot ${html ? "" : "hidden"}>${html}</span>`;
+}
+
+function requestProviderLinksContent(req, details) {
+  const mediaType = requestMediaType(req);
+  const tmdbId = calendarId(requestMediaId(req) || readRequestMetadataValue(req, details, "tmdbId", "TmdbId", "tmdb", "Tmdb") || readFirst(details, "id"));
+  const imdbId = calendarId(readRequestMetadataValue(req, details, "imdbId", "ImdbId", "imdb_id", "Imdb", "IMDb"));
+  const tvdbId = calendarId(readRequestMetadataValue(req, details, "tvdbId", "TvdbId", "tvdb", "Tvdb", "TVDb"));
+  const serrUrl = safeExternalUrl(readRequestMetadataValue(req, details, "serrUrl", "SerrUrl", "seerrUrl", "SeerrUrl", "overseerrUrl", "OverseerrUrl"));
+  const links = [];
+
+  if (serrUrl) links.push(calendarIconLink({ key: "seerr", label: "Seerr", url: serrUrl }));
+  if (tmdbId) links.push(calendarIconLink({ key: "tmdb", label: "TMDb", url: calendarProviderUrl("tmdb", tmdbId, mediaType) }));
+  if (imdbId) links.push(calendarIconLink({ key: "imdb", label: "IMDb", url: calendarProviderUrl("imdb", imdbId, mediaType) }));
+  if (tvdbId) links.push(calendarIconLink({ key: "tvdb", label: "TVDb", url: calendarProviderUrl("tvdb", tvdbId, mediaType) }));
+  return links.filter(Boolean).join("");
+}
+
+function renderRequestProviderLinks(req, details) {
+  const html = requestProviderLinksContent(req, details);
+  return `<span class="monwui-serr-calendar-links monwui-serr-request-links" data-serr-provider-links ${html ? "" : "hidden"}>${html}</span>`;
+}
+
+function updateRequestCardMetadata(card, req, details) {
+  if (!card || !req) return;
+  const ratingSlot = card.querySelector?.("[data-serr-rating-slot]");
+  if (ratingSlot) {
+    const ratingHtml = renderRequestRatingContent(req, details);
+    ratingSlot.innerHTML = ratingHtml;
+    ratingSlot.hidden = !ratingHtml;
+  }
+
+  const linksSlot = card.querySelector?.("[data-serr-provider-links]");
+  if (linksSlot) {
+    const linksHtml = requestProviderLinksContent(req, details);
+    linksSlot.innerHTML = linksHtml;
+    linksSlot.hidden = !linksHtml;
+  }
+}
+
 function posterFallbackLabel(req) {
   return requestMediaType(req) === "tv" ? L("serrTv", "Dizi") : L("serrMovie", "Film");
 }
 
-function renderPoster(req, className = "") {
+function renderPoster(req, className = "", { ratingSlotHtml = "" } = {}) {
   const direct = directPosterUrl(req);
   const key = posterCacheKey(req);
   const cached = key ? posterCache.get(key) : "";
@@ -468,17 +714,42 @@ function renderPoster(req, className = "") {
       ${url
         ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`
         : `<div class="monwui-serr-poster-fallback"><i class="fas fa-clapperboard" aria-hidden="true"></i><span>${escapeHtml(label)}</span></div>`}
+      ${ratingSlotHtml}
+    </div>
+  `;
+}
+
+function renderBackdrop(req) {
+  const direct = directBackdropUrl(req);
+  const poster = directPosterUrl(req) || (posterCacheKey(req) ? posterCache.get(posterCacheKey(req)) : "");
+  const key = posterCacheKey(req);
+  const hasCached = key ? backdropCache.has(key) : false;
+  const cached = hasCached ? backdropCache.get(key) : "";
+  const url = direct || cached || poster || "";
+  const isPosterFallback = !direct && (!cached || cached === poster) && !!poster;
+  const title = text(req?.Title || req?.title, L("serrUntitled", "İçerik"));
+  const attrs = [
+    `class="monwui-serr-request-backdrop ${url ? "has-image" : ""} ${isPosterFallback ? "is-poster-fallback" : ""}"`,
+    key ? `data-serr-art-key="${escapeHtml(key)}"` : "",
+    direct || hasCached || (poster && !key) ? `data-serr-art-ready="1"` : "",
+    url ? "" : `data-serr-art-empty="1"`
+  ].filter(Boolean).join(" ");
+
+  return `
+    <div ${attrs} aria-hidden="true">
+      ${url
+        ? `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`
+        : `<div class="monwui-serr-request-backdrop-fallback"><i class="fas fa-image" aria-hidden="true"></i></div>`}
     </div>
   `;
 }
 
 function hydrateRequestPosters(scope = document) {
   const nodes = Array.from(scope.querySelectorAll?.(".monwui-serr-poster[data-serr-art-key]:not([data-serr-art-ready='1'])") || []);
-  if (!nodes.length) return;
 
   for (const node of nodes) {
     const key = text(node.getAttribute("data-serr-art-key"));
-    const req = [...cachedRequests, ...managerRequests].find((entry) => posterCacheKey(entry) === key);
+    const req = findRequestByArtKey(key);
     if (!req) continue;
 
     resolvePosterUrl(req).then((url) => {
@@ -486,9 +757,53 @@ function hydrateRequestPosters(scope = document) {
       updateHydratedRequestTitle(node, req);
       if (!url || node.getAttribute("data-serr-art-ready") === "1") return;
       const title = text(req?.Title || req?.title, L("serrUntitled", "İçerik"));
-      node.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`;
+      const ratingSlot = node.querySelector?.("[data-serr-rating-slot]");
+      node.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">${ratingSlot ? ratingSlot.outerHTML : ""}`;
       node.setAttribute("data-serr-art-ready", "1");
     }).catch(() => {});
+  }
+
+  const backdropNodes = Array.from(scope.querySelectorAll?.(".monwui-serr-request-backdrop[data-serr-art-key]:not([data-serr-art-ready='1'])") || []);
+  for (const node of backdropNodes) {
+    const key = text(node.getAttribute("data-serr-art-key"));
+    const req = findRequestByArtKey(key);
+    if (!req) continue;
+
+    resolveBackdropUrl(req).then((url) => {
+      if (!node.isConnected) return;
+      if (!url) {
+        node.setAttribute("data-serr-art-ready", "1");
+        node.setAttribute("data-serr-art-empty", "1");
+        return;
+      }
+      const title = text(req?.Title || req?.title, L("serrUntitled", "İçerik"));
+      node.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async">`;
+      node.classList.add("has-image");
+      if (url === directPosterUrl(req) || url === (posterCacheKey(req) ? posterCache.get(posterCacheKey(req)) : "")) {
+        node.classList.add("is-poster-fallback");
+      } else {
+        node.classList.remove("is-poster-fallback");
+      }
+      node.removeAttribute("data-serr-art-empty");
+      node.setAttribute("data-serr-art-ready", "1");
+    }).catch(() => {});
+  }
+
+  const cards = Array.from(scope.querySelectorAll?.(".monwui-serr-request-card[data-serr-request-key]:not([data-serr-meta-ready='1'])") || []);
+  for (const card of cards) {
+    const key = text(card.getAttribute("data-serr-request-key"));
+    const req = findRequestByArtKey(key);
+    if (!req) continue;
+
+    updateRequestCardMetadata(card, req, metadataCache.get(key));
+    resolveRequestMetadata(req).then((details) => {
+      if (!card.isConnected) return;
+      updateHydratedRequestTitle(card, req);
+      updateRequestCardMetadata(card, req, details);
+      card.setAttribute("data-serr-meta-ready", "1");
+    }).catch(() => {
+      if (card.isConnected) card.setAttribute("data-serr-meta-ready", "1");
+    });
   }
 }
 
@@ -565,7 +880,7 @@ function ensureSerrProgressStyles() {
       white-space: nowrap;
     }
     .monwui-serr-requests-modal.open .monwui-serr-requests-dialog {
-      width: min(1180px, calc(100vw - 32px));
+      width: min(1440px, calc(100vw - 32px));
     }
     .monwui-serr-requests-modal.open .monwui-serr-requests-head {
       gap: 10px;
@@ -681,7 +996,6 @@ function ensureSerrProgressStyles() {
       font-weight: 850;
       line-height: 1.25;
       padding: 2px 2px 0;
-      text-transform: uppercase;
     }
     .monwui-serr-requests-modal.open .monwui-serr-manager-result {
       align-items: center;
@@ -744,56 +1058,560 @@ function ensureSerrProgressStyles() {
       -webkit-line-clamp: 2;
       overflow: hidden;
     }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-pagination {
+      align-items: center;
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      margin-top: 14px;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-page-summary {
+      align-items: center;
+      background: var(--jf-notif-surface-2, var(--head-bg, rgba(255,255,255,.06)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 999px;
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.68)));
+      display: inline-flex;
+      font-size: 12px;
+      font-weight: 800;
+      gap: 8px;
+      min-height: 34px;
+      padding: 7px 12px;
+      box-sizing: border-box;
+      white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-page-summary b {
+      color: var(--jf-notif-text, #fff);
+      font-weight: 900;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-requests-page-controls {
+      align-items: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+      min-width: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-btn {
+      align-items: center;
+      background: var(--jf-notif-surface-2, var(--head-bg, rgba(255,255,255,.06)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.12)));
+      border-radius: 8px;
+      box-sizing: border-box;
+      color: var(--jf-notif-text, #fff);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 850;
+      height: 34px;
+      justify-content: center;
+      line-height: 1;
+      min-width: 34px;
+      padding: 0 10px;
+      transition: background .18s ease, border-color .18s ease, color .18s ease, opacity .18s ease;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-btn.icon {
+      padding: 0;
+      width: 34px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-btn:hover,
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-btn.active {
+      background: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 24%, transparent);
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 52%, transparent);
+      color: var(--jf-notif-text, #fff);
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-btn:disabled {
+      cursor: default;
+      opacity: .45;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-manager-page-gap {
+      color: var(--jf-notif-text-dim, var(--nft-text-secondary, rgba(255,255,255,.62)));
+      font-size: 12px;
+      font-weight: 900;
+      min-width: 16px;
+      text-align: center;
+    }
+    @keyframes monwui-serr-manager-focus {
+      0% {
+        border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 88%, #fff);
+        box-shadow:
+          var(--jf-notif-shadow, 0 28px 70px rgba(0,0,0,.28)),
+          0 0 0 0 color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 0%, transparent);
+      }
+      24% {
+        border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 86%, #fff);
+        box-shadow:
+          var(--jf-notif-shadow, 0 34px 86px rgba(0,0,0,.36)),
+          0 0 0 3px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 32%, transparent),
+          0 0 34px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 30%, transparent);
+      }
+      100% {
+        border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 40%, var(--jf-notif-border, rgba(255,255,255,.13)));
+        box-shadow:
+          var(--jf-notif-shadow, 0 28px 70px rgba(0,0,0,.28)),
+          0 0 0 1px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 14%, transparent);
+      }
+    }
+    @keyframes monwui-serr-manager-focus-sheen {
+      from { transform: translateX(-120%); }
+      to { transform: translateX(120%); }
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 70%, transparent);
+      outline-offset: 3px;
+    }
     .monwui-serr-requests-modal.open .monwui-serr-request-card.monwui-serr-request-card-hit {
-      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 70%, transparent);
-      box-shadow: 0 0 0 2px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 28%, transparent);
+      animation: monwui-serr-manager-focus 1.6s cubic-bezier(.22,1,.36,1);
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 58%, var(--jf-notif-border, rgba(255,255,255,.13)));
+      box-shadow:
+        var(--jf-notif-shadow, 0 28px 70px rgba(0,0,0,.28)),
+        0 0 0 1px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 18%, transparent);
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card.monwui-serr-request-card-hit:after {
+      background: linear-gradient(110deg, transparent 16%, color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 24%, transparent) 48%, transparent 72%);
+      content: "";
+      inset: 0;
+      pointer-events: none;
+      position: absolute;
+      transform: translateX(-120%);
+      z-index: 6;
+      animation: monwui-serr-manager-focus-sheen .9s cubic-bezier(.22,1,.36,1);
     }
     .monwui-serr-requests-modal.open .monwui-serr-requests-list {
       align-items: stretch;
       display: grid;
-      gap: 12px;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .monwui-serr-requests-modal.open .monwui-serr-request-card {
+      align-content: stretch;
+      --monwui-serr-request-card-height: 250px;
+      --monwui-serr-request-surface: var(--jf-notif-serr-btn, var(--head-bg, #171a23));
+      background: var(--monwui-serr-request-surface);
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.13)));
+      border-radius: 10px;
+      box-shadow: var(--jf-notif-shadow, 0 28px 70px rgba(0,0,0,.28));
+      box-sizing: border-box;
+      display: grid;
+      gap: 0;
+      height: var(--monwui-serr-request-card-height);
+      isolation: isolate;
+      min-height: var(--monwui-serr-request-card-height);
+      min-width: 0;
+      overflow: hidden;
+      padding: 0;
+      position: relative;
+      transition: transform .4s ease, box-shadow .2s ease, border-color .12s ease;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card:before {
+      background:
+        linear-gradient(90deg, color-mix(in srgb, var(--jf-notif-text, #fff) 10%, transparent), transparent 44%),
+        linear-gradient(180deg, color-mix(in srgb, var(--jf-notif-text, #fff) 5%, transparent), transparent);
+      content: "";
+      inset: 0;
+      opacity: .72;
+      pointer-events: none;
+      position: absolute;
+      z-index: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card:hover {
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 34%, var(--jf-notif-border, rgba(255,255,255,.2)));
+      box-shadow:
+        var(--jf-notif-shadow, 0 34px 86px rgba(0,0,0,.38)),
+        0 0 0 1px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 16%, transparent),
+        inset 0 1px 0 color-mix(in srgb, var(--jf-notif-text, #fff) 12%, transparent);
+      transform: scale(1.02);
+    }
+
+    .monwui-serr-requests-modal.open .monwui-serr-request-main {
+      align-items: stretch;
+      display: block;
+      height: var(--monwui-serr-request-card-height);
+      min-height: var(--monwui-serr-request-card-height);
+      min-width: 0;
+      position: relative;
+      z-index: 1;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-poster.large {
+      border-radius: 8px;
+      box-shadow: 0 18px 38px rgba(0,0,0,.42);
+      left: 18px;
+      position: absolute;
+      top: 40px;
+      width: 78px;
+      z-index: 4;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-content {
       align-content: start;
       box-sizing: border-box;
       display: grid;
-      gap: 12px;
+      gap: 9px;
+      height: var(--monwui-serr-request-card-height);
+      min-height: var(--monwui-serr-request-card-height);
+      min-width: 0;
+      padding: 50px 8px 42px 110px;
+      position: relative;
+      width: 100%;
+      z-index: auto;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-title-row {
+      align-items: center;
+      gap: 8px;
       min-width: 0;
     }
-    .monwui-serr-requests-modal.open .monwui-serr-request-main {
-      align-items: start;
-      display: grid;
-      gap: 12px;
-      grid-template-columns: 74px minmax(0, 1fr);
-      min-width: 0;
+    .monwui-serr-requests-modal.open .monwui-serr-request-content > .monwui-serr-calendar-links {
+      align-self: start;
+      gap: 5px;
+      justify-content: flex-start;
+      margin-top: -2px;
     }
-    .monwui-serr-requests-modal.open .monwui-serr-poster.large {
-      width: 74px;
+    .monwui-serr-requests-modal.open .monwui-serr-request-content > .monwui-serr-calendar-links .monwui-serr-calendar-link {
+      border-radius: 7px;
+      height: 24px;
+      padding: 4px;
+      width: 28px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-content > .monwui-serr-calendar-links .monwui-serr-calendar-link img {
+      max-height: 20px;
+      max-width: 24px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-poster.large .monwui-serr-request-rating-slot {
+      align-items: center;
+      display: flex;
+      justify-content: center;
+      left: 5px;
+      pointer-events: none;
+      position: absolute;
+      right: 5px;
+      top: 5px;
+      z-index: 5;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-poster.large .monwui-serr-request-rating-slot[hidden] {
+      display: none !important;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-rating-badge {
+      align-items: center;
+      background: rgba(16,18,24,.82);
+      border: 1px solid color-mix(in srgb, var(--jf-notif-warning, #fbbf24) 34%, transparent);
+      border-radius: 999px;
+      box-sizing: border-box;
+      color: var(--jf-notif-warning, #fbbf24);
+      display: inline-flex;
+      font-size: 10px;
+      font-weight: 850;
+      gap: 3px;
+      justify-content: center;
+      line-height: 1;
+      max-width: 100%;
+      min-width: 0;
+      padding: 3px 5px;
+      white-space: nowrap;
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-rating-badge i,
+    .monwui-serr-requests-modal.open .monwui-serr-rating-badge span {
+      margin: 0;
+      padding: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-rating-badge span {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-rating-badge i {
+      flex: 0 0 auto;
+      font-size: .78rem;
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-request-name {
+      display: -webkit-box;
+      font-size: 21px;
+      font-weight: 900;
+      line-height: 1.08;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-title-row .monwui-serr-state {
+      color: var(--jf-notif-subtext, var(--jf-notif-text-dim, rgba(255,255,255,.56)));
+      font-size: 11px;
+      font-weight: 650;
+      line-height: 1;
+      position: absolute;
+      top: 8px;
+      left: 18px;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-backdrop {
+      border: 0;
+      bottom: 0;
+      box-shadow: none;
+      box-sizing: border-box;
+      height: var(--monwui-serr-request-card-height);
+      min-height: 0;
+      overflow: hidden;
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 70%;
+      z-index: -1;
+      -webkit-mask-image: linear-gradient(
+          to left,
+          #000 0%,
+          transparent 90%
+      );
+      mask-image: linear-gradient(
+          to left,
+          #000 0%,
+          transparent 90%
+      );
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-request-backdrop img {
+        display: block;
+        height: 100%;
+        object-fit: cover;
+        width: 100%;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-backdrop-fallback {
+      align-items: center;
+      color: var(--jf-notif-subtext, var(--jf-notif-text-dim, rgba(255,255,255,.48)));
+      display: flex;
+      height: 100%;
+      justify-content: center;
+      min-height: inherit;
+      width: 100%;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-type-badge {
+      align-items: center;
+      background: color-mix(in srgb, var(--monwui-serr-request-surface) 88%, transparent);
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.18)));
+      border-radius: 999px;
+      bottom: 8px;
+      box-shadow: 0 12px 26px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.12);
+      box-sizing: border-box;
+      color: var(--jf-notif-text, rgba(255,255,255,.82));
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 900;
+      justify-content: center;
+      line-height: 1.2;
+      min-height: 24px;
+      padding: 7px 10px;
+      position: absolute;
+      right: 8px;
+      white-space: nowrap;
+      z-index: 4;
+      aspect-ratio: 1;
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-request-backdrop.is-poster-fallback img {
+      filter: saturate(.95) brightness(.82);
     }
     .monwui-serr-requests-modal.open .monwui-serr-request-actions {
       align-self: start;
       display: flex;
-      flex-wrap: wrap;
       gap: 8px;
-      grid-column: 1 / -1;
-      justify-content: flex-start;
+      margin-top: 2px;
       min-width: 0;
+      position: absolute;
+      z-index: 4;
+      width: 100%;
+      bottom: 50px;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+    padding: 4px;
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn {
+      align-items: center;
+      background: var(--jf-notif-serr-btn, var(--jf-notif-serr-btn, rgba(255,255,255,.08)));
+      border: 1px solid var(--jf-notif-border);
+      border-radius: 999px;
+      color: var(--jf-notif-accent);
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 850;
+      gap: 7px;
+      padding: 6px 10px;
+      transition: color .2s ease, border-color .15s ease, background .25s ease;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn:hover {
+      color: var(--ntf-text);
+      background: var(--notif-accent);
+      border-color: var(--jf-notif-hover);
+  }
+    .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn i,
+    .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn span {
+      margin: 0;
+      padding: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap {
+      bottom: 16px;
+      left: 18px;
+      position: absolute;
+      z-index: 7;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-toggle {
+      align-items: center;
+      background: var(--jf-notif-card-bg, var(--head-bg, rgba(255,255,255,.08)));
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.14)));
+      border-radius: 999px;
+      box-shadow: var(--jf-notif-shadow, 0 10px 24px rgba(0,0,0,.18));
+      color: var(--jf-notif-text, #fff);
+      cursor: pointer;
+      display: inline-flex;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 850;
+      gap: 7px;
+      justify-content: center;
+      line-height: 1;
+      min-height: 28px;
+      padding: 8px 12px;
+      white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-toggle i {
+      padding: 0;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-toggle:hover,
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap:focus-within .monwui-serr-request-details-toggle {
+      background: var(--jf-notif-hover, var(--row-hover, rgba(255,255,255,.08)));
+      border-color: color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 42%, var(--jf-notif-border, rgba(255,255,255,.14)));
+      color: var(--jf-notif-accent, var(--notif-accent, #6aa6ff));
     }
     .monwui-serr-requests-modal.open .monwui-serr-request-details {
+      -webkit-backdrop-filter: blur(18px) saturate(1.08);
+      backdrop-filter: blur(18px) saturate(1.08);
+      background: color-mix(in srgb, var(--monwui-serr-request-surface) 94%, transparent);
+      border: 1px solid var(--jf-notif-border, var(--border-color, rgba(255,255,255,.14)));
+      border-radius: 12px;
+      bottom: 32px;
+      box-shadow: var(--jf-notif-shadow, 0 18px 42px rgba(0,0,0,.28));
+      box-sizing: border-box;
       display: grid;
-      gap: 8px;
-      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      gap: 7px;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
       margin-left: 0;
+      max-height: 200px;
+      min-width: 0;
+      opacity: 0;
+      overflow: auto;
+      padding: 8px;
+      pointer-events: none;
+      position: absolute;
+      text-align: left;
+      transform: translateY(6px);
+      transition:
+       opacity .16s ease,
+       transform .16s ease,
+       visibility 0s linear .15s;
+      visibility: hidden;
+      width: min(350px, calc(100vw - 64px));
+      z-index: 8;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      bottom: 28px;
+      width: min(350px, calc(100vw - 64px));
+      height: 16px;
+      z-index: 7;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap:hover .monwui-serr-request-details,
+    .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap:focus-within .monwui-serr-request-details {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+      visibility: visible;
       text-align: left;
     }
     .monwui-serr-requests-modal.open .monwui-serr-request-details div {
       align-items: flex-start;
+      background: var(--jf-notif-card-bg, var(--head-bg, rgba(255,255,255,.08)));
+      border: 1px solid var(--jf-notif-border);
+      border-radius: 11px;
+      box-sizing: border-box;
+      display: grid;
+      gap: 4px;
       min-width: 0;
+      padding: 7px 9px;
+      text-align: center;
     }
-    .monwui-serr-requests-modal.open .monwui-serr-request-details span,
     .monwui-serr-requests-modal.open .monwui-serr-request-details b {
-      overflow-wrap: anywhere;
+      color: var(--jf-notif-warning);
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: 0;
+      line-height: 1.1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-details span {
+      color: var(--jf-notif-text);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1.25;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .monwui-serr-requests-modal.open .monwui-serr-request-card > [data-serr-error-host] {
+      position: relative;
+      z-index: 4;
+    }
+    @media (max-width: 760px), (hover: none) and (pointer: coarse) {
+      .monwui-serr-requests-modal.open .monwui-serr-requests-body {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior: contain;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-card {
+        box-shadow: 0 1px 0 rgba(255,255,255,.06);
+        contain: layout paint style;
+        contain-intrinsic-size: var(--monwui-serr-request-card-height);
+        content-visibility: auto;
+        transition: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-card:before,
+      .monwui-serr-requests-modal.open .monwui-serr-request-card.monwui-serr-request-card-hit:after {
+        display: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-card:hover {
+        border-color: var(--jf-notif-border, var(--border-color, rgba(255,255,255,.13)));
+        box-shadow: 0 1px 0 rgba(255,255,255,.06);
+        transform: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-card.monwui-serr-request-card-hit {
+        animation: none;
+        box-shadow: 0 0 0 1px color-mix(in srgb, var(--jf-notif-accent, var(--notif-accent, #6aa6ff)) 26%, transparent);
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-backdrop.is-poster-fallback img {
+        filter: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn,
+      .monwui-serr-requests-modal.open .monwui-serr-request-details-toggle,
+      .monwui-serr-requests-modal.open .monwui-serr-request-type-badge,
+      .monwui-serr-requests-modal.open .monwui-serr-request-details,
+      .monwui-serr-requests-modal.open .monwui-serr-poster.large,
+      .monwui-serr-requests-modal.open .monwui-serr-rating-badge {
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+        box-shadow: none;
+        transition: none;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-details {
+        background: var(--monwui-serr-request-surface);
+      }
+    }
+    @media (min-width: 1260px) {
+      .monwui-serr-requests-modal.open .monwui-serr-requests-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+    @media (max-width: 760px) {
+      .monwui-serr-requests-modal.open .monwui-serr-requests-list {
+        grid-template-columns: 1fr;
+      }
     }
     @media (max-width: 680px) {
       .monwui-serr-requests-modal.open .monwui-serr-requests-dialog {
@@ -818,8 +1636,60 @@ function ensureSerrProgressStyles() {
         grid-column: 1 / -1;
         justify-self: start;
       }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-pagination {
+        align-items: stretch;
+        flex-direction: column;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-page-controls {
+        justify-content: center;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-requests-page-summary {
+        justify-content: center;
+        width: 100%;
+      }
       .monwui-serr-requests-modal.open .monwui-serr-requests-list {
         grid-template-columns: 1fr;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-card {
+        border-radius: 10px;
+        height: var(--monwui-serr-request-card-height);
+        min-height: var(--monwui-serr-request-card-height);
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-main {
+        height: var(--monwui-serr-request-card-height);
+        min-height: var(--monwui-serr-request-card-height);
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-backdrop {
+        min-height: 0;
+        width: 100%;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-poster.large {
+        width: 76px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-name {
+        font-size: 21px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn {
+      font-size: 10px;
+      padding: 4px 8px;
+  }
+      .monwui-serr-requests-modal.open .monwui-serr-request-details-wrap {
+        bottom: 14px;
+        left: 14px;
+      }
+    }
+    @media (max-width: 460px) {
+      .monwui-serr-requests-modal.open .monwui-serr-poster.large {
+        width: 68px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-title-row .monwui-serr-state {
+        flex-basis: 100%;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-name {
+        font-size: 19px;
+      }
+      .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn {
+        justify-content: center;
       }
     }
   `;
@@ -1061,7 +1931,6 @@ function ensureSerrCalendarStyles() {
       font-weight: 800;
       padding: 0 4px 2px;
       text-align: center;
-      text-transform: uppercase;
     }
     .monwui-serr-calendar-day {
       background: var(--jf-notif-card-bg, var(--head-bg, rgba(255,255,255,.04)));
@@ -1545,7 +2414,7 @@ function calendarIconLink({ key, label, url }) {
   const cleanUrl = safeExternalUrl(url);
   if (!cleanUrl) return "";
   const cleanKey = text(key).toLowerCase();
-  const cleanLabel = text(label, cleanKey.toUpperCase());
+  const cleanLabel = text(label, cleanKey);
   return `
     <a class="monwui-serr-calendar-link ${escapeHtml(cleanKey)}" href="${escapeHtml(cleanUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(cleanLabel)}" aria-label="${escapeHtml(cleanLabel)}">
       <img src="${CALENDAR_ICON_BASE}${escapeHtml(cleanKey)}.svg" alt="">
@@ -1558,7 +2427,7 @@ function renderCalendarLinks(event) {
   const service = text(readFirst(event, "service", "Service")).toLowerCase();
   const links = [];
   const arrUrl = safeExternalUrl(readFirst(event, "arrUrl", "ArrUrl"));
-  const serrUrl = safeExternalUrl(readFirst(event, "serrUrl", "SerrUrl"));
+  const serrUrl = safeExternalUrl(readFirst(event, "serrUrl", "SerrUrl", "seerrUrl", "SeerrUrl"));
   const tmdbId = calendarId(readFirst(event, "tmdbId", "TmdbId"));
   const imdbId = calendarId(readFirst(event, "imdbId", "ImdbId"));
   const tvdbId = calendarId(readFirst(event, "tvdbId", "TvdbId"));
@@ -2080,6 +2949,16 @@ function mediaLabel(req) {
   return [type === "tv" ? L("serrTv", "Dizi") : L("serrMovie", "Film"), seasons, episodeText].filter(Boolean).join(" • ");
 }
 
+function mediaTypeBadgeLabel(mediaType) {
+  return mediaType === "tv" ? L("serrTv", "Dizi") : L("serrMovie", "Film");
+}
+
+function renderRequestInfoChip(label, value) {
+  const clean = text(value);
+  if (!clean) return "";
+  return `<div><b>${escapeHtml(label)}</b><span>${escapeHtml(clean)}</span></div>`;
+}
+
 function computeCount(requests, isAdmin) {
   const seen = readSeenRequestKeys();
   return notificationCountableRequests(requests, isAdmin)
@@ -2203,7 +3082,7 @@ function applyNotificationData(data, { render = false } = {}) {
   if (render) renderSerrNotifications();
 }
 
-async function refresh({ render = false } = {}) {
+async function refresh({ render = false, includeDownloads = false } = {}) {
   if (!moduleEnabled()) {
     const previousCount = cachedCount;
     cachedRequests = [];
@@ -2215,7 +3094,8 @@ async function refresh({ render = false } = {}) {
   if (refreshPromise) return refreshPromise;
   refreshPromise = (async () => {
     try {
-      const data = await listSerrRequests();
+      const data = await listSerrRequests({ includeDownloads: includeDownloads === true });
+      if (includeDownloads === true) lastPanelDownloadRefreshAt = Date.now();
       applyNotificationData(data, { render });
       return data;
     } catch {
@@ -2233,8 +3113,8 @@ async function refresh({ render = false } = {}) {
   return refreshPromise;
 }
 
-export function refreshSerrNotifications({ render = false } = {}) {
-  return refresh({ render });
+export function refreshSerrNotifications({ render = false, includeDownloads = false } = {}) {
+  return refresh({ render, includeDownloads });
 }
 
 export function getCachedSerrNotificationCount() {
@@ -2496,7 +3376,7 @@ async function refreshSerrRequestManager({ render = false, showError = render } 
 
     try {
       const data = await listSerrRequests({ includeHistory: true });
-      managerRequests = Array.isArray(data?.requests) ? data.requests : [];
+      managerRequests = normalizeManagerRequests(data?.requests);
       managerIsAdmin = data?.isAdmin === true;
     } catch (error) {
       managerRequests = [];
@@ -2528,6 +3408,123 @@ function searchText(value) {
 
 function managerRequestId(req) {
   return text(req?.Id || req?.id);
+}
+
+function managerTotalPages() {
+  return Math.max(1, Math.ceil(managerRequests.length / MANAGER_REQUESTS_PAGE_SIZE));
+}
+
+function clampManagerPage(page = managerPage) {
+  const n = Math.floor(Number(page) || 1);
+  return Math.min(Math.max(1, n), managerTotalPages());
+}
+
+function managerVisibleRequests() {
+  managerPage = clampManagerPage(managerPage);
+  const start = (managerPage - 1) * MANAGER_REQUESTS_PAGE_SIZE;
+  return managerRequests.slice(start, start + MANAGER_REQUESTS_PAGE_SIZE);
+}
+
+function managerRequestPageForId(id) {
+  const clean = text(id);
+  if (!clean) return 0;
+  const index = managerRequests.findIndex((req) => managerRequestId(req) === clean);
+  return index >= 0 ? Math.floor(index / MANAGER_REQUESTS_PAGE_SIZE) + 1 : 0;
+}
+
+function managerPageNumbers(current, total) {
+  if (total <= 5) return Array.from({ length: total }, (_, index) => index + 1);
+  const pages = [1, current - 1, current, current + 1, total]
+    .filter((page) => page >= 1 && page <= total)
+    .filter((page, index, list) => list.indexOf(page) === index)
+    .sort((a, b) => a - b);
+  const output = [];
+  pages.forEach((page, index) => {
+    if (index > 0 && page - pages[index - 1] > 1) output.push("gap");
+    output.push(page);
+  });
+  return output;
+}
+
+function renderManagerPagination() {
+  if (!managerRequests.length) return "";
+  const total = managerTotalPages();
+  const current = clampManagerPage(managerPage);
+  const start = (current - 1) * MANAGER_REQUESTS_PAGE_SIZE + 1;
+  const end = Math.min(managerRequests.length, current * MANAGER_REQUESTS_PAGE_SIZE);
+  const previousLabel = L("previous", "Önceki");
+  const nextLabel = L("next", "Sonraki");
+  const pageLabel = L("page", "Sayfa");
+  const pageButtons = managerPageNumbers(current, total).map((page) => {
+    if (page === "gap") return `<span class="monwui-serr-manager-page-gap" aria-hidden="true">...</span>`;
+    const isCurrent = page === current;
+    return `
+      <button type="button" class="monwui-serr-manager-page-btn ${isCurrent ? "active" : ""}" data-serr-manager-page="${escapeHtml(page)}" ${isCurrent ? `aria-current="page"` : ""} aria-label="${escapeHtml(`${pageLabel} ${page}`)}">
+        ${escapeHtml(page)}
+      </button>
+    `;
+  }).join("");
+
+  return `
+    <div class="monwui-serr-requests-pagination" data-serr-manager-pagination>
+      <div class="monwui-serr-requests-page-summary">
+        <span>${escapeHtml(`${start}-${end}`)}</span>
+        <span aria-hidden="true">/</span>
+        <b>${escapeHtml(String(managerRequests.length))}</b>
+      </div>
+      ${total > 1 ? `
+        <div class="monwui-serr-requests-page-controls">
+          <button type="button" class="monwui-serr-manager-page-btn icon" data-serr-manager-page="prev" ${current <= 1 ? "disabled" : ""} aria-label="${escapeHtml(previousLabel)}">
+            <i class="fas fa-chevron-left" aria-hidden="true"></i>
+          </button>
+          ${pageButtons}
+          <button type="button" class="monwui-serr-manager-page-btn icon" data-serr-manager-page="next" ${current >= total ? "disabled" : ""} aria-label="${escapeHtml(nextLabel)}">
+            <i class="fas fa-chevron-right" aria-hidden="true"></i>
+          </button>
+        </div>
+      ` : ""}
+    </div>
+  `;
+}
+
+function bindManagerPagination(scope = document) {
+  scope.querySelectorAll?.("[data-serr-manager-page]").forEach((button) => {
+    if (button.__monwuiSerrManagerPageBound) return;
+    button.__monwuiSerrManagerPageBound = true;
+    button.addEventListener("click", () => {
+      if (button.disabled) return;
+      const action = text(button.getAttribute("data-serr-manager-page"));
+      const nextPage = action === "prev"
+        ? managerPage - 1
+        : (action === "next" ? managerPage + 1 : Number(action));
+      const clamped = clampManagerPage(nextPage);
+      if (clamped === managerPage) return;
+      managerPage = clamped;
+      renderSerrRequestManager();
+      requestAnimationFrame(() => {
+        const body = document.querySelector("#monwuiSerrRequestsModal .monwui-serr-requests-body");
+        body?.querySelector?.(".monwui-serr-requests-list")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      });
+    });
+  });
+}
+
+function syncManagerPagination(scope = document) {
+  const host = scope.querySelector?.("[data-serr-manager-pagination]");
+  const html = renderManagerPagination();
+  if (host) {
+    if (html) {
+      host.outerHTML = html;
+      bindManagerPagination(scope);
+    } else {
+      host.remove();
+    }
+    return;
+  }
+  if (!html) return;
+  const list = scope.querySelector?.(".monwui-serr-requests-list");
+  list?.insertAdjacentHTML?.("afterend", html);
+  bindManagerPagination(scope);
 }
 
 function managerRequestKey(req) {
@@ -2823,18 +3820,68 @@ function bindManagerSearchResultButtons(scope = document) {
   });
 }
 
-function focusManagerRequestCard(id) {
+function managerCardHighlightReady(card) {
+  if (!card?.isConnected) return true;
+  const rect = card.getBoundingClientRect();
+  const root = card.closest?.(".monwui-serr-requests-body");
+  const rootRect = root?.getBoundingClientRect?.() || {
+    top: 0,
+    left: 0,
+    right: window.innerWidth || document.documentElement.clientWidth || 0,
+    bottom: window.innerHeight || document.documentElement.clientHeight || 0
+  };
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  const visibleWidth = Math.max(0, Math.min(rect.right, rootRect.right) - Math.max(rect.left, rootRect.left));
+  const visibleHeight = Math.max(0, Math.min(rect.bottom, rootRect.bottom) - Math.max(rect.top, rootRect.top));
+  const centerY = rect.top + rect.height / 2;
+  return visibleWidth >= rect.width * 0.5 &&
+    visibleHeight >= Math.min(rect.height * 0.55, 160) &&
+    centerY >= rootRect.top + 20 &&
+    centerY <= rootRect.bottom - 20;
+}
+
+function waitForManagerCardHighlightReady(card, timeout = 1500) {
+  const clock = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
+  const startedAt = clock();
+  return new Promise((resolve) => {
+    const tick = () => {
+      const now = clock();
+      if (!card?.isConnected || managerCardHighlightReady(card) || now - startedAt >= timeout) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+async function focusManagerRequestCard(id) {
   const clean = text(id);
   if (!clean) return;
   const cards = Array.from(document.querySelectorAll("#monwuiSerrRequestsModal [data-serr-request-id]"));
   const card = cards.find((node) => text(node.getAttribute("data-serr-request-id")) === clean);
-  if (!card) return;
+  if (!card) {
+    const targetPage = managerRequestPageForId(clean);
+    if (!targetPage) return;
+    managerPage = targetPage;
+    renderSerrRequestManager();
+    requestAnimationFrame(() => { void focusManagerRequestCard(clean); });
+    return;
+  }
+  const token = `${Date.now()}:${Math.random()}`;
+  card.__monwuiSerrFocusToken = token;
+  try { card.focus({ preventScroll: true }); } catch {}
   card.scrollIntoView({ behavior: "smooth", block: "center" });
+  await waitForManagerCardHighlightReady(card);
+  if (!card.isConnected || card.__monwuiSerrFocusToken !== token) return;
+  card.classList.remove("monwui-serr-request-card-hit");
+  void card.offsetWidth;
   card.classList.add("monwui-serr-request-card-hit");
   clearTimeout(card.__monwuiSerrHitTimer);
   card.__monwuiSerrHitTimer = setTimeout(() => {
     card.classList.remove("monwui-serr-request-card-hit");
-  }, 1800);
+  }, 2200);
 }
 
 async function runManagerSearch(scope = document) {
@@ -2966,15 +4013,22 @@ function renderSerrRequestManager() {
   const modal = ensureSerrRequestsModal();
   const body = modal.querySelector(".monwui-serr-requests-body");
   if (!body) return;
+  const visibleRequests = managerVisibleRequests();
 
   body.innerHTML = `
     ${renderManagerSearchShell()}
     ${managerRequests.length
-      ? `<div class="monwui-serr-requests-list">${managerRequests.map((req) => renderManagerRequest(req, managerIsAdmin)).join("")}</div>`
+      ? `
+        <div class="monwui-serr-requests-list" data-serr-manager-list>
+          ${visibleRequests.map((req) => renderManagerRequest(req, managerIsAdmin)).join("")}
+        </div>
+        ${renderManagerPagination()}
+      `
       : `<div class="monwui-serr-empty">${escapeHtml(L("serrNoRequestHistory", "Seerr istek geçmişi yok."))}</div>`}
   `;
 
   bindManagerSearch(body);
+  bindManagerPagination(body);
 
   body.querySelectorAll("[data-serr-manager-approve]").forEach((btn) => {
     btn.addEventListener("click", () => runManagerAction(btn, () => approveSerrRequestWithArrFallback(btn.getAttribute("data-serr-manager-approve"))));
@@ -2995,6 +4049,11 @@ function renderSerrRequestManager() {
 function renderManagerRequest(req, isAdmin) {
   const id = text(req?.Id || req?.id);
   const status = text(req?.Status || req?.status).toLowerCase() || "pending";
+  const requestKey = posterCacheKey(req);
+  const metadata = requestKey ? metadataCache.get(requestKey) : null;
+  const mediaType = requestMediaType(req);
+  const media = mediaLabel(req);
+  const typeBadge = mediaTypeBadgeLabel(mediaType);
   const title = text(req?.Title || req?.title, L("serrUntitled", "İçerik"));
   const requestedBy = req?.requestedBy?.userName || req?.RequestedBy?.UserName || "";
   const created = formatTime(req?.CreatedAtUtc || req?.createdAtUtc);
@@ -3012,35 +4071,48 @@ function renderManagerRequest(req, isAdmin) {
     (isAdmin && status !== "withdrawn" && status !== "completed" && status !== "available") ||
     (!isAdmin && status === "pending")
   );
+  const detailsHtml = [
+    renderRequestInfoChip(L("serrRequestedBy", "İsteyen"), requestedBy),
+    renderRequestInfoChip(L("created", "Oluşturuldu"), created),
+    renderRequestInfoChip(L("updated", "Güncellendi"), updated),
+    renderRequestInfoChip(L("serrStatusCompleted", "Tamamlandı"), completed),
+    renderRequestInfoChip("TMDB", text(req?.MediaId || req?.mediaId, "-")),
+    renderRequestInfoChip("Seerr", req?.SerrRequestId || req?.serrRequestId ? `#${req?.SerrRequestId || req?.serrRequestId}` : "")
+  ].filter(Boolean).join("");
+  const actionsHtml = [
+    canApprove ? `<button type="button" class="monwui-serr-mini-btn primary" data-serr-manager-approve="${escapeHtml(id)}"><i class="fas fa-check" aria-hidden="true"></i><span>${escapeHtml(L("serrApprove", "Onayla"))}</span></button>` : "",
+    canDecline ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-decline="${escapeHtml(id)}"><i class="fas fa-times" aria-hidden="true"></i><span>${escapeHtml(L("serrDecline", "Reddet"))}</span></button>` : "",
+    canUpgrade4K ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-upgrade4k="${escapeHtml(id)}"><i class="fas fa-film" aria-hidden="true"></i><span>${escapeHtml(L("serrRequest4KButton", "4K İste"))}</span></button>` : "",
+    canWithdraw ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-withdraw="${escapeHtml(id)}"><i class="fas fa-undo" aria-hidden="true"></i><span>${escapeHtml(L("serrWithdraw", "Geri Çek"))}</span></button>` : ""
+  ].filter(Boolean).join("");
+  const detailsLabel = L("serrRequestDetails", "İstek Detayları");
 
   return `
-    <section class="monwui-serr-request-card" data-serr-request-id="${escapeHtml(id)}" data-serr-request-status="${escapeHtml(status)}">
+    <section class="monwui-serr-request-card" tabindex="-1" data-serr-request-id="${escapeHtml(id)}" data-serr-request-status="${escapeHtml(status)}" data-serr-request-media-type="${escapeHtml(mediaType)}" ${requestKey ? `data-serr-request-key="${escapeHtml(requestKey)}"` : ""}>
       <div class="monwui-serr-request-main">
-        ${renderPoster(req, "large")}
+        ${renderPoster(req, "large", { ratingSlotHtml: renderRequestRatingSlot(req, metadata) })}
         <div class="monwui-serr-request-content">
           <div class="monwui-serr-title-row">
             <span class="monwui-serr-status ${escapeHtml(status)}" data-serr-status>${escapeHtml(statusLabel(status))}</span>
             ${renderRequest4KBadge(req)}
             <span class="monwui-serr-state" data-serr-updated ${updated ? "" : "hidden"}>${escapeHtml(updated)}</span>
           </div>
+          ${renderRequestProviderLinks(req, metadata)}
           <div class="monwui-serr-request-name">${escapeHtml(title)}</div>
-          <div class="monwui-serr-request-meta">${escapeHtml(mediaLabel(req))}</div>
+          <div class="monwui-serr-request-details-wrap">
+            <button type="button" class="monwui-serr-request-details-toggle" aria-label="${escapeHtml(detailsLabel)}">
+              <i class="fas fa-info-circle" aria-hidden="true"></i>
+              <span>${escapeHtml(L("serrRequestDetailsButton", L("details", "Ayrıntılar")))}</span>
+            </button>
+            <div class="monwui-serr-request-details" role="group" aria-label="${escapeHtml(detailsLabel)}">
+              ${detailsHtml}
+            </div>
+          </div>
           ${renderDownloadProgressHost(req)}
+          ${actionsHtml ? `<div class="monwui-serr-request-actions">${actionsHtml}</div>` : ""}
         </div>
-        <div class="monwui-serr-request-actions">
-          ${canApprove ? `<button type="button" class="monwui-serr-mini-btn primary" data-serr-manager-approve="${escapeHtml(id)}">${escapeHtml(L("serrApprove", "Onayla"))}</button>` : ""}
-          ${canDecline ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-decline="${escapeHtml(id)}">${escapeHtml(L("serrDecline", "Reddet"))}</button>` : ""}
-          ${canUpgrade4K ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-upgrade4k="${escapeHtml(id)}">${escapeHtml(L("serrRequest4KButton", "4K İste"))}</button>` : ""}
-          ${canWithdraw ? `<button type="button" class="monwui-serr-mini-btn" data-serr-manager-withdraw="${escapeHtml(id)}">${escapeHtml(L("serrWithdraw", "Geri Çek"))}</button>` : ""}
-        </div>
-      </div>
-      <div class="monwui-serr-request-details">
-        ${requestedBy ? `<div><b>${escapeHtml(L("serrRequestedBy", "İsteyen"))}</b><span>${escapeHtml(requestedBy)}</span></div>` : ""}
-        ${created ? `<div><b>${escapeHtml(L("created", "Oluşturuldu"))}</b><span>${escapeHtml(created)}</span></div>` : ""}
-        ${updated ? `<div><b>${escapeHtml(L("updated", "Güncellendi"))}</b><span>${escapeHtml(updated)}</span></div>` : ""}
-        ${completed ? `<div><b>${escapeHtml(L("serrStatusCompleted", "Tamamlandı"))}</b><span>${escapeHtml(completed)}</span></div>` : ""}
-        <div><b>TMDb</b><span>${escapeHtml(text(req?.MediaId || req?.mediaId, "-"))}</span></div>
-        ${req?.SerrRequestId || req?.serrRequestId ? `<div><b>Seerr</b><span>#${escapeHtml(req?.SerrRequestId || req?.serrRequestId)}</span></div>` : ""}
+        ${renderBackdrop(req)}
+        <div class="monwui-serr-request-meta monwui-serr-request-type-badge ${escapeHtml(mediaType)}" title="${escapeHtml(media)}">${escapeHtml(typeBadge)}</div>
       </div>
       <div data-serr-error-host>${error ? `<div class="monwui-serr-error">${escapeHtml(error)}</div>` : ""}</div>
     </section>
@@ -3053,18 +4125,26 @@ function updateVisibleSerrRequestManager() {
   const body = modal?.querySelector(".monwui-serr-requests-body");
   if (!body) return;
 
+  const visibleRequests = managerVisibleRequests();
   const cards = Array.from(body.querySelectorAll("[data-serr-request-id]"));
   if (!cards.length) {
     if (managerRequests.length) renderSerrRequestManager();
     return;
   }
-  if (cards.length !== managerRequests.length) {
+  if (cards.length !== visibleRequests.length) {
+    renderSerrRequestManager();
+    return;
+  }
+
+  const visibleIds = visibleRequests.map((req) => managerRequestId(req));
+  const cardIds = cards.map((card) => text(card.getAttribute("data-serr-request-id")));
+  if (visibleIds.some((id, index) => id !== cardIds[index])) {
     renderSerrRequestManager();
     return;
   }
 
   const requestsById = new Map(
-    managerRequests
+    visibleRequests
       .map((req) => [text(req?.Id || req?.id), req])
       .filter(([id]) => id)
   );
@@ -3102,15 +4182,16 @@ function updateVisibleSerrRequestManager() {
     }
   }
 
+  syncManagerPagination(body);
   hydrateRequestPosters(body);
 }
 
 async function runManagerAction(button, fn) {
   if (!button || button.disabled) return;
-  const old = button.textContent;
+  const old = button.innerHTML;
   try {
     button.disabled = true;
-    button.textContent = L("loadingText", "Yükleniyor...");
+    button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("loadingText", "Yükleniyor..."))}</span>`;
     await fn();
     await refresh({ render: true });
     const data = await refreshSerrRequestManager({ render: false, showError: true });
@@ -3119,7 +4200,7 @@ async function runManagerAction(button, fn) {
   } catch (error) {
     button.textContent = error?.message || L("serrRequestFailed", "İşlem tamamlanamadı.");
     setTimeout(() => {
-      button.textContent = old;
+      button.innerHTML = old;
       button.disabled = false;
     }, 1800);
   }
@@ -3157,6 +4238,13 @@ function hasActiveDownload(requests) {
   return (Array.isArray(requests) ? requests : []).some((req) => downloadInfo(req));
 }
 
+function shouldIncludePanelDownloads({ force = false } = {}) {
+  if (!isSerrPanelVisible()) return false;
+  if (hasActiveDownload(cachedRequests)) return true;
+  if (force) return true;
+  return (Date.now() - lastPanelDownloadRefreshAt) >= PANEL_DOWNLOAD_REFRESH_MIN_MS;
+}
+
 function nextPollDelay() {
   if (document.hidden) return BACKGROUND_POLL_MS;
   const visibleSurface = isSerrPanelVisible() || isSerrManagerVisible();
@@ -3181,7 +4269,10 @@ async function refreshVisibleSerrSurfaces({ forcePanelRender = false } = {}) {
     }
   }
 
-  return refresh({ render: renderPanel });
+  return refresh({
+    render: renderPanel,
+    includeDownloads: shouldIncludePanelDownloads({ force: forcePanelRender })
+  });
 }
 
 function scheduleNextPoll(delay = nextPollDelay()) {

@@ -67,7 +67,8 @@ const IMG_TTL   = 7  * 24 * 60 * 60 * 1000;
 const LS_KEY    = "studioHub_cache_v5";
 const MAP_KEY   = "studioHub_nameIdMap_v5";
 const IMG_KEY   = "studioHub_backdropMap_v1";
-const STUDIO_ITEMS_LIMIT = 120;
+const STUDIO_ITEMS_LIMIT = 24;
+const STUDIO_RENDER_CONCURRENCY = 4;
 const nbase = s => (s||"").toLowerCase().replace(/[().,™©®\-:_+]/g," ").replace(/\s+/g," ").trim();
 const strip = s => {
   let out = " " + nbase(s) + " ";
@@ -763,9 +764,10 @@ async function fetchStudios(signal) {
   }));
 }
 
-async function fetchStudioItemsViaUsers(studioId, studioName, userId, signal) {
+async function fetchStudioItemsViaUsers(studioId, studioName, userId, signal, options = {}) {
   const ratingPart = Number.isFinite(MIN_RATING) ? `&MinCommunityRating=${MIN_RATING}` : "";
-  const common = `StartIndex=0&Limit=${STUDIO_ITEMS_LIMIT}&Fields=PrimaryImageAspectRatio,ImageTags,BackdropImageTags,CommunityRating,CriticRating&Recursive=true&SortOrder=Descending${ratingPart}`;
+  const limit = Math.max(1, Math.min(STUDIO_ITEMS_LIMIT, Number(options.limit) || STUDIO_ITEMS_LIMIT));
+  const common = `StartIndex=0&Limit=${limit}&Fields=PrimaryImageAspectRatio,ImageTags,BackdropImageTags,CommunityRating,CriticRating&Recursive=true&SortOrder=Descending${ratingPart}`;
   const urls = [
     `/Users/${userId}/Items?${common}&IncludeItemTypes=Movie,Series&StudioIds=${encodeURIComponent(studioId)}`,
     `/Users/${userId}/Items?${common}&IncludeItemTypes=Movie,Series&Studios=${encodeURIComponent(studioName)}`
@@ -790,7 +792,7 @@ function buildBackdropUrl(item, index = 0) {
   const tags = item.BackdropImageTags || [];
   const tag = tags[index];
   if (!tag) return null;
-  return withServer(`/Items/${item.Id}/Images/Backdrop/${index}?tag=${encodeURIComponent(tag)}&quality=90`);
+  return withServer(`/Items/${item.Id}/Images/Backdrop/${index}?tag=${encodeURIComponent(tag)}&quality=72&maxWidth=960&format=webp`);
 }
 function buildPosterUrl(item, height = 300, quality = 95) {
   const tag = item.ImageTags?.Primary || item.PrimaryImageTag;
@@ -798,6 +800,26 @@ function buildPosterUrl(item, height = 300, quality = 95) {
   return withServer(`/Items/${item.Id}/Images/Primary?tag=${encodeURIComponent(tag)}&fillHeight=${height}&quality=${quality}`);
 }
 function pickRandom(arr) { return arr.length ? arr[Math.floor(Math.random()*arr.length)] : null; }
+
+async function mapSettledLimit(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const concurrency = Math.max(1, Math.min(list.length || 1, Number(limit) || 1));
+  let index = 0;
+  const results = new Array(list.length);
+
+  await Promise.all(Array.from({ length: concurrency }, async () => {
+    while (index < list.length) {
+      const current = index++;
+      try {
+        results[current] = { status: "fulfilled", value: await worker(list[current], current) };
+      } catch (reason) {
+        results[current] = { status: "rejected", reason };
+      }
+    }
+  }));
+
+  return results;
+}
 
 async function getHiddenStudioNameSet(manualEntries = []) {
   const liveConfig = getConfig();
@@ -843,8 +865,8 @@ async function chooseBackdropForStudio(studio, userId, signal, options = {}) {
     const idx    = cached.index;
     const tag    = cached.tag || null;
     const url = tag
-      ? withServer(`/Items/${itemId}/Images/Backdrop/${idx}?tag=${encodeURIComponent(tag)}&quality=90`)
-      : withServer(`/Items/${itemId}/Images/Backdrop/${idx}?quality=90`);
+      ? withServer(`/Items/${itemId}/Images/Backdrop/${idx}?tag=${encodeURIComponent(tag)}&quality=72&maxWidth=960&format=webp`)
+      : withServer(`/Items/${itemId}/Images/Backdrop/${idx}?quality=72&maxWidth=960&format=webp`);
     return { itemId, index: idx, url };
   }
 
@@ -1035,7 +1057,7 @@ export async function renderStudioHubs() {
       delete shells[desired];
     }
 
-    await Promise.allSettled(resolved.map(async ({ name, studio }) => {
+    await mapSettledLimit(resolved, STUDIO_RENDER_CONCURRENCY, async ({ name, studio }) => {
       const card = shells[name];
       if (!card) return;
       const enableColorize = config.studioHubsColorize !== false;
@@ -1053,20 +1075,23 @@ export async function renderStudioHubs() {
       card.classList.remove("hub-card-textonly");
 
       const isDefaultHub = isDefaultStudioHub(name);
-      const studioItems = isDefaultHub
-        ? await fetchStudioItemsViaUsers(studio.Id, studio.Name || name, userId, __fetchAbort.signal)
-        : null;
-      if (isDefaultHub && !studioItems?.length) {
-        try { card.remove(); } catch {}
-        return;
-      }
-
-      let used = false;
       const manualEntry = (manualEntries || []).find(entry => nameKey(entry?.name || entry?.Name) === nameKey(name)) || null;
       const customLogoUrl = buildStudioHubLogoUrl(manualEntry);
       const logoUrl = customLogoUrl || await resolveLogoUrl(name);
       const sharedVideoEntry = findStudioHubVideoEntry(sharedVideos, name);
       const customVideoUrl = buildStudioHubVideoUrl(sharedVideoEntry);
+      const needsStudioItems = isDefaultHub && !logoUrl;
+      const studioItems = needsStudioItems
+        ? await fetchStudioItemsViaUsers(studio.Id, studio.Name || name, userId, __fetchAbort.signal, {
+            limit: STUDIO_ITEMS_LIMIT
+          })
+        : null;
+      if (needsStudioItems && !studioItems?.length) {
+        try { card.remove(); } catch {}
+        return;
+      }
+
+      let used = false;
 
       if (logoUrl) {
         const img = upsertImg(card, "hub-img hub-logo");
@@ -1109,7 +1134,7 @@ export async function renderStudioHubs() {
           userId
         });
       }
-    }));
+    });
 
     requestAnimationFrame(() => {
       try {

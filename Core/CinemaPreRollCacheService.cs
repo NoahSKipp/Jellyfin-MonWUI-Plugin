@@ -237,11 +237,17 @@ public sealed class CinemaPreRollCacheService
         var locale = BuildLocaleRequest(language, region, regionMode, fallbackMode, fallbackRegion);
         var plugin = JMSFusionPlugin.Instance ?? throw new InvalidOperationException("Plugin not available.");
 
+        var fileModel = ReadCacheFile(plugin);
+        if (!forceRefresh && TryGetFreshLocaleSnapshot(fileModel, locale.CacheKey, out var fresh))
+        {
+            return ToSnapshot(fresh, stale: false);
+        }
+
         await _refreshLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var fileModel = ReadCacheFile(plugin);
-            if (!forceRefresh && TryGetFreshLocaleSnapshot(fileModel, locale.CacheKey, out var fresh))
+            fileModel = ReadCacheFile(plugin);
+            if (!forceRefresh && TryGetFreshLocaleSnapshot(fileModel, locale.CacheKey, out fresh))
             {
                 return ToSnapshot(fresh, stale: false);
             }

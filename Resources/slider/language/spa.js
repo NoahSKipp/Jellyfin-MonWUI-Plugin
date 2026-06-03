@@ -108,6 +108,7 @@ export const languageLabels = {
   serrCalendarEmpty: "No hay entradas de calendario en este rango.",
   serrRequestsModalTitle: "Gestión Seerr y Arr",
   serrRequestDetails: "Detalles de la solicitud",
+  serrRequestDetailsButton: "Detalles",
   serrWithdraw: "Retirar",
   serrNoRequestHistory: "No hay historial Seerr y Arr.",
   serrRequestWithdrawnToast: "Solicitud retirada.",

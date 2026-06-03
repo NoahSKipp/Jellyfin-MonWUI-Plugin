@@ -5,14 +5,19 @@ import { withServer, withServerSrcset, invalidateServerBaseCache, resolveServerB
 const config = getConfig();
 const SERVER_ADDR_KEY = "jf_serverAddress";
 const itemCache = new Map();
+const itemDetailsInFlight = new Map();
+const apiGetInFlight = new Map();
 const dotGenreCache = new Map();
 const CACHE_TTL = 24 * 60 * 60 * 1000;
+const ITEM_DETAILS_DIRECT_CACHE_TTL = 15 * 1000;
 const USER_ID_KEY = "jf_userId";
 const DEVICE_ID_KEY = "jf_api_deviceId";
 const DEVICE_NAME_KEY = "jf_api_deviceName";
 const notFoundTombstone = new Map();
 const NOTFOUND_TTL = 30 * 60 * 1000;
 const MAX_ITEM_CACHE = 600;
+const MAX_ITEM_DETAILS_IN_FLIGHT = 100;
+const MAX_API_GET_IN_FLIGHT = 150;
 const MAX_DOT_GENRE_CACHE = 1200;
 const MAX_PREVIEW_CACHE = 200;
 const MAX_TOMBSTONES = 2000;
@@ -901,6 +906,14 @@ function pruneMapBySize(map, max) {
   }
 }
 
+function canDedupeApiGet(options = {}) {
+  const method = String(options?.method || "GET").trim().toUpperCase();
+  return method === "GET" &&
+    options?.__dedupeBypass !== true &&
+    !options?.signal &&
+    !options?.body;
+}
+
 function isCompletedUserData(userData = {}) {
   if (!userData || typeof userData !== "object") return false;
   if (userData.Played === true) return true;
@@ -1624,6 +1637,28 @@ async function makeApiRequest(url, options = {}) {
     options = { signal: options };
   }
 
+  if (canDedupeApiGet(options)) {
+    const dedupeKey = String(url || "").trim();
+    const existing = dedupeKey ? apiGetInFlight.get(dedupeKey) : null;
+    if (existing) return existing;
+
+    const promise = makeApiRequest(url, {
+      ...options,
+      __dedupeBypass: true
+    }).finally(() => {
+      if (apiGetInFlight.get(dedupeKey) === promise) {
+        apiGetInFlight.delete(dedupeKey);
+      }
+    });
+
+    if (dedupeKey) {
+      apiGetInFlight.set(dedupeKey, promise);
+      pruneMapBySize(apiGetInFlight, MAX_API_GET_IN_FLIGHT);
+    }
+
+    return promise;
+  }
+
   dbgAuth("makeApiRequest:begin", url);
   try {
     if (!(await ensureAuthReadyFor(url, 2500))) {
@@ -1803,51 +1838,131 @@ const ITEM_FULL_FIELDS = [
   "AlbumPrimaryImageTag", "PrimaryImageTag",
 ];
 
+function getRecentItemDetailsFromCache(itemId) {
+  const id = String(itemId || "").trim();
+  if (!id || !itemCache.has(id)) return undefined;
+
+  const cached = itemCache.get(id);
+  const timestamp = Number(cached?.timestamp || 0);
+  if (!timestamp || Date.now() - timestamp > ITEM_DETAILS_DIRECT_CACHE_TTL) return undefined;
+  return cached?.data || null;
+}
+
+function setRecentItemDetailsCache(itemId, data) {
+  const id = String(itemId || "").trim();
+  if (!id) return;
+  itemCache.set(id, { data: data || null, timestamp: Date.now() });
+  pruneMapBySize(itemCache, MAX_ITEM_CACHE);
+}
+
+function waitForAbortableItemDetails(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.resolve(null);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      try { signal.removeEventListener("abort", onAbort); } catch {}
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(null);
+    };
+
+    try { signal.addEventListener("abort", onAbort, { once: true }); } catch {}
+
+    promise
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      });
+  });
+}
+
+async function fetchItemDetailsDeduped(itemId, { signal, requireCredentials = false, logLabel = "fetchItemDetails" } = {}) {
+  const id = String(itemId || "").trim();
+  if (!id) return null;
+  if (isTombstoned(id)) return null;
+
+  try {
+    if (requireCredentials && !hasCredentials()) return null;
+
+    const cached = getRecentItemDetailsFromCache(id);
+    if (cached !== undefined) return cached;
+
+    const { userId } = getSessionInfo();
+    const key = `${userId || "anon"}:${id}`;
+    let promise = itemDetailsInFlight.get(key);
+
+    if (!promise) {
+      const url =
+        `/Users/${userId}/Items/${encodeURIComponent(id)}` +
+        `?Fields=${ITEM_FULL_FIELDS.join(',')}`;
+
+      promise = makeApiRequest(url)
+        .then(async (data) => {
+          if (data === null) {
+            markTombstone(id);
+            setRecentItemDetailsCache(id, null);
+            return null;
+          }
+
+          __qbTryPrimeQualityFromItem(data);
+          await hydrateWatchlistPayload(data);
+          setRecentItemDetailsCache(id, data);
+          return data || null;
+        })
+        .catch((error) => {
+          if (error?.status === 400) return null;
+          if (error?.status === 404) {
+            markTombstone(id);
+            setRecentItemDetailsCache(id, null);
+            return null;
+          }
+          console.warn(`${logLabel} error:`, error);
+          return null;
+        })
+        .finally(() => {
+          if (itemDetailsInFlight.get(key) === promise) {
+            itemDetailsInFlight.delete(key);
+          }
+        });
+
+      itemDetailsInFlight.set(key, promise);
+      pruneMapBySize(itemDetailsInFlight, MAX_ITEM_DETAILS_IN_FLIGHT);
+    }
+
+    return await waitForAbortableItemDetails(promise, signal);
+  } catch (error) {
+    if (!isAbortError(error, signal)) console.warn(`${logLabel} error:`, error);
+    return null;
+  }
+}
+
  export async function fetchItemDetails(itemId, { signal } = {}) {
-   if (!itemId) return null;
-   if (isTombstoned(itemId)) return null;
-   try {
-     if (!hasCredentials()) return null;
-     const { userId } = getSessionInfo();
-     const url =
-       `/Users/${userId}/Items/${encodeURIComponent(String(itemId).trim())}` +
-       `?Fields=${ITEM_FULL_FIELDS.join(',')}`;
-     const data = await makeApiRequest(url, { signal });
-     if (data === null) markTombstone(String(itemId));
-
-     __qbTryPrimeQualityFromItem(data);
-     await hydrateWatchlistPayload(data);
-
-     return data || null;
-   } catch (e) {
-     if (e?.status === 400) return null;
-     if (e?.status === 404) { markTombstone(String(itemId)); return null; }
-     if (!isAbortError(e, signal)) console.warn('fetchItemDetails error:', e);
-     return null;
-   }
+   return fetchItemDetailsDeduped(itemId, {
+     signal,
+     requireCredentials: true,
+     logLabel: "fetchItemDetails"
+   });
  }
 
 export async function fetchItemDetailsFull(itemId, { signal } = {}) {
-  if (!itemId) return null;
-  if (isTombstoned(itemId)) return null;
-  try {
-    const { userId } = getSessionInfo();
-    const url =
-      `/Users/${userId}/Items/${encodeURIComponent(String(itemId).trim())}` +
-      `?Fields=${ITEM_FULL_FIELDS.join(',')}`;
-    const data = await makeApiRequest(url, { signal });
-    if (data === null) markTombstone(String(itemId));
-
-    __qbTryPrimeQualityFromItem(data);
-    await hydrateWatchlistPayload(data);
-
-    return data || null;
-  } catch (e) {
-    if (e?.status === 400) return null;
-    if (e?.status === 404) { markTombstone(String(itemId)); return null; }
-    if (!isAbortError(e, signal)) console.warn('fetchItemDetailsFull error:', e);
-    return null;
-  }
+  return fetchItemDetailsDeduped(itemId, {
+    signal,
+    requireCredentials: false,
+    logLabel: "fetchItemDetailsFull"
+  });
 }
 
 const PLAYABLE_TYPES = new Set(['Series','Movie','Episode','Season']);

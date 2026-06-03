@@ -403,10 +403,10 @@ export function createQueryPanel(config, labels) {
 
     const maxShufflingLimitInput = document.createElement("input");
     maxShufflingLimitInput.type = "number";
-    maxShufflingLimitInput.value = typeof config.maxShufflingLimit !== "undefined" ? config.maxShufflingLimit : 10000;
+    maxShufflingLimitInput.value = typeof config.maxShufflingLimit !== "undefined" ? config.maxShufflingLimit : 500;
     maxShufflingLimitInput.name = "maxShufflingLimit";
-    maxShufflingLimitInput.min = 1;
-    maxShufflingLimitInput.max = 1000000;
+    maxShufflingLimitInput.min = 50;
+    maxShufflingLimitInput.max = 500;
     maxShufflingLimitInput.id = "maxShufflingLimitInput";
 
     maxShufflingLimitLabel.htmlFor = "maxShufflingLimitInput";

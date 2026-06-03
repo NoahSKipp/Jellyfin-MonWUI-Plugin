@@ -108,6 +108,7 @@ export const languageLabels = {
   serrCalendarEmpty: "Bu aralıkta takvim kaydı yok.",
   serrRequestsModalTitle: "Seerr & Arr Yönetimi",
   serrRequestDetails: "İstek Detayları",
+  serrRequestDetailsButton: "Ayrıntılar",
   serrWithdraw: "Geri Çek",
   serrNoRequestHistory: "Seerr & Arr geçmişi yok.",
   serrRequestWithdrawnToast: "İstek geri çekildi.",
