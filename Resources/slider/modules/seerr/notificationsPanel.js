@@ -1251,7 +1251,7 @@ function ensureSerrProgressStyles() {
       height: var(--monwui-serr-request-card-height);
       min-height: var(--monwui-serr-request-card-height);
       min-width: 0;
-      padding: 50px 8px 42px 110px;
+      padding: 35px 8px 42px 110px;
       position: relative;
       width: 100%;
       z-index: auto;
@@ -1413,12 +1413,14 @@ function ensureSerrProgressStyles() {
       min-width: 0;
       position: absolute;
       z-index: 4;
-      width: 100%;
-      bottom: 50px;
+      width: 80%;
+      bottom: 10px;
       align-items: center;
       justify-content: center;
       box-sizing: border-box;
-    padding: 4px;
+      padding: 4px;
+      left: 60px;
+      flex-wrap: wrap;
   }
     .monwui-serr-requests-modal.open .monwui-serr-request-actions .monwui-serr-mini-btn {
       align-items: center;
