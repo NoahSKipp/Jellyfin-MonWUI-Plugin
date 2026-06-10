@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
     {
+        "version": "3.7.0.0",
+        "changelog": "v3.7.0\n\nChanges:\n- Fixed plugin settings being reset when saving partial configuration updates\n- Added configuration merge handling to preserve existing values during updates\n- Preserved custom MonWUI settings, integration settings, internal state, and stored JSON snapshots\n\nNotes:\n- Existing custom settings are now retained when updating plugin configuration\n- Restart Jellyfin after update if settings appear cached",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/download/v3.7.0/JMSFusion-3.7.0.0-server.zip",
+        "checksum": "2ae29212c41ff0cc671f8f9c0d7835f4",
+        "timestamp": "2026-06-10T22:57:12.7702989Z"
+      },
+    {
         "version": "3.6.0.0",
         "changelog": "v3.6.0\n\nChanges:\n- Added pagination, enhanced card layouts, rating/provider links, and backdrop hydration to the Seerr request panel\n- Optimized slider cache storage with compression and automatic cleanup of stale entries\n- Added request deduplication and short-lived caching for API GET and item detail requests\n- Improved backdrop, studio hub, and hover image loading with optimized WebP handling and width limits\n- Reduced startup overhead through user settings snapshot sharing and lazy-loaded language resources\n- Limited shuffle ranges to 50-500 and optimized large query pool handling\n\nPerformance:\n- Reduced redundant network requests across media and Seerr views\n- Improved client and server cache efficiency\n- Lowered initial load times and memory usage\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",
