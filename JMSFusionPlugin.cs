@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -112,6 +114,66 @@ namespace Jellyfin.Plugin.JMSFusion
             _logger.LogInformation("[JMSFusion] Plugin uninstall detected. Cleaning physical index.html patch if present.");
             TryUnpatchIndexHtml();
             base.OnUninstalling();
+        }
+
+        public override void UpdateConfiguration(BasePluginConfiguration configuration)
+        {
+            if (configuration is JMSFusionConfiguration incoming &&
+                Configuration != null &&
+                !ReferenceEquals(incoming, Configuration))
+            {
+                PreserveExistingValuesForPartialUpdate(incoming, Configuration);
+            }
+
+            base.UpdateConfiguration(configuration);
+        }
+
+        private static void PreserveExistingValuesForPartialUpdate(
+            JMSFusionConfiguration incoming,
+            JMSFusionConfiguration existing)
+        {
+            var defaults = new JMSFusionConfiguration();
+            var properties = typeof(JMSFusionConfiguration).GetProperties(BindingFlags.Instance | BindingFlags.Public);
+
+            foreach (var property in properties)
+            {
+                if (!property.CanRead ||
+                    !property.CanWrite ||
+                    property.GetIndexParameters().Length > 0)
+                {
+                    continue;
+                }
+
+                var incomingValue = property.GetValue(incoming);
+                var existingValue = property.GetValue(existing);
+                var defaultValue = property.GetValue(defaults);
+
+                if (IsDefaultValue(incomingValue, defaultValue) &&
+                    !IsDefaultValue(existingValue, defaultValue))
+                {
+                    property.SetValue(incoming, existingValue);
+                }
+            }
+        }
+
+        private static bool IsDefaultValue(object? value, object? defaultValue)
+        {
+            if (value is null || defaultValue is null)
+            {
+                return value is null && defaultValue is null;
+            }
+
+            if (value is string || defaultValue is string)
+            {
+                return string.Equals(value as string, defaultValue as string, StringComparison.Ordinal);
+            }
+
+            if (value is ICollection valueCollection && defaultValue is ICollection defaultCollection)
+            {
+                return defaultCollection.Count == 0 && valueCollection.Count == 0;
+            }
+
+            return Equals(value, defaultValue);
         }
 
         private string? DetectWebRoot()
