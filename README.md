@@ -1,7 +1,5 @@
-<h1 align="center">Jellyfin MonWUI Plugin</h1>
-
 <p align="center">
-  <img width="180" height="180" alt="Jellyfin MonWUI Plugin" src="https://github.com/user-attachments/assets/29947627-b2ff-4ecd-8a2b-4df932aca657" />
+  <img src="https://github.com/user-attachments/assets/29947627-b2ff-4ecd-8a2b-4df932aca657" alt="logo" width="200" style="background: transparent; display: inline-block;" />
 </p>
 
 <p align="center">
