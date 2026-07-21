@@ -20,6 +20,7 @@ import {
   getTrendingOnlineItems,
   getSeedItemOnlineRecs,
   onlineRecsAvailable,
+  onlineTrendingRowsEnabled,
   isRequestableOnlineItem
 } from "./seerr/onlineRecs.js";
 import {
@@ -2092,7 +2093,7 @@ async function renderPersonalRecommendationsInternal(options = {}) {
       }
     }
 
-    if (isOnlineTrendingRowsEnabled() && await onlineRecsAvailable()) {
+    if (await onlineTrendingRowsEnabled()) {
       for (const mediaType of ["movie", "tv"]) {
         const trendingSection = ensureTrendingContainer(indexPage, mediaType);
         try { registerManagedHomeRowAnchor(trendingSection); } catch {}
@@ -2715,15 +2716,6 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
   setBywDone(true);
 }
 
-function isOnlineTrendingRowsEnabled() {
-  try {
-    const cfg = getConfig?.() || config || {};
-    return cfg.enableOnlineTrendingRows !== false;
-  } catch {
-    return true;
-  }
-}
-
 function getTrendingLabel(mediaType) {
   const l = config.languageLabels || labels || {};
   if (mediaType === "tv") {
@@ -3274,10 +3266,16 @@ function mergeLocalAndOnline(localItems, onlineItems, { targetCount = 20, inject
 
 // Fetches online items via `onlineFetcher` and blends them into `localItems`.
 // Returns localItems unchanged when online recs are disabled or unavailable.
+const ONLINE_BLEND_TIMEOUT_MS = 6000;
+
 async function blendOnlineRecommendations(localItems, onlineFetcher, { targetCount = 20, injectRatio = 0.35 } = {}) {
   try {
     if (!(await onlineRecsAvailable())) return localItems;
-    const online = await onlineFetcher();
+    // Never let a slow/hung online fetch stall the row: fall back to local-only.
+    const online = await Promise.race([
+      onlineFetcher(),
+      new Promise((resolve) => setTimeout(() => resolve(null), ONLINE_BLEND_TIMEOUT_MS))
+    ]);
     if (!Array.isArray(online) || !online.length) return localItems;
     return mergeLocalAndOnline(localItems, online, { targetCount, injectRatio });
   } catch (err) {

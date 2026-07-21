@@ -318,9 +318,27 @@ Seerr/Arr request immediately through the existing request pipeline (confirm
 modal, admin approval, and Arr fallback all apply). The Request button only
 appears when a request backend (Seerr or Radarr/Sonarr) is configured.
 
-Enable or disable this behavior with **"Show online (TMDb/Seerr) recommendations
-in the recommendation rows"** in the Seerr & Arr settings. Discovery works with
-a TMDb API key and/or a configured Seerr instance; requests require Seerr or Arr.
+Online cards are enriched with the **content rating** (certification) and
+**runtime** so their chips match local cards. Owned items reuse the library's
+own values; missing items are filled from a per-title TMDb detail call
+(bounded concurrency, 24h cache). The certification region defaults to the
+Seerr language's region and can be overridden.
+
+### Settings
+
+All of this lives in its own **Recommendations** tab in the MonWUI settings
+(admin only):
+
+- **Show online recommendations** — master toggle.
+- **TMDb API key** — used for discovery and enrichment (get one free at
+  themoviedb.org).
+- **Show Trending Movies / Trending Series rows.**
+- **Fetch content rating and runtime for online cards** — enrichment toggle.
+- **Content rating region** — e.g. `US`, `TR`, `DE`; blank derives from the
+  Seerr language.
+
+Discovery works with a TMDb API key and/or a configured Seerr instance;
+requests require Seerr or Arr.
 
 ## Notes
 

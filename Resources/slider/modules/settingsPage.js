@@ -26,6 +26,7 @@ import { createParentalPinPanel } from './settings/parentalPinPage.js';
 import { createDbManagementPanel } from './settings/dbManagementPage.js';
 import { createDetailsModalPanel } from './settings/detailsModalPage.js';
 import { createSerrPanel } from './seerr/settingsPage.js';
+import { createRecommendationsPanel } from './settings/recommendationsPage.js';
 import { enhanceFormAccessibility } from './accessibility.js';
 
 export { isLocalStorageAvailable, updateConfig };
@@ -160,6 +161,9 @@ export function createSettingsModal() {
     const serrTab = config?.currentUserIsAdmin
       ? createTab('serr', 'fa-clapperboard', labels.serrSettingsTab || 'Seerr & Arr Entegrasyonu')
       : null;
+    const recommendationsTab = config?.currentUserIsAdmin
+      ? createTab('recommendations', 'fa-wand-magic-sparkles', labels.recommendationsSettingsTab || 'Öneriler')
+      : null;
     const detailsModalTab = createTab('details-modal', 'fa-circle-info', labels.detailsModalSettingsTab || 'Detaylar Modülü Ayarları');
     const avatarTab = createTab('avatar', 'fa-user', labels.avatarCreateInput || 'Avatar Ayarları');
     const parentalPinTab = config?.currentUserIsAdmin
@@ -172,7 +176,7 @@ export function createSettingsModal() {
 
     const tabs = [
         mainTab, sliderTab, queryTab, musicTab, studioTab, profileChooserTab,
-        pauseTab, watchlistSettingsTab, hoverTab, cinemaPreRollTab, trailersTab, notificationsTab, serrTab, detailsModalTab,
+        pauseTab, watchlistSettingsTab, hoverTab, cinemaPreRollTab, trailersTab, notificationsTab, serrTab, recommendationsTab, detailsModalTab,
         avatarTab, parentalPinTab, positionTab, dbManagementTab, exporterTab, aboutTab
     ].filter(Boolean);
     tabContainer.append(...tabs);
@@ -203,6 +207,9 @@ export function createSettingsModal() {
     const notificationsPanel = createNotificationsPanel(config, labels);
     const serrPanel = config?.currentUserIsAdmin
       ? createSerrPanel(config, labels)
+      : null;
+    const recommendationsPanel = config?.currentUserIsAdmin
+      ? createRecommendationsPanel(config, labels)
       : null;
     const detailsModalPanel = createDetailsModalPanel(config, labels);
     const watchlistSettingsPanel = createWatchlistPanel(config, labels);
@@ -239,7 +246,7 @@ export function createSettingsModal() {
 
     [
         mainPanel, sliderPanel, queryPanel, musicPanel, studioPanel, profileChooserPanel,
-        pausePanel, watchlistSettingsPanel, hoverPanel, cinemaPreRollPanel, trailersPanel, notificationsPanel, serrPanel, detailsModalPanel,
+        pausePanel, watchlistSettingsPanel, hoverPanel, cinemaPreRollPanel, trailersPanel, notificationsPanel, serrPanel, recommendationsPanel, detailsModalPanel,
         avatarPanel, parentalPinPanel, positionPanel, dbManagementPanel, exporterPanel, aboutPanel
     ].filter(Boolean).forEach(panel => {
         panel.style.display = 'none';
@@ -248,14 +255,14 @@ export function createSettingsModal() {
 
     const panels = [
         mainPanel, sliderPanel, queryPanel, musicPanel, studioPanel, profileChooserPanel,
-        pausePanel, watchlistSettingsPanel, hoverPanel, cinemaPreRollPanel, trailersPanel, notificationsPanel, serrPanel, detailsModalPanel,
+        pausePanel, watchlistSettingsPanel, hoverPanel, cinemaPreRollPanel, trailersPanel, notificationsPanel, serrPanel, recommendationsPanel, detailsModalPanel,
         avatarPanel, parentalPinPanel, positionPanel, dbManagementPanel, exporterPanel, aboutPanel
     ].filter(Boolean);
     tabContent.append(...panels);
 
     const interactiveTabs = [
         mainTab, sliderTab, queryTab, musicTab, studioTab, profileChooserTab,
-        pauseTab, watchlistSettingsTab, hoverTab, cinemaPreRollTab, trailersTab, notificationsTab, serrTab, detailsModalTab,
+        pauseTab, watchlistSettingsTab, hoverTab, cinemaPreRollTab, trailersTab, notificationsTab, serrTab, recommendationsTab, detailsModalTab,
         avatarTab, parentalPinTab, positionTab, dbManagementTab, exporterTab, aboutTab
     ].filter(Boolean);
     interactiveTabs.forEach(tab => {
@@ -341,7 +348,7 @@ export function createSettingsModal() {
       setBusyState(true);
 
       try {
-        const panelSaveHooks = [parentalPinPanel?.__jmsSave, serrPanel?.__monwuiSave].filter(fn => typeof fn === 'function');
+        const panelSaveHooks = [parentalPinPanel?.__jmsSave, serrPanel?.__monwuiSave, recommendationsPanel?.__monwuiSave].filter(fn => typeof fn === 'function');
         for (const saveHook of panelSaveHooks) {
           await saveHook({ reload });
         }

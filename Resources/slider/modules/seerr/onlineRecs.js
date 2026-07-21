@@ -18,7 +18,7 @@ import { makeApiRequest } from "../../../Plugins/JMSFusion/runtime/api.js";
 
 const TMDB_IMG_BASE = "https://image.tmdb.org/t/p";
 
-let __accessValue = null;
+let __accessFlags = null; // { available, trending }
 let __accessAt = 0;
 const ACCESS_TTL_MS = 30_000;
 
@@ -26,30 +26,41 @@ const genreMapCache = new Map(); // mediaType -> Map(id -> name)
 const seedCache = new Map();     // userId|mediaType -> { at, seeds }
 const SEED_TTL_MS = 5 * 60_000;
 
-/** Whether online recommendations are enabled and a source is configured. */
-export async function onlineRecsAvailable() {
+async function ensureAccessFlags() {
   const now = Date.now();
-  if (__accessValue !== null && (now - __accessAt) < ACCESS_TTL_MS) return __accessValue;
+  if (__accessFlags !== null && (now - __accessAt) < ACCESS_TTL_MS) return __accessFlags;
   try {
     // Guard the home-render critical path against a hung access request.
     const access = await Promise.race([
       getSerrAccess(),
       new Promise((resolve) => setTimeout(() => resolve(null), 3000))
     ]);
-    if (access === null) return __accessValue === true; // timed out: don't poison cache
-    const value = access?.onlineRecommendations === true;
-    __accessValue = value;
+    if (access === null) return __accessFlags || { available: false, trending: false }; // timed out: don't poison cache
+    __accessFlags = {
+      available: access?.onlineRecommendations === true,
+      trending: access?.onlineTrendingRows === true
+    };
     __accessAt = now;
-    return value;
+    return __accessFlags;
   } catch {
-    __accessValue = false;
+    __accessFlags = { available: false, trending: false };
     __accessAt = now;
-    return false;
+    return __accessFlags;
   }
 }
 
+/** Whether online recommendations are enabled and a source is configured. */
+export async function onlineRecsAvailable() {
+  return (await ensureAccessFlags()).available === true;
+}
+
+/** Whether the dedicated Trending rows are enabled (implies availability). */
+export async function onlineTrendingRowsEnabled() {
+  return (await ensureAccessFlags()).trending === true;
+}
+
 export function invalidateOnlineRecsAccess() {
-  __accessValue = null;
+  __accessFlags = null;
   __accessAt = 0;
 }
 
@@ -95,6 +106,16 @@ function normalizeOnlineDto(dto) {
 
   if (Number.isFinite(year) && year > 0) item.ProductionYear = year;
   if (Number.isFinite(vote) && vote > 0) item.CommunityRating = vote;
+
+  // Enriched fields (content rating + runtime) so online cards render the same
+  // age chip and runtime as local cards.
+  const officialRating = String(dto.officialRating || "").trim();
+  if (officialRating) item.OfficialRating = officialRating;
+  const runtimeTicks = Number(dto.runtimeTicks);
+  if (Number.isFinite(runtimeTicks) && runtimeTicks > 0) {
+    if (type === "Series") item.CumulativeRunTimeTicks = runtimeTicks;
+    else item.RunTimeTicks = runtimeTicks;
+  }
 
   if (localId) {
     // Owned locally: render as a normal, openable Jellyfin card (no Request btn).
