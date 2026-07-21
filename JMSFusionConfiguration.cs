@@ -179,6 +179,9 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("serrEnable4KRequests")]
         public bool SerrEnable4KRequests { get; set; } = false;
 
+        [JsonPropertyName("enableOnlineRecommendations")]
+        public bool EnableOnlineRecommendations { get; set; } = true;
+
         [JsonPropertyName("serrRequests")]
         public List<SerrRequestEntry> SerrRequests { get; set; } = new();
 

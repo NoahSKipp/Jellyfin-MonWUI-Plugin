@@ -284,6 +284,10 @@ These routes are used internally by the frontend modules.
 | `/Plugins/MonWUI/seerr/search` | Seerr search or Arr fallback search. |
 | `/Plugins/MonWUI/seerr/request` | Creates a MonWUI request and submits immediately when allowed. |
 | `/Plugins/MonWUI/seerr/requests` | Lists visible active or historical requests. |
+| `/Plugins/MonWUI/seerr/online/trending` | Trending movies/series (TMDb primary, Seerr fallback), deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/discover` | Discover by genre/sort (TMDb primary, Seerr fallback), deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/recommendations` | Recommendations/similar seeded from a TMDb id, deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/genres` | Genre id/name list for the requested media type. |
 | `/Plugins/MonWUI/seerr/requests/{id}/approve` | Admin-only approval. |
 | `/Plugins/MonWUI/seerr/requests/{id}/decline` | Admin-only decline. |
 | `/Plugins/MonWUI/seerr/requests/{id}/withdraw` | Request withdrawal. |
@@ -292,6 +296,31 @@ These routes are used internally by the frontend modules.
 | `/Plugins/MonWUI/arr/radarr/test` | Admin-only Radarr connection test and option fetch. |
 | `/Plugins/MonWUI/arr/episode` | Admin-only direct Sonarr episode request. |
 | `/Plugins/MonWUI/arr/movie` | Admin-only direct Radarr movie request. |
+
+## Online Recommendations
+
+The home recommendation rows (Personalized Recommendations, Because You Watched,
+and the Genre rows) are no longer local-only. When online recommendations are
+enabled, MonWUI blends in items sourced from TMDb (primary) or Overseerr /
+Jellyseerr (fallback):
+
+- **Personalized rows** are seeded from the user's recent watch history (TMDb
+  recommendations/similar), falling back to trending when history is thin.
+- **Genre rows** are enriched with TMDb discover results for that genre.
+- **Because You Watched** rows are seeded from that specific title's TMDb id.
+- Two new **Trending Movies** and **Trending Series** rows are added, rendered
+  with the same cards and CSS as every other row.
+
+Items that already exist in the local Jellyfin library are deduped and rendered
+as normal local cards (they open the details modal). Items that are missing
+locally are rendered as online cards with a **Request** button that submits a
+Seerr/Arr request immediately through the existing request pipeline (confirm
+modal, admin approval, and Arr fallback all apply). The Request button only
+appears when a request backend (Seerr or Radarr/Sonarr) is configured.
+
+Enable or disable this behavior with **"Show online (TMDb/Seerr) recommendations
+in the recommendation rows"** in the Seerr & Arr settings. Discovery works with
+a TMDb API key and/or a configured Seerr instance; requests require Seerr or Arr.
 
 ## Notes
 

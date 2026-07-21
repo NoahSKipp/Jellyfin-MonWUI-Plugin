@@ -123,6 +123,7 @@ function setValues(panel, settings = {}) {
   set("serrConfirmRequests", settings.enable4KRequests === true || settings.confirmRequests !== false);
   set("serrShowMissingSearchButton", settings.showMissingSearchButton !== false);
   set("serrEnableNotifications", settings.enableNotifications !== false);
+  set("serrEnableOnlineRecommendations", settings.enableOnlineRecommendations !== false);
   sync4KControls(panel);
 }
 
@@ -305,6 +306,7 @@ function readValues(panel) {
     confirmRequests: enable4KRequests ? true : checked("serrConfirmRequests"),
     showMissingSearchButton: checked("serrShowMissingSearchButton"),
     enableNotifications: checked("serrEnableNotifications"),
+    enableOnlineRecommendations: checked("serrEnableOnlineRecommendations"),
     enable4KRequests
   };
 }
@@ -445,6 +447,11 @@ export function createSerrPanel(config, labels) {
   section.appendChild(createCheckbox(
     "serrEnableNotifications",
     L(labels, "serrEnableNotifications", "Seerr isteklerini bildirim panelinde göster"),
+    true
+  ));
+  section.appendChild(createCheckbox(
+    "serrEnableOnlineRecommendations",
+    L(labels, "serrEnableOnlineRecommendations", "Öneri satırlarında çevrimiçi (TMDb/Seerr) önerileri göster"),
     true
   ));
 

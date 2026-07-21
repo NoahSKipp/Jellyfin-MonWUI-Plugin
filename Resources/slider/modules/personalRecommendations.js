@@ -12,6 +12,16 @@ import {
 } from "./jfUrl.js";
 import { faIconHtml, findFaIcon } from "./faIcons.js";
 import { resolveSliderAssetHref } from "./assetLinks.js";
+import { appendSerrRequestButton, requestSerrFromItem } from "./seerr/ui.js";
+import { ensureSerrStyles } from "./seerr/styles.js";
+import {
+  getPersonalOnlineItems,
+  getGenreOnlineItems,
+  getTrendingOnlineItems,
+  getSeedItemOnlineRecs,
+  onlineRecsAvailable,
+  isRequestableOnlineItem
+} from "./seerr/onlineRecs.js";
 import {
   openPrcDB,
   makeScope,
@@ -2054,7 +2064,12 @@ async function renderPersonalRecommendationsInternal(options = {}) {
               MIN_RATING,
               { force }
             );
-            renderRecommendationCards(row, recommendations, serverId);
+            const blended = await blendOnlineRecommendations(
+              recommendations,
+              () => getPersonalOnlineItems(userId, { limit: personalCardCount }),
+              { targetCount: personalCardCount, injectRatio: 0.4 }
+            );
+            renderRecommendationCards(row, blended, serverId);
             setPersonalRecsDone(true);
             schedulePrunePlayedAfterPaint(row, userId, 360);
           } catch (e) {
@@ -2074,6 +2089,48 @@ async function renderPersonalRecommendationsInternal(options = {}) {
         }));
       } else if (personalAlreadyReady) {
         setPersonalRecsDone(true);
+      }
+    }
+
+    if (isOnlineTrendingRowsEnabled() && await onlineRecsAvailable()) {
+      for (const mediaType of ["movie", "tv"]) {
+        const trendingSection = ensureTrendingContainer(indexPage, mediaType);
+        try { registerManagedHomeRowAnchor(trendingSection); } catch {}
+        const trendingRow = trendingSection?.querySelector?.(".trending-recs-row") || null;
+        if (!trendingRow) continue;
+
+        tasks.push(enqueueManagedSectionRender(`trending-${mediaType}`, async () => {
+          try {
+            if (deferredSeq !== __deferredHomeSectionSeq) return;
+            if (!trendingRow.isConnected || !hasActivePersonalRecsHomeSections()) return;
+            const cardCount = getPersonalRecsCardCount();
+            const { serverId } = getSessionInfo();
+            const items = await getTrendingOnlineItems(mediaType, { limit: cardCount });
+            if (deferredSeq !== __deferredHomeSectionSeq || !trendingRow.isConnected) return;
+            if (!items.length) {
+              cleanupTrendingSection(trendingSection);
+              return;
+            }
+            if (!trendingRow.dataset.mounted || trendingRow.childElementCount === 0) {
+              trendingRow.dataset.mounted = "1";
+              setupScroller(trendingRow);
+            }
+            renderRecommendationCards(trendingRow, items, serverId);
+          } catch (e) {
+            console.warn("Trending row render failed:", mediaType, e);
+            cleanupTrendingSection(trendingSection);
+          }
+        }, {
+          timeoutMs: 25000,
+          force,
+          reuseKey: false,
+          getAnchor: () => trendingSection?.isConnected ? trendingSection : null,
+          isStillValid: () => (
+            deferredSeq === __deferredHomeSectionSeq &&
+            trendingRow.isConnected &&
+            hasActivePersonalRecsHomeSections()
+          ),
+        }));
       }
     }
 
@@ -2244,6 +2301,16 @@ function cleanupBecauseYouWatchedSection(section) {
   try {
     const heroHost = section.__heroHost || section.querySelector('.dir-row-hero-host');
     if (heroHost) clearHeroHost(heroHost);
+  } catch {}
+  try { section.remove(); } catch {}
+}
+
+function cleanupTrendingSection(section) {
+  if (!section) return;
+  try {
+    section.querySelectorAll('.personal-recs-card').forEach((el) => {
+      try { el.dispatchEvent(new Event('jms:cleanup')); } catch {}
+    });
   } catch {}
   try { section.remove(); } catch {}
 }
@@ -2556,6 +2623,12 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
       : items.slice(0, bywCardCount);
     if (!rowItems.length) rowItems = items.slice(0, bywCardCount);
 
+    rowItems = await blendOnlineRecommendations(
+      rowItems,
+      () => getSeedItemOnlineRecs({ seedItem: seed, seedId, userId, limit: bywCardCount }),
+      { targetCount: bywCardCount, injectRatio: 0.35 }
+    );
+
     try {
       const heroHost = section.__heroHost || section.querySelector('.dir-row-hero-host');
       if (heroHost) {
@@ -2640,6 +2713,57 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
   try { enforceOrder(getHomeSectionsContainer(indexPage)); } catch {}
   scheduleHomeScrollerRefresh(0);
   setBywDone(true);
+}
+
+function isOnlineTrendingRowsEnabled() {
+  try {
+    const cfg = getConfig?.() || config || {};
+    return cfg.enableOnlineTrendingRows !== false;
+  } catch {
+    return true;
+  }
+}
+
+function getTrendingLabel(mediaType) {
+  const l = config.languageLabels || labels || {};
+  if (mediaType === "tv") {
+    return l.trendingSeries || l.trendingShows || "Trending Series";
+  }
+  return l.trendingMovies || "Trending Movies";
+}
+
+// Creates (or returns) a Trending row section for the given media type. Reuses
+// the personal-recs section shell so the cards/CSS match the rest of MonWUI.
+function ensureTrendingContainer(indexPage, mediaType) {
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const sectionId = type === "tv" ? "trending-series" : "trending-movies";
+  const homeSections = getHomeSectionsContainer(indexPage);
+
+  let existing = getScopedSection(sectionId, indexPage);
+  if (existing) {
+    placeSection(existing, homeSections);
+    return existing;
+  }
+
+  const section = document.createElement("div");
+  section.id = sectionId;
+  section.classList.add("homeSection", "personal-recs-section", "trending-recs-section");
+  section.dataset.trendingMediaType = type;
+  const title = escapeHtml(getTrendingLabel(type));
+  section.innerHTML = `
+  <div class="sectionTitleContainer sectionTitleContainer-cards">
+    <h2 class="sectionTitle sectionTitle-cards prc-title">
+      <span class="prc-title-text" aria-label="${title}">${title}</span>
+    </h2>
+  </div>
+
+  <div class="personal-recs-scroll-wrap">
+    <div class="itemsContainer personal-recs-row trending-recs-row" role="list"></div>
+  </div>
+`;
+
+  placeSection(section, homeSections);
+  return section;
 }
 
 function ensurePersonalRecsContainer(indexPage) {
@@ -3094,6 +3218,74 @@ export function progressivelyRenderCardRow({
   };
 }
 
+// Merge local Jellyfin items with online (TMDb/seerr) items, deduping online
+// entries that already exist locally and interleaving the rest so each row is a
+// blend of owned content and requestable online recommendations.
+function mergeLocalAndOnline(localItems, onlineItems, { targetCount = 20, injectRatio = 0.35 } = {}) {
+  const local = Array.isArray(localItems) ? localItems.slice() : [];
+  const cap = Math.max(1, targetCount);
+
+  const seen = new Set();
+  const looseSeen = new Set();
+  for (const it of local) {
+    const k = makePRCKey(it); if (k) seen.add(k);
+    const lk = makePRCLooseKey(it); if (lk) looseSeen.add(lk);
+  }
+
+  const online = [];
+  for (const it of (onlineItems || [])) {
+    const k = makePRCKey(it);
+    const lk = makePRCLooseKey(it);
+    if ((k && seen.has(k)) || (lk && looseSeen.has(lk))) continue; // owned/shown already
+    if (k) seen.add(k);
+    if (lk) looseSeen.add(lk);
+    online.push(it);
+  }
+  if (!online.length) return local.slice(0, cap);
+
+  const gap = Math.max(0, cap - local.length);
+  const desiredOnline = Math.min(
+    online.length,
+    Math.max(gap, Math.round(cap * injectRatio))
+  );
+  const chosenOnline = online.slice(0, desiredOnline);
+  const chosenLocal = local.slice(0, Math.max(0, cap - chosenOnline.length));
+
+  if (!chosenOnline.length) return chosenLocal.slice(0, cap);
+
+  const total = chosenLocal.length + chosenOnline.length;
+  const step = Math.max(2, Math.floor(total / chosenOnline.length));
+  const merged = [];
+  let li = 0, oi = 0, pos = 0;
+  while ((li < chosenLocal.length || oi < chosenOnline.length) && merged.length < cap) {
+    const injectOnline = oi < chosenOnline.length &&
+      ((pos > 0 && pos % step === 0) || li >= chosenLocal.length);
+    if (injectOnline) {
+      merged.push(chosenOnline[oi++]);
+    } else if (li < chosenLocal.length) {
+      merged.push(chosenLocal[li++]);
+    } else if (oi < chosenOnline.length) {
+      merged.push(chosenOnline[oi++]);
+    }
+    pos++;
+  }
+  return merged.slice(0, cap);
+}
+
+// Fetches online items via `onlineFetcher` and blends them into `localItems`.
+// Returns localItems unchanged when online recs are disabled or unavailable.
+async function blendOnlineRecommendations(localItems, onlineFetcher, { targetCount = 20, injectRatio = 0.35 } = {}) {
+  try {
+    if (!(await onlineRecsAvailable())) return localItems;
+    const online = await onlineFetcher();
+    if (!Array.isArray(online) || !online.length) return localItems;
+    return mergeLocalAndOnline(localItems, online, { targetCount, injectRatio });
+  } catch (err) {
+    console.warn("blendOnlineRecommendations failed:", err);
+    return localItems;
+  }
+}
+
 function renderRecommendationCards(row, items, serverId) {
   const personalCardCount = getPersonalRecsCardCount();
   clearRowWithCleanup(row);
@@ -3211,6 +3403,7 @@ function getDetailsUrl(itemId, serverId) {
 }
 
 function buildPosterUrl(item, height = 540, quality = 72, { omitTag = false } = {}) {
+  if (item && item.__posterUrl) return item.__posterUrl;
   const candidate = getPosterLikeImageCandidate(item);
   return buildCandidateImageUrl(item, candidate, height, quality, { omitTag });
 }
@@ -3421,8 +3614,9 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     sizeHint = "personal"
   } = normalizedOptions;
   const { itemId, itemName } = primeItemIdentity(item);
+  const isOnline = isRequestableOnlineItem(item);
   const card = document.createElement("div");
-  card.className = "card personal-recs-card";
+  card.className = isOnline ? "card personal-recs-card personal-recs-card--online" : "card personal-recs-card";
   queueEnterAnimation(card);
   if (itemId) card.dataset.itemId = itemId;
   card.setAttribute('data-key', makePRCKey(item));
@@ -3524,11 +3718,23 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     card.querySelector('.cardImageContainer')?.prepend(noImg);
   }
 
+  if (isOnline) {
+    mountOnlineRequestAffordance(card, item, itemName);
+  }
+
   const cardLink = card.querySelector(".cardLink");
   if (cardLink) {
     cardLink.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (isOnline) {
+        try {
+          await requestSerrFromItem(item, { source: "monwui-recs" });
+        } catch (err) {
+          console.warn("Seerr request failed (online recs card):", err);
+        }
+        return;
+      }
       if (!itemId) return;
       const hostEl = card.querySelector(".cardImageContainer");
       const backdropIndex = localStorage.getItem("jms_backdrop_index") || "0";
@@ -3546,14 +3752,82 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     }, { passive: false });
   }
 
-  const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
-  const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
-  defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
+  if (!isOnline) {
+    const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
+    const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
+    defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
+  }
   card.addEventListener('jms:cleanup', () => {
     cleanupManagedImage(img);
     detachPreviewHandlers(card);
   }, { once: true });
   return card;
+}
+
+// Adds the "Request" button (and a small online badge) to an online-sourced
+// recommendation card. Reuses the shared Seerr request pipeline so the confirm
+// modal, arr fallback and status handling all behave exactly like elsewhere.
+let __onlineRecsStylesInjected = false;
+function ensureOnlineRecsCardStyles() {
+  if (__onlineRecsStylesInjected) return;
+  __onlineRecsStylesInjected = true;
+  try { ensureSerrStyles(); } catch {}
+  try {
+    if (document.getElementById("jms-online-recs-card-styles")) return;
+    const style = document.createElement("style");
+    style.id = "jms-online-recs-card-styles";
+    style.textContent = `
+      .personal-recs-card--online .prc-online-actions{
+        display:flex;justify-content:flex-end;margin-top:8px;pointer-events:auto;
+      }
+      .personal-recs-card--online .prc-online-request-btn{
+        width:100%;justify-content:center;font-size:.82rem;padding:7px 10px;border-radius:12px;
+      }
+      .prc-online-badge{
+        display:inline-flex;align-items:center;justify-content:center;
+        width:26px;height:26px;border-radius:999px;
+        background:rgba(51,193,160,.92);color:#04231c;
+        box-shadow:0 4px 12px rgba(0,0,0,.35);font-size:.72rem;
+      }
+      .prc-online-badge-icon{line-height:1;}
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+}
+
+function mountOnlineRequestAffordance(card, item, itemName) {
+  try {
+    ensureOnlineRecsCardStyles();
+    const overlay = card.querySelector(".prc-overlay");
+    if (!overlay) return;
+
+    const actions = document.createElement("div");
+    actions.className = "prc-online-actions";
+    overlay.appendChild(actions);
+
+    // Append the request button only when the user can actually request
+    // (seerr/arr configured). Discovery can be TMDb-only, in which case no
+    // button is shown and the card is informational.
+    appendSerrRequestButton(actions, item, {
+      source: "monwui-recs",
+      className: "monwui-serr-btn prc-online-request-btn"
+    }).then((button) => {
+      if (!button) { try { actions.remove(); } catch {} return; }
+      // Keep clicks on the button from bubbling to the card link handler.
+      button.addEventListener("click", (e) => { e.stopPropagation(); }, { capture: true });
+    }).catch(() => { try { actions.remove(); } catch {} });
+
+    const badges = card.querySelector(".prc-top-badges");
+    if (badges && !badges.querySelector(".prc-online-badge")) {
+      const badge = document.createElement("div");
+      badge.className = "prc-online-badge";
+      badge.title = `${itemName} — ${item.__mediaType === "tv" ? "TV" : "Movie"} (online)`;
+      badge.innerHTML = faIconHtml("fa-solid fa-cloud-arrow-down", "prc-online-badge-icon");
+      badges.appendChild(badge);
+    }
+  } catch (err) {
+    console.warn("Failed to mount online request affordance:", err);
+  }
 }
 
 function createHubScrollButton(side = "right") {
@@ -4254,7 +4528,12 @@ async function ensureGenreLoaded(idx) {
         return;
       }
 
-      const unique = remaining.slice(0, genreRowCardCount);
+      const unique = await blendOnlineRecommendations(
+        remaining.slice(0, genreRowCardCount),
+        () => getGenreOnlineItems(genre, { limit: genreRowCardCount }),
+        { targetCount: genreRowCardCount, injectRatio: 0.35 }
+      );
+      if (rec.seq !== mySeq) return;
       let scrollerReady = false;
 
       await new Promise((resolve) => {
@@ -4750,6 +5029,8 @@ export function resetPersonalRecsAndGenreState() {
     const sections = Array.from(new Set([
       document.getElementById("personal-recommendations"),
       document.getElementById("genre-hubs"),
+      document.getElementById("trending-movies"),
+      document.getElementById("trending-series"),
       ...Array.from(document.querySelectorAll('[id^="because-you-watched--"], #because-you-watched'))
     ].filter(Boolean)));
 
