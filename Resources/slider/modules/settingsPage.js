@@ -162,7 +162,7 @@ export function createSettingsModal() {
       ? createTab('serr', 'fa-clapperboard', labels.serrSettingsTab || 'Seerr & Arr Entegrasyonu')
       : null;
     const recommendationsTab = config?.currentUserIsAdmin
-      ? createTab('recommendations', 'fa-wand-magic-sparkles', labels.recommendationsSettingsTab || 'Öneriler')
+      ? createTab('recommendations', 'fa-wand-magic-sparkles', labels.recommendationsSettingsTab || 'Recommendations')
       : null;
     const detailsModalTab = createTab('details-modal', 'fa-circle-info', labels.detailsModalSettingsTab || 'Detaylar Modülü Ayarları');
     const avatarTab = createTab('avatar', 'fa-user', labels.avatarCreateInput || 'Avatar Ayarları');

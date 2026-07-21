@@ -111,7 +111,7 @@ export function createRecommendationsPanel(config, labels) {
   panel.id = "recommendations-panel";
   panel.className = "settings-panel";
 
-  const section = createSection(L(labels, "recommendationsSettingsTab", "Öneriler"));
+  const section = createSection(L(labels, "recommendationsSettingsTab", "Recommendations"));
 
   const intro = document.createElement("div");
   intro.className = "description-text2";
@@ -119,38 +119,38 @@ export function createRecommendationsPanel(config, labels) {
   intro.textContent = L(
     labels,
     "recommendationsSettingsHint",
-    "Yerel kütüphaneye ek olarak TMDb / Seerr üzerinden çevrimiçi öneriler getirir. İstekler için Seerr veya Radarr/Sonarr yapılandırılmış olmalıdır."
+    "Blend online recommendations from TMDb / Seerr into the home rows alongside your local library. Requesting missing titles needs Seerr or Radarr/Sonarr configured."
   );
   section.appendChild(intro);
 
   section.appendChild(createCheckboxRow(
     "recEnableOnlineRecommendations",
-    L(labels, "serrEnableOnlineRecommendations", "Öneri satırlarında çevrimiçi (TMDb/Seerr) önerileri göster"),
+    L(labels, "serrEnableOnlineRecommendations", "Show online (TMDb/Seerr) recommendations in the recommendation rows"),
     true
   ));
   section.appendChild(createCheckboxRow(
     "recEnableOnlineTrendingRows",
-    L(labels, "enableOnlineTrendingRows", "Öne Çıkan Filmler / Diziler satırlarını göster"),
+    L(labels, "enableOnlineTrendingRows", "Show Trending Movies / Trending Series rows"),
     true
   ));
   section.appendChild(createCheckboxRow(
     "recEnableOnlineCardEnrichment",
-    L(labels, "enableOnlineCardEnrichment", "Çevrimiçi kartlar için içerik derecelendirmesi ve süre bilgisini getir"),
+    L(labels, "enableOnlineCardEnrichment", "Fetch content rating and runtime for online cards"),
     true,
-    L(labels, "enableOnlineCardEnrichmentHint", "Her başlık için ek TMDb detay çağrısı yapar (önbelleğe alınır).")
+    L(labels, "enableOnlineCardEnrichmentHint", "Makes an extra TMDb detail call per title (cached).")
   ));
   section.appendChild(createInputRow(
     "recOnlineContentRatingRegion",
-    L(labels, "onlineContentRatingRegion", "İçerik derecelendirmesi bölgesi (ör. US, TR, DE)"),
-    { placeholder: "US", hint: L(labels, "onlineContentRatingRegionHint", "Boş bırakılırsa Seerr dil ayarından türetilir.") }
+    L(labels, "onlineContentRatingRegion", "Content rating region (e.g. US, TR, DE)"),
+    { placeholder: "US", hint: L(labels, "onlineContentRatingRegionHint", "Leave blank to derive it from the Seerr language setting.") }
   ));
   section.appendChild(createInputRow(
     "recTmdbApiKey",
-    L(labels, "tmdbApiKeyLabel", "TMDb API anahtarı"),
+    L(labels, "tmdbApiKeyLabel", "TMDb API key"),
     {
       type: "password",
-      placeholder: L(labels, "tmdbApiKeyPlaceholder", "TMDb v3 API anahtarı"),
-      hint: L(labels, "tmdbApiKeyHint", "Çevrimiçi keşif ve zenginleştirme için kullanılır. themoviedb.org üzerinden ücretsiz alınır.")
+      placeholder: L(labels, "tmdbApiKeyPlaceholder", "TMDb v3 API key"),
+      hint: L(labels, "tmdbApiKeyHint", "Used for online discovery and enrichment. Get one for free at themoviedb.org.")
     }
   ));
 

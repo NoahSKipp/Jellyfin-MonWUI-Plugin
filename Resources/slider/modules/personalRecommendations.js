@@ -14,6 +14,7 @@ import { faIconHtml, findFaIcon } from "./faIcons.js";
 import { resolveSliderAssetHref } from "./assetLinks.js";
 import { appendSerrRequestButton, requestSerrFromItem } from "./seerr/ui.js";
 import { ensureSerrStyles } from "./seerr/styles.js";
+import { showNotification } from "./player/ui/notification.js";
 import {
   getPersonalOnlineItems,
   getGenreOnlineItems,
@@ -2717,11 +2718,13 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
 }
 
 function getTrendingLabel(mediaType) {
-  const l = config.languageLabels || labels || {};
+  const primary = config.languageLabels || {};
+  const secondary = labels || {};
+  const pick = (key) => primary[key] || secondary[key];
   if (mediaType === "tv") {
-    return l.trendingSeries || l.trendingShows || "Trending Series";
+    return pick("trendingSeries") || pick("trendingShows") || "Trending Series";
   }
-  return l.trendingMovies || "Trending Movies";
+  return pick("trendingMovies") || "Trending Movies";
 }
 
 // Creates (or returns) a Trending row section for the given media type. Reuses
@@ -3727,8 +3730,19 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
       e.stopPropagation();
       if (isOnline) {
         try {
-          await requestSerrFromItem(item, { source: "monwui-recs" });
+          // Online items are the ones missing locally; enrichment gives them a
+          // runtime, so allowAvailable prevents a false "already in library".
+          await requestSerrFromItem(item, { source: "monwui-recs", allowAvailable: true });
         } catch (err) {
+          const msg = String(err?.message || "").trim()
+            || (config.languageLabels?.serrRequestFailed || labels.serrRequestFailed || "Request failed.");
+          try {
+            showNotification(
+              `<i class="fas fa-clapperboard" style="margin-right:8px;"></i>${escapeHtml(msg)}`,
+              3200,
+              "error"
+            );
+          } catch {}
           console.warn("Seerr request failed (online recs card):", err);
         }
         return;
@@ -3808,6 +3822,7 @@ function mountOnlineRequestAffordance(card, item, itemName) {
     // button is shown and the card is informational.
     appendSerrRequestButton(actions, item, {
       source: "monwui-recs",
+      allowAvailable: true,
       className: "monwui-serr-btn prc-online-request-btn"
     }).then((button) => {
       if (!button) { try { actions.remove(); } catch {} return; }
