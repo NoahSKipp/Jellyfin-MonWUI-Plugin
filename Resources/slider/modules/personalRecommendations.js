@@ -2729,7 +2729,46 @@ function getTrendingLabel(mediaType) {
 
 // Creates (or returns) a Trending row section for the given media type. Reuses
 // the personal-recs section shell so the cards/CSS match the rest of MonWUI.
+let __trendingStylesInjected = false;
+function ensureTrendingRowStyles() {
+  if (__trendingStylesInjected) return;
+  __trendingStylesInjected = true;
+  try {
+    if (document.getElementById("jms-trending-row-styles")) return;
+    // The home-row inset (padding-inline) + card-width vars are ID-scoped in the
+    // stylesheet to the built-in sections; replicate them for the Trending IDs so
+    // they line up with (and size like) the genre rows instead of sitting flush
+    // to the screen edge with default-sized cards.
+    const style = document.createElement("style");
+    style.id = "jms-trending-row-styles";
+    style.textContent = `
+      #trending-movies, #trending-series {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding-inline: 3.2%;
+        position: relative;
+        --jms-row-gap: 17px;
+        --jms-row-gap-tablet: 14px;
+        --jms-row-gap-mobile: 11px;
+        --jms-card-width: clamp(196px, 15.1vw, 276px);
+        --jms-card-width-tablet: clamp(176px, 24vw, 232px);
+        --jms-card-width-mobile: minmax(154px, 178px);
+        --jms-card-width-mobile-sm: minmax(136px, 162px);
+        --jms-card-width-tv: clamp(226px, 19.4vw, 304px);
+        --jms-card-radius: 17px;
+        --jms-card-radius-tv: 19px;
+      }
+      @media (max-width: 820px) {
+        #trending-movies, #trending-series { gap: 10px; padding-inline: 2.8%; }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+}
+
 function ensureTrendingContainer(indexPage, mediaType) {
+  ensureTrendingRowStyles();
   const type = mediaType === "tv" ? "tv" : "movie";
   const sectionId = type === "tv" ? "trending-series" : "trending-movies";
   const homeSections = getHomeSectionsContainer(indexPage);

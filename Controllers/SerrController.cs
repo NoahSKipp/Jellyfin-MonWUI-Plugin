@@ -395,7 +395,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
         // ---------------------------------------------------------------------
 
         [HttpGet("online/trending")]
-        public async Task<IActionResult> OnlineTrending([FromQuery] string? mediaType, [FromQuery] int page = 1, [FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        public async Task<IActionResult> OnlineTrending([FromQuery] string? mediaType, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
         {
             var userCheck = TryGetRequestUser();
             if (userCheck.Result is not null) return userCheck.Result;
@@ -419,11 +419,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             AddPage(tmdbQs, page);
 
             var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, "/discover/trending", overseerrQs, cancellationToken);
-            return await BuildOnlineResponse(response, type, page, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
         }
 
         [HttpGet("online/discover")]
-        public async Task<IActionResult> OnlineDiscover([FromQuery] string? mediaType, [FromQuery] string? genre = null, [FromQuery] string? sortBy = null, [FromQuery] int page = 1, [FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        public async Task<IActionResult> OnlineDiscover([FromQuery] string? mediaType, [FromQuery] string? genre = null, [FromQuery] string? sortBy = null, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
         {
             var userCheck = TryGetRequestUser();
             if (userCheck.Result is not null) return userCheck.Result;
@@ -459,11 +459,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (!string.IsNullOrWhiteSpace(lang)) overseerrQs["language"] = lang;
 
             var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, overseerrPath, overseerrQs, cancellationToken);
-            return await BuildOnlineResponse(response, type, page, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
         }
 
         [HttpGet("online/recommendations")]
-        public async Task<IActionResult> OnlineRecommendations([FromQuery] string? mediaType, [FromQuery] int tmdbId, [FromQuery] int page = 1, [FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        public async Task<IActionResult> OnlineRecommendations([FromQuery] string? mediaType, [FromQuery] int tmdbId, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
         {
             var userCheck = TryGetRequestUser();
             if (userCheck.Result is not null) return userCheck.Result;
@@ -498,7 +498,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 var simResponse = await FetchOnlineAsync(cfg, simTmdbPath, tmdbQs, simOverseerrPath, overseerrQs, cancellationToken);
                 if (simResponse.Ok) response = simResponse;
             }
-            return await BuildOnlineResponse(response, type, page, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
         }
 
         [HttpGet("online/genres")]
@@ -1255,13 +1255,14 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             };
         }
 
-        private async Task<IActionResult> BuildOnlineResponse(SerrCallResult response, string mediaType, int page, CancellationToken cancellationToken)
+        private async Task<IActionResult> BuildOnlineResponse(SerrCallResult response, string mediaType, int page, int limit, CancellationToken cancellationToken)
         {
             if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Object)
             {
                 return EmptyOnlineResults(mediaType, page);
             }
 
+            var cap = limit > 0 ? Math.Min(limit, 40) : 40;
             var totalPages = ReadIntAny(response.Payload, "total_pages", "totalPages");
             var seen = new HashSet<int>();
             var drafts = new List<OnlineDraft>();
@@ -1272,6 +1273,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 if (draft is null) continue;
                 if (!seen.Add(draft.TmdbId)) continue;
                 drafts.Add(draft);
+                // Trim before the (per-title) enrichment calls so rows stay fast.
+                if (drafts.Count >= cap) break;
             }
 
             var cfg = GetConfig();

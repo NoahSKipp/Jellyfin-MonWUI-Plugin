@@ -149,18 +149,18 @@ function onlineQuery(params = {}) {
   return out ? `?${out}` : "";
 }
 
-export async function fetchOnlineTrending({ mediaType = "movie", page = 1, language = "" } = {}) {
-  return request(`/online/trending${onlineQuery({ mediaType, page, language })}`);
+export async function fetchOnlineTrending({ mediaType = "movie", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/trending${onlineQuery({ mediaType, page, language, limit: limit || undefined })}`);
 }
 
-export async function fetchOnlineDiscover({ mediaType = "movie", genre = "", sortBy = "", page = 1, language = "" } = {}) {
-  return request(`/online/discover${onlineQuery({ mediaType, genre, sortBy, page, language })}`);
+export async function fetchOnlineDiscover({ mediaType = "movie", genre = "", sortBy = "", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/discover${onlineQuery({ mediaType, genre, sortBy, page, language, limit: limit || undefined })}`);
 }
 
-export async function fetchOnlineRecommendations({ mediaType = "movie", tmdbId = 0, page = 1, language = "" } = {}) {
+export async function fetchOnlineRecommendations({ mediaType = "movie", tmdbId = 0, page = 1, language = "", limit = 0 } = {}) {
   const clean = Number(tmdbId);
   if (!Number.isFinite(clean) || clean <= 0) return { ok: true, results: [] };
-  return request(`/online/recommendations${onlineQuery({ mediaType, tmdbId: Math.floor(clean), page, language })}`);
+  return request(`/online/recommendations${onlineQuery({ mediaType, tmdbId: Math.floor(clean), page, language, limit: limit || undefined })}`);
 }
 
 export async function fetchOnlineGenres({ mediaType = "movie", language = "" } = {}) {

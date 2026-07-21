@@ -233,8 +233,9 @@ export async function getSeededOnlineItems(userId, { limit = 12, mediaType = "",
   if (!seeds.length) return [];
 
   const chosen = seeds.slice(0, Math.max(1, seedCount));
+  const perSeed = Math.max(4, Math.ceil(limit / chosen.length) + 1);
   const lists = await Promise.all(chosen.map(seed =>
-    fetchOnlineRecommendations({ mediaType: seed.mediaType, tmdbId: seed.tmdbId })
+    fetchOnlineRecommendations({ mediaType: seed.mediaType, tmdbId: seed.tmdbId, limit: perSeed })
       .then(r => (Array.isArray(r?.results) ? r.results : []))
       .catch(() => [])
   ));
@@ -271,7 +272,8 @@ export async function getSeedItemOnlineRecs({ seedItem = null, seedId = "", user
 
   const r = await fetchOnlineRecommendations({
     mediaType: type === "tv" ? "tv" : "movie",
-    tmdbId
+    tmdbId,
+    limit: limit + 4
   }).catch(() => null);
   const results = Array.isArray(r?.results) ? r.results : [];
   return finalizeOnlineItems(results, { limit });
@@ -281,7 +283,7 @@ export async function getSeedItemOnlineRecs({ seedItem = null, seedId = "", user
 export async function getTrendingOnlineItems(mediaType = "movie", { limit = 20 } = {}) {
   if (!(await onlineRecsAvailable())) return [];
   const type = mediaType === "tv" ? "tv" : "movie";
-  const r = await fetchOnlineTrending({ mediaType: type }).catch(() => null);
+  const r = await fetchOnlineTrending({ mediaType: type, limit: limit + 2 }).catch(() => null);
   const results = Array.isArray(r?.results) ? r.results : [];
   return finalizeOnlineItems(results, { limit });
 }
@@ -290,8 +292,9 @@ export async function getTrendingOnlineItems(mediaType = "movie", { limit = 20 }
 export async function getGenreOnlineItems(genreName, { limit = 20, mediaType = "" } = {}) {
   if (!genreName || !(await onlineRecsAvailable())) return [];
   const types = mediaType ? [mediaType] : ["movie", "tv"];
+  const perType = Math.ceil(limit / types.length) + 2;
   const lists = await Promise.all(types.map(t =>
-    fetchOnlineDiscover({ mediaType: t, genre: genreName })
+    fetchOnlineDiscover({ mediaType: t, genre: genreName, limit: perType })
       .then(r => (Array.isArray(r?.results) ? r.results : []))
       .catch(() => [])
   ));
