@@ -3812,6 +3812,8 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
     const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
     defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
+  } else if (item.__trailerKey) {
+    attachOnlineHoverTrailer(card, item);
   }
   card.addEventListener('jms:cleanup', () => {
     cleanupManagedImage(img);
@@ -3846,9 +3848,61 @@ function ensureOnlineRecsCardStyles() {
         box-shadow:0 4px 12px rgba(0,0,0,.35);font-size:.72rem;
       }
       .prc-online-badge-icon{line-height:1;}
+      .jms-online-trailer-host{
+        position:absolute;inset:0;z-index:1;opacity:0;transition:opacity .28s ease;
+        background:#000;display:flex;align-items:center;justify-content:center;
+        overflow:hidden;pointer-events:none;border-radius:inherit;
+      }
+      .jms-online-trailer-host.is-visible{opacity:1;}
+      .jms-online-trailer-frame{width:100%;aspect-ratio:16/9;border:0;pointer-events:none;}
     `;
     (document.head || document.documentElement).appendChild(style);
   } catch {}
+}
+
+// Lightweight hover trailer for online cards: a muted YouTube embed layered over
+// the poster. Kept deliberately simple (no id-based fetches) since the full
+// hover modal is keyed to Jellyfin item ids and can't be reused for TMDb items.
+function attachOnlineHoverTrailer(cardEl, item) {
+  if (IS_MOBILE) return;
+  const key = item && item.__trailerKey;
+  if (!cardEl || !key) return;
+
+  let host = null;
+  let timer = null;
+
+  const close = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (host) { try { host.remove(); } catch {} host = null; }
+  };
+
+  const open = () => {
+    if (host || !cardEl.isConnected || !cardEl.matches(":hover")) return;
+    const container = cardEl.querySelector(".cardImageContainer");
+    if (!container) return;
+    host = document.createElement("div");
+    host.className = "jms-online-trailer-host";
+    const iframe = document.createElement("iframe");
+    iframe.className = "jms-online-trailer-frame";
+    iframe.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
+    iframe.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
+    iframe.setAttribute("loading", "lazy");
+    const k = encodeURIComponent(key);
+    iframe.src = `https://www.youtube-nocookie.com/embed/${k}?autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&playsinline=1&loop=1&playlist=${k}`;
+    host.appendChild(iframe);
+    container.appendChild(host);
+    requestAnimationFrame(() => { if (host) host.classList.add("is-visible"); });
+  };
+
+  const onEnter = () => {
+    ensureOnlineRecsCardStyles();
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(open, OPEN_HOVER_DELAY_MS);
+  };
+
+  cardEl.addEventListener("pointerenter", onEnter, { passive: true });
+  cardEl.addEventListener("pointerleave", close, { passive: true });
+  cardEl.addEventListener("jms:cleanup", close, { once: true });
 }
 
 function mountOnlineRequestAffordance(card, item, itemName) {
