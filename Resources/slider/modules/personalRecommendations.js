@@ -3,7 +3,7 @@ import { getConfig, getHomeSectionsRuntimeConfig, normalizeManagedCardTitleDispl
 import { getLanguageLabels, getDefaultLanguage } from "../language/index.js";
 import { attachMiniPosterHover } from "./studioHubsUtils.js";
 import { openGenreExplorer, openPersonalExplorer } from "./genreExplorer.js";
-import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS } from "./hoverTrailerModal.js";
+import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS, openPreviewModalForItem } from "./hoverTrailerModal.js";
 import { createTrailerIframe, formatOfficialRatingLabel } from "./utils.js";
 import { openDetailsModal } from "./detailsModalLoader.js";
 import {
@@ -12,6 +12,20 @@ import {
 } from "./jfUrl.js";
 import { faIconHtml, findFaIcon } from "./faIcons.js";
 import { resolveSliderAssetHref } from "./assetLinks.js";
+import { appendSerrRequestButton, requestSerrFromItem, openSerrSeasonModal } from "./seerr/ui.js";
+import { ensureSerrStyles } from "./seerr/styles.js";
+import { showNotification } from "./player/ui/notification.js";
+import {
+  getPersonalOnlineItems,
+  getGenreOnlineItems,
+  getTrendingOnlineItems,
+  getPopularInRegionItems,
+  getEffectiveRegion,
+  getSeedItemOnlineRecs,
+  onlineRecsAvailable,
+  onlineTrendingRowsEnabled,
+  isRequestableOnlineItem
+} from "./seerr/onlineRecs.js";
 import {
   openPrcDB,
   makeScope,
@@ -2054,7 +2068,12 @@ async function renderPersonalRecommendationsInternal(options = {}) {
               MIN_RATING,
               { force }
             );
-            renderRecommendationCards(row, recommendations, serverId);
+            const blended = await blendOnlineRecommendations(
+              recommendations,
+              () => getPersonalOnlineItems(userId, { limit: personalCardCount }),
+              { targetCount: personalCardCount, injectRatio: 0.4 }
+            );
+            renderRecommendationCards(row, blended, serverId);
             setPersonalRecsDone(true);
             schedulePrunePlayedAfterPaint(row, userId, 360);
           } catch (e) {
@@ -2074,6 +2093,90 @@ async function renderPersonalRecommendationsInternal(options = {}) {
         }));
       } else if (personalAlreadyReady) {
         setPersonalRecsDone(true);
+      }
+    }
+
+    if (await onlineTrendingRowsEnabled()) {
+      for (const mediaType of ["movie", "tv"]) {
+        const trendingSection = ensureTrendingContainer(indexPage, mediaType);
+        try { registerManagedHomeRowAnchor(trendingSection); } catch {}
+        const trendingRow = trendingSection?.querySelector?.(".trending-recs-row") || null;
+        if (!trendingRow) continue;
+
+        tasks.push(enqueueManagedSectionRender(`trending-${mediaType}`, async () => {
+          try {
+            if (deferredSeq !== __deferredHomeSectionSeq) return;
+            if (!trendingRow.isConnected || !hasActivePersonalRecsHomeSections()) return;
+            const cardCount = getPersonalRecsCardCount();
+            const { serverId } = getSessionInfo();
+            const items = await getTrendingOnlineItems(mediaType, { limit: cardCount });
+            if (deferredSeq !== __deferredHomeSectionSeq || !trendingRow.isConnected) return;
+            if (!items.length) {
+              cleanupTrendingSection(trendingSection);
+              return;
+            }
+            if (!trendingRow.dataset.mounted || trendingRow.childElementCount === 0) {
+              trendingRow.dataset.mounted = "1";
+              setupScroller(trendingRow);
+            }
+            renderRecommendationCards(trendingRow, items, serverId);
+          } catch (e) {
+            console.warn("Trending row render failed:", mediaType, e);
+            cleanupTrendingSection(trendingSection);
+          }
+        }, {
+          timeoutMs: 25000,
+          force,
+          reuseKey: false,
+          getAnchor: () => trendingSection?.isConnected ? trendingSection : null,
+          isStillValid: () => (
+            deferredSeq === __deferredHomeSectionSeq &&
+            trendingRow.isConnected &&
+            hasActivePersonalRecsHomeSections()
+          ),
+        }));
+      }
+
+      // "Popular in your region" rows, sharing the Trending toggle/gate.
+      const popularRegion = await getEffectiveRegion().catch(() => "");
+      for (const mediaType of ["movie", "tv"]) {
+        const popularSection = ensurePopularContainer(indexPage, mediaType, popularRegion);
+        try { registerManagedHomeRowAnchor(popularSection); } catch {}
+        const popularRow = popularSection?.querySelector?.(".popular-recs-row") || null;
+        if (!popularRow) continue;
+
+        tasks.push(enqueueManagedSectionRender(`popular-${mediaType}`, async () => {
+          try {
+            if (deferredSeq !== __deferredHomeSectionSeq) return;
+            if (!popularRow.isConnected || !hasActivePersonalRecsHomeSections()) return;
+            const cardCount = getPersonalRecsCardCount();
+            const { serverId } = getSessionInfo();
+            const items = await getPopularInRegionItems(mediaType, { limit: cardCount, region: popularRegion });
+            if (deferredSeq !== __deferredHomeSectionSeq || !popularRow.isConnected) return;
+            if (!items.length) {
+              cleanupTrendingSection(popularSection);
+              return;
+            }
+            if (!popularRow.dataset.mounted || popularRow.childElementCount === 0) {
+              popularRow.dataset.mounted = "1";
+              setupScroller(popularRow);
+            }
+            renderRecommendationCards(popularRow, items, serverId);
+          } catch (e) {
+            console.warn("Popular row render failed:", mediaType, e);
+            cleanupTrendingSection(popularSection);
+          }
+        }, {
+          timeoutMs: 25000,
+          force,
+          reuseKey: false,
+          getAnchor: () => popularSection?.isConnected ? popularSection : null,
+          isStillValid: () => (
+            deferredSeq === __deferredHomeSectionSeq &&
+            popularRow.isConnected &&
+            hasActivePersonalRecsHomeSections()
+          ),
+        }));
       }
     }
 
@@ -2244,6 +2347,16 @@ function cleanupBecauseYouWatchedSection(section) {
   try {
     const heroHost = section.__heroHost || section.querySelector('.dir-row-hero-host');
     if (heroHost) clearHeroHost(heroHost);
+  } catch {}
+  try { section.remove(); } catch {}
+}
+
+function cleanupTrendingSection(section) {
+  if (!section) return;
+  try {
+    section.querySelectorAll('.personal-recs-card').forEach((el) => {
+      try { el.dispatchEvent(new Event('jms:cleanup')); } catch {}
+    });
   } catch {}
   try { section.remove(); } catch {}
 }
@@ -2556,6 +2669,12 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
       : items.slice(0, bywCardCount);
     if (!rowItems.length) rowItems = items.slice(0, bywCardCount);
 
+    rowItems = await blendOnlineRecommendations(
+      rowItems,
+      () => getSeedItemOnlineRecs({ seedItem: seed, seedId, userId, limit: bywCardCount }),
+      { targetCount: bywCardCount, injectRatio: 0.35 }
+    );
+
     try {
       const heroHost = section.__heroHost || section.querySelector('.dir-row-hero-host');
       if (heroHost) {
@@ -2640,6 +2759,149 @@ async function renderBecauseYouWatchedAuto(indexPage, options = {}) {
   try { enforceOrder(getHomeSectionsContainer(indexPage)); } catch {}
   scheduleHomeScrollerRefresh(0);
   setBywDone(true);
+}
+
+function getTrendingLabel(mediaType) {
+  const primary = config.languageLabels || {};
+  const secondary = labels || {};
+  const pick = (key) => primary[key] || secondary[key];
+  if (mediaType === "tv") {
+    return pick("trendingSeries") || pick("trendingShows") || "Trending Series";
+  }
+  return pick("trendingMovies") || "Trending Movies";
+}
+
+// Creates (or returns) a Trending row section for the given media type. Reuses
+// the personal-recs section shell so the cards/CSS match the rest of MonWUI.
+let __trendingStylesInjected = false;
+function ensureTrendingRowStyles() {
+  if (__trendingStylesInjected) return;
+  __trendingStylesInjected = true;
+  try {
+    if (document.getElementById("jms-trending-row-styles")) return;
+    // The home-row inset (padding-inline) + card-width vars are ID-scoped in the
+    // stylesheet to the built-in sections; replicate them for the Trending IDs so
+    // they line up with (and size like) the genre rows instead of sitting flush
+    // to the screen edge with default-sized cards.
+    const style = document.createElement("style");
+    style.id = "jms-trending-row-styles";
+    style.textContent = `
+      #trending-movies, #trending-series, #popular-movies, #popular-series {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding-inline: 3.2%;
+        position: relative;
+        --jms-row-gap: 17px;
+        --jms-row-gap-tablet: 14px;
+        --jms-row-gap-mobile: 11px;
+        --jms-card-width: clamp(196px, 15.1vw, 276px);
+        --jms-card-width-tablet: clamp(176px, 24vw, 232px);
+        --jms-card-width-mobile: minmax(154px, 178px);
+        --jms-card-width-mobile-sm: minmax(136px, 162px);
+        --jms-card-width-tv: clamp(226px, 19.4vw, 304px);
+        --jms-card-radius: 17px;
+        --jms-card-radius-tv: 19px;
+      }
+      @media (max-width: 820px) {
+        #trending-movies, #trending-series, #popular-movies, #popular-series { gap: 10px; padding-inline: 2.8%; }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+}
+
+function ensureTrendingContainer(indexPage, mediaType) {
+  ensureTrendingRowStyles();
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const sectionId = type === "tv" ? "trending-series" : "trending-movies";
+  const homeSections = getHomeSectionsContainer(indexPage);
+
+  let existing = getScopedSection(sectionId, indexPage);
+  if (existing) {
+    placeSection(existing, homeSections);
+    return existing;
+  }
+
+  const section = document.createElement("div");
+  section.id = sectionId;
+  section.classList.add("homeSection", "personal-recs-section", "trending-recs-section");
+  section.dataset.trendingMediaType = type;
+  const title = escapeHtml(getTrendingLabel(type));
+  section.innerHTML = `
+  <div class="sectionTitleContainer sectionTitleContainer-cards">
+    <h2 class="sectionTitle sectionTitle-cards prc-title">
+      <span class="prc-title-text" aria-label="${title}">${title}</span>
+    </h2>
+  </div>
+
+  <div class="personal-recs-scroll-wrap">
+    <div class="itemsContainer personal-recs-row trending-recs-row" role="list"></div>
+  </div>
+`;
+
+  placeSection(section, homeSections);
+  return section;
+}
+
+function getRegionDisplayName(regionCode) {
+  const cc = String(regionCode || "").trim().toUpperCase();
+  if (!cc) return "";
+  try {
+    const lang = getDefaultLanguage?.() || "en";
+    const dn = new Intl.DisplayNames([lang, "en"], { type: "region" });
+    return dn.of(cc) || cc;
+  } catch {
+    return cc;
+  }
+}
+
+function getPopularLabel(mediaType, regionCode) {
+  const l = config.languageLabels || labels || {};
+  const regionName = getRegionDisplayName(regionCode) || regionCode || "";
+  const tpl = (mediaType === "tv" ? (l.popularSeriesInRegion || l.popularInRegion) : (l.popularMoviesInRegion || l.popularInRegion))
+    || "Popular in {region}";
+  return String(tpl).replace("{region}", regionName);
+}
+
+function ensurePopularContainer(indexPage, mediaType, regionCode) {
+  ensureTrendingRowStyles();
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const sectionId = type === "tv" ? "popular-series" : "popular-movies";
+  const homeSections = getHomeSectionsContainer(indexPage);
+
+  let existing = getScopedSection(sectionId, indexPage);
+  if (existing) {
+    // Keep the title current if the region changed since it was created.
+    const titleEl = existing.querySelector(".prc-title-text");
+    if (titleEl) {
+      const t = getPopularLabel(type, regionCode);
+      titleEl.textContent = t;
+      titleEl.setAttribute("aria-label", t);
+    }
+    placeSection(existing, homeSections);
+    return existing;
+  }
+
+  const section = document.createElement("div");
+  section.id = sectionId;
+  section.classList.add("homeSection", "personal-recs-section", "trending-recs-section", "popular-recs-section");
+  section.dataset.popularMediaType = type;
+  const title = escapeHtml(getPopularLabel(type, regionCode));
+  section.innerHTML = `
+  <div class="sectionTitleContainer sectionTitleContainer-cards">
+    <h2 class="sectionTitle sectionTitle-cards prc-title">
+      <span class="prc-title-text" aria-label="${title}">${title}</span>
+    </h2>
+  </div>
+
+  <div class="personal-recs-scroll-wrap">
+    <div class="itemsContainer personal-recs-row trending-recs-row popular-recs-row" role="list"></div>
+  </div>
+`;
+
+  placeSection(section, homeSections);
+  return section;
 }
 
 function ensurePersonalRecsContainer(indexPage) {
@@ -3094,6 +3356,80 @@ export function progressivelyRenderCardRow({
   };
 }
 
+// Merge local Jellyfin items with online (TMDb/seerr) items, deduping online
+// entries that already exist locally and interleaving the rest so each row is a
+// blend of owned content and requestable online recommendations.
+function mergeLocalAndOnline(localItems, onlineItems, { targetCount = 20, injectRatio = 0.35 } = {}) {
+  const local = Array.isArray(localItems) ? localItems.slice() : [];
+  const cap = Math.max(1, targetCount);
+
+  const seen = new Set();
+  const looseSeen = new Set();
+  for (const it of local) {
+    const k = makePRCKey(it); if (k) seen.add(k);
+    const lk = makePRCLooseKey(it); if (lk) looseSeen.add(lk);
+  }
+
+  const online = [];
+  for (const it of (onlineItems || [])) {
+    const k = makePRCKey(it);
+    const lk = makePRCLooseKey(it);
+    if ((k && seen.has(k)) || (lk && looseSeen.has(lk))) continue; // owned/shown already
+    if (k) seen.add(k);
+    if (lk) looseSeen.add(lk);
+    online.push(it);
+  }
+  if (!online.length) return local.slice(0, cap);
+
+  const gap = Math.max(0, cap - local.length);
+  const desiredOnline = Math.min(
+    online.length,
+    Math.max(gap, Math.round(cap * injectRatio))
+  );
+  const chosenOnline = online.slice(0, desiredOnline);
+  const chosenLocal = local.slice(0, Math.max(0, cap - chosenOnline.length));
+
+  if (!chosenOnline.length) return chosenLocal.slice(0, cap);
+
+  const total = chosenLocal.length + chosenOnline.length;
+  const step = Math.max(2, Math.floor(total / chosenOnline.length));
+  const merged = [];
+  let li = 0, oi = 0, pos = 0;
+  while ((li < chosenLocal.length || oi < chosenOnline.length) && merged.length < cap) {
+    const injectOnline = oi < chosenOnline.length &&
+      ((pos > 0 && pos % step === 0) || li >= chosenLocal.length);
+    if (injectOnline) {
+      merged.push(chosenOnline[oi++]);
+    } else if (li < chosenLocal.length) {
+      merged.push(chosenLocal[li++]);
+    } else if (oi < chosenOnline.length) {
+      merged.push(chosenOnline[oi++]);
+    }
+    pos++;
+  }
+  return merged.slice(0, cap);
+}
+
+// Fetches online items via `onlineFetcher` and blends them into `localItems`.
+// Returns localItems unchanged when online recs are disabled or unavailable.
+const ONLINE_BLEND_TIMEOUT_MS = 6000;
+
+async function blendOnlineRecommendations(localItems, onlineFetcher, { targetCount = 20, injectRatio = 0.35 } = {}) {
+  try {
+    if (!(await onlineRecsAvailable())) return localItems;
+    // Never let a slow/hung online fetch stall the row: fall back to local-only.
+    const online = await Promise.race([
+      onlineFetcher(),
+      new Promise((resolve) => setTimeout(() => resolve(null), ONLINE_BLEND_TIMEOUT_MS))
+    ]);
+    if (!Array.isArray(online) || !online.length) return localItems;
+    return mergeLocalAndOnline(localItems, online, { targetCount, injectRatio });
+  } catch (err) {
+    console.warn("blendOnlineRecommendations failed:", err);
+    return localItems;
+  }
+}
+
 function renderRecommendationCards(row, items, serverId) {
   const personalCardCount = getPersonalRecsCardCount();
   clearRowWithCleanup(row);
@@ -3211,6 +3547,7 @@ function getDetailsUrl(itemId, serverId) {
 }
 
 function buildPosterUrl(item, height = 540, quality = 72, { omitTag = false } = {}) {
+  if (item && item.__posterUrl) return item.__posterUrl;
   const candidate = getPosterLikeImageCandidate(item);
   return buildCandidateImageUrl(item, candidate, height, quality, { omitTag });
 }
@@ -3421,8 +3758,9 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     sizeHint = "personal"
   } = normalizedOptions;
   const { itemId, itemName } = primeItemIdentity(item);
+  const isOnline = isRequestableOnlineItem(item);
   const card = document.createElement("div");
-  card.className = "card personal-recs-card";
+  card.className = isOnline ? "card personal-recs-card personal-recs-card--online" : "card personal-recs-card";
   queueEnterAnimation(card);
   if (itemId) card.dataset.itemId = itemId;
   card.setAttribute('data-key', makePRCKey(item));
@@ -3524,11 +3862,39 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     card.querySelector('.cardImageContainer')?.prepend(noImg);
   }
 
+  if (isOnline) {
+    mountOnlineRequestAffordance(card, item, itemName);
+  }
+
   const cardLink = card.querySelector(".cardLink");
   if (cardLink) {
     cardLink.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      if (isOnline) {
+        try {
+          if (item.__mediaType === "tv") {
+            // Let the user pick seasons instead of requesting the whole show.
+            await openSerrSeasonModal(item, { source: "monwui-recs" });
+          } else {
+            // Online items are the ones missing locally; enrichment gives them a
+            // runtime, so allowAvailable prevents a false "already in library".
+            await requestSerrFromItem(item, { source: "monwui-recs", allowAvailable: true });
+          }
+        } catch (err) {
+          const msg = String(err?.message || "").trim()
+            || (config.languageLabels?.serrRequestFailed || labels.serrRequestFailed || "Request failed.");
+          try {
+            showNotification(
+              `<i class="fas fa-clapperboard" style="margin-right:8px;"></i>${escapeHtml(msg)}`,
+              3200,
+              "error"
+            );
+          } catch {}
+          console.warn("Seerr request failed (online recs card):", err);
+        }
+        return;
+      }
       if (!itemId) return;
       const hostEl = card.querySelector(".cardImageContainer");
       const backdropIndex = localStorage.getItem("jms_backdrop_index") || "0";
@@ -3546,14 +3912,132 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     }, { passive: false });
   }
 
-  const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
-  const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
-  defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
+  if (!isOnline) {
+    const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
+    const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
+    defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
+  } else if (item.__trailerKey) {
+    attachOnlineHoverTrailer(card, item);
+  }
   card.addEventListener('jms:cleanup', () => {
     cleanupManagedImage(img);
     detachPreviewHandlers(card);
   }, { once: true });
   return card;
+}
+
+// Adds the "Request" button (and a small online badge) to an online-sourced
+// recommendation card. Reuses the shared Seerr request pipeline so the confirm
+// modal, arr fallback and status handling all behave exactly like elsewhere.
+let __onlineRecsStylesInjected = false;
+function ensureOnlineRecsCardStyles() {
+  if (__onlineRecsStylesInjected) return;
+  __onlineRecsStylesInjected = true;
+  try { ensureSerrStyles(); } catch {}
+  try {
+    if (document.getElementById("jms-online-recs-card-styles")) return;
+    const style = document.createElement("style");
+    style.id = "jms-online-recs-card-styles";
+    style.textContent = `
+      .personal-recs-card--online .prc-online-actions{
+        display:flex;justify-content:flex-end;margin-top:8px;pointer-events:auto;
+      }
+      .personal-recs-card--online .prc-online-request-btn{
+        width:100%;justify-content:center;font-size:.82rem;padding:7px 10px;border-radius:12px;
+      }
+      .prc-online-badge{
+        display:inline-flex;align-items:center;justify-content:center;
+        width:26px;height:26px;border-radius:999px;
+        background:rgba(51,193,160,.92);color:#04231c;
+        box-shadow:0 4px 12px rgba(0,0,0,.35);font-size:.72rem;
+      }
+      .prc-online-badge-icon{line-height:1;}
+      /* Online preview reuses the local hover modal (same audio/mute handling),
+         but the id-based action buttons don't apply to TMDb-only items. */
+      .video-preview-modal.online-preview .preview-match-button,
+      .video-preview-modal.online-preview .preview-play-button,
+      .video-preview-modal.online-preview .preview-favorite-button,
+      .video-preview-modal.online-preview .preview-info-button{display:none !important;}
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+}
+
+// Hover trailer for online cards. Reuses the real hover modal (so the popover
+// look, the YouTube trailer, and the mute/unmute handling all match local
+// cards) by handing it a pre-built item with RemoteTrailers and a synthetic id.
+function attachOnlineHoverTrailer(cardEl, item) {
+  if (IS_MOBILE) return;
+  if (!cardEl || !Array.isArray(item?.RemoteTrailers) || !item.RemoteTrailers.length) return;
+  ensureOnlineRecsCardStyles();
+
+  const syntheticId = `online:${item.__mediaType || "movie"}:${item.__tmdbId || makePRCKey(item)}`;
+  const previewItem = { ...item, Id: syntheticId, __online: true };
+
+  let timer = null;
+
+  const open = () => {
+    if (!cardEl.isConnected || !cardEl.matches(":hover")) return;
+    try {
+      openPreviewModalForItem(syntheticId, cardEl, { bypass: true, item: previewItem });
+    } catch (err) {
+      console.warn("online hover trailer failed:", err);
+    }
+  };
+
+  const onEnter = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(open, OPEN_HOVER_DELAY_MS);
+  };
+
+  const onLeave = (e) => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    const rt = e?.relatedTarget || null;
+    const goingToModal = !!(rt && rt.closest && rt.closest(".video-preview-modal"));
+    if (goingToModal) return;
+    try { safeCloseHoverModal(); } catch {}
+  };
+
+  cardEl.addEventListener("pointerenter", onEnter, { passive: true });
+  cardEl.addEventListener("pointerleave", onLeave, { passive: true });
+  cardEl.addEventListener("jms:cleanup", onLeave, { once: true });
+}
+
+function mountOnlineRequestAffordance(card, item, itemName) {
+  try {
+    ensureOnlineRecsCardStyles();
+    const overlay = card.querySelector(".prc-overlay");
+    if (!overlay) return;
+
+    const actions = document.createElement("div");
+    actions.className = "prc-online-actions";
+    overlay.appendChild(actions);
+
+    // Append the request button only when the user can actually request
+    // (seerr/arr configured). Discovery can be TMDb-only, in which case no
+    // button is shown and the card is informational.
+    appendSerrRequestButton(actions, item, {
+      source: "monwui-recs",
+      allowAvailable: true,
+      chooseSeasons: item.__mediaType === "tv",
+      className: "monwui-serr-btn prc-online-request-btn"
+    }).then((button) => {
+      if (!button) { try { actions.remove(); } catch {} return; }
+      // Keep clicks on the button from bubbling to the card link handler.
+      button.addEventListener("click", (e) => { e.stopPropagation(); }, { capture: true });
+    }).catch(() => { try { actions.remove(); } catch {} });
+
+    const badges = card.querySelector(".prc-top-badges");
+    if (badges && !badges.querySelector(".prc-online-badge")) {
+      const badge = document.createElement("div");
+      badge.className = "prc-online-badge";
+      badge.title = `${itemName} — ${item.__mediaType === "tv" ? "TV" : "Movie"} (online)`;
+      badge.innerHTML = faIconHtml("fa-solid fa-cloud-arrow-down", "prc-online-badge-icon");
+      badges.appendChild(badge);
+    }
+  } catch (err) {
+    console.warn("Failed to mount online request affordance:", err);
+  }
 }
 
 function createHubScrollButton(side = "right") {
@@ -4254,7 +4738,12 @@ async function ensureGenreLoaded(idx) {
         return;
       }
 
-      const unique = remaining.slice(0, genreRowCardCount);
+      const unique = await blendOnlineRecommendations(
+        remaining.slice(0, genreRowCardCount),
+        () => getGenreOnlineItems(genre, { limit: genreRowCardCount }),
+        { targetCount: genreRowCardCount, injectRatio: 0.35 }
+      );
+      if (rec.seq !== mySeq) return;
       let scrollerReady = false;
 
       await new Promise((resolve) => {
@@ -4750,6 +5239,10 @@ export function resetPersonalRecsAndGenreState() {
     const sections = Array.from(new Set([
       document.getElementById("personal-recommendations"),
       document.getElementById("genre-hubs"),
+      document.getElementById("trending-movies"),
+      document.getElementById("trending-series"),
+      document.getElementById("popular-movies"),
+      document.getElementById("popular-series"),
       ...Array.from(document.querySelectorAll('[id^="because-you-watched--"], #because-you-watched'))
     ].filter(Boolean)));
 

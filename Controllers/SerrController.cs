@@ -65,6 +65,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public bool? ShowMissingSearchButton { get; set; }
             public bool? EnableNotifications { get; set; }
             public bool? Enable4KRequests { get; set; }
+            public bool? EnableOnlineRecommendations { get; set; }
+            public bool? EnableOnlineTrendingRows { get; set; }
+            public bool? EnableOnlineCardEnrichment { get; set; }
+            public string? OnlineContentRatingRegion { get; set; }
+            public string? TmdbApiKey { get; set; }
         }
 
         public sealed class SerrCreateRequest
@@ -111,6 +116,9 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 arrSonarrEnabled = IsSonarrRequestConfigured(cfg),
                 arrRadarr4KEnabled = cfg.SerrEnable4KRequests && IsRadarr4KRequestConfigured(cfg),
                 arrSonarr4KEnabled = cfg.SerrEnable4KRequests && IsSonarr4KRequestConfigured(cfg),
+                onlineRecommendations = IsOnlineDiscoveryConfigured(cfg),
+                onlineTrendingRows = cfg.EnableOnlineTrendingRows && IsOnlineDiscoveryConfigured(cfg),
+                region = ResolveContentRatingRegion(cfg),
                 settings = BuildSettingsPayload(cfg, isAdmin)
             });
         }
@@ -154,6 +162,15 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (request?.ShowMissingSearchButton.HasValue == true) cfg.SerrShowMissingSearchButton = request.ShowMissingSearchButton.Value;
             if (request?.EnableNotifications.HasValue == true) cfg.SerrEnableNotifications = request.EnableNotifications.Value;
             if (request?.Enable4KRequests.HasValue == true) cfg.SerrEnable4KRequests = request.Enable4KRequests.Value;
+            if (request?.EnableOnlineRecommendations.HasValue == true) cfg.EnableOnlineRecommendations = request.EnableOnlineRecommendations.Value;
+            if (request?.EnableOnlineTrendingRows.HasValue == true) cfg.EnableOnlineTrendingRows = request.EnableOnlineTrendingRows.Value;
+            if (request?.EnableOnlineCardEnrichment.HasValue == true) cfg.EnableOnlineCardEnrichment = request.EnableOnlineCardEnrichment.Value;
+            if (request?.OnlineContentRatingRegion is not null) cfg.OnlineContentRatingRegion = CleanText(request.OnlineContentRatingRegion, 8).ToUpperInvariant();
+            if (request?.TmdbApiKey is not null)
+            {
+                var tmdbKey = request.TmdbApiKey.Trim();
+                cfg.TmdbApiKey = Same(tmdbKey, "CHANGE_ME") ? string.Empty : tmdbKey;
+            }
             if (cfg.SerrEnable4KRequests) cfg.SerrConfirmRequests = true;
 
             SerrRequestStore.Save(cfg);
@@ -368,6 +385,197 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 ok = true,
                 tmdbId = id,
                 items
+            });
+        }
+
+        // ---------------------------------------------------------------------
+        // Online recommendation discovery (TMDb primary, Overseerr/Jellyseerr
+        // fallback). Results are normalized to a common shape and deduped
+        // against the local Jellyfin library so the frontend can render local
+        // cards for owned items and request cards for missing ones.
+        // ---------------------------------------------------------------------
+
+        [HttpGet("online/trending")]
+        public async Task<IActionResult> OnlineTrending([FromQuery] string? mediaType, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null)
+            {
+                return EmptyOnlineResults(type ?? "movie", page);
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var window = "week";
+            var tmdbPath = "/trending/" + type + "/" + window;
+            var tmdbQs = new Dictionary<string, string>();
+            var overseerrQs = new Dictionary<string, string>
+            {
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture)
+            };
+            if (!string.IsNullOrWhiteSpace(lang)) { tmdbQs["language"] = lang; overseerrQs["language"] = lang; }
+            AddPage(tmdbQs, page);
+
+            var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, "/discover/trending", overseerrQs, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
+        }
+
+        [HttpGet("online/popular")]
+        public async Task<IActionResult> OnlinePopular([FromQuery] string? mediaType, [FromQuery] string? region = null, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null)
+            {
+                return EmptyOnlineResults(type ?? "movie", page);
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var cc = NormalizeRegionCode(region) ?? ResolveContentRatingRegion(cfg);
+
+            string tmdbPath;
+            Dictionary<string, string> tmdbQs;
+            if (type == "movie")
+            {
+                // /movie/popular's region filters by that country's release dates.
+                tmdbPath = "/movie/popular";
+                tmdbQs = new Dictionary<string, string> { ["region"] = cc };
+            }
+            else
+            {
+                // /tv/popular has no region param; discover with watch_region is the
+                // closest region-aware signal for series.
+                tmdbPath = "/discover/tv";
+                tmdbQs = new Dictionary<string, string>
+                {
+                    ["sort_by"] = "popularity.desc",
+                    ["watch_region"] = cc,
+                    ["include_null_first_air_dates"] = "false",
+                    ["vote_count.gte"] = "30"
+                };
+            }
+            if (!string.IsNullOrWhiteSpace(lang)) tmdbQs["language"] = lang;
+            AddPage(tmdbQs, page);
+
+            var overseerrPath = "/discover/" + (type == "tv" ? "tv" : "movies");
+            var overseerrQs = new Dictionary<string, string>
+            {
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture),
+                ["watchRegion"] = cc
+            };
+            if (!string.IsNullOrWhiteSpace(lang)) overseerrQs["language"] = lang;
+
+            var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, overseerrPath, overseerrQs, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
+        }
+
+        [HttpGet("online/discover")]
+        public async Task<IActionResult> OnlineDiscover([FromQuery] string? mediaType, [FromQuery] string? genre = null, [FromQuery] string? sortBy = null, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null)
+            {
+                return EmptyOnlineResults(type ?? "movie", page);
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var genreId = await ResolveGenreIdAsync(cfg, type, genre, lang, cancellationToken);
+            var sort = NormalizeSortBy(sortBy);
+
+            var tmdbPath = "/discover/" + (type == "tv" ? "tv" : "movie");
+            var tmdbQs = new Dictionary<string, string>
+            {
+                ["sort_by"] = sort,
+                ["include_adult"] = "false",
+                ["vote_count.gte"] = "50"
+            };
+            if (genreId > 0) tmdbQs["with_genres"] = genreId.ToString(CultureInfo.InvariantCulture);
+            if (!string.IsNullOrWhiteSpace(lang)) tmdbQs["language"] = lang;
+            AddPage(tmdbQs, page);
+
+            var overseerrPath = "/discover/" + (type == "tv" ? "tv" : "movies");
+            var overseerrQs = new Dictionary<string, string>
+            {
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture)
+            };
+            if (genreId > 0) overseerrQs["genre"] = genreId.ToString(CultureInfo.InvariantCulture);
+            if (!string.IsNullOrWhiteSpace(lang)) overseerrQs["language"] = lang;
+
+            var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, overseerrPath, overseerrQs, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
+        }
+
+        [HttpGet("online/recommendations")]
+        public async Task<IActionResult> OnlineRecommendations([FromQuery] string? mediaType, [FromQuery] int tmdbId, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null || tmdbId <= 0)
+            {
+                return EmptyOnlineResults(type ?? "movie", page);
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var seg = type == "tv" ? "tv" : "movie";
+            var tmdbPath = "/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "/recommendations";
+            var tmdbQs = new Dictionary<string, string>();
+            if (!string.IsNullOrWhiteSpace(lang)) tmdbQs["language"] = lang;
+            AddPage(tmdbQs, page);
+
+            var overseerrPath = "/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "/recommendations";
+            var overseerrQs = new Dictionary<string, string>
+            {
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture)
+            };
+            if (!string.IsNullOrWhiteSpace(lang)) overseerrQs["language"] = lang;
+
+            var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, overseerrPath, overseerrQs, cancellationToken);
+            if (!response.Ok || CountResults(response.Payload) == 0)
+            {
+                // Fall back to "similar" which is populated for more titles.
+                var simTmdbPath = "/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "/similar";
+                var simOverseerrPath = "/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "/similar";
+                var simResponse = await FetchOnlineAsync(cfg, simTmdbPath, tmdbQs, simOverseerrPath, overseerrQs, cancellationToken);
+                if (simResponse.Ok) response = simResponse;
+            }
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
+        }
+
+        [HttpGet("online/genres")]
+        public async Task<IActionResult> OnlineGenres([FromQuery] string? mediaType, [FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null)
+            {
+                NoCache();
+                return Ok(new { ok = true, mediaType = type ?? "movie", genres = Array.Empty<object>() });
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var genres = await FetchGenreListAsync(cfg, type, lang, cancellationToken);
+            NoCache();
+            return Ok(new
+            {
+                ok = true,
+                mediaType = type,
+                genres = genres.Select(g => new { id = g.Key, name = g.Value }).ToList()
             });
         }
 
@@ -985,6 +1193,531 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 totalResults = totalResults > 0 ? totalResults : results.Count,
                 totalPages = totalPages > 0 ? totalPages : (results.Count > 0 ? 1 : 0)
             };
+        }
+
+        // ---- Online recommendation discovery helpers ------------------------
+
+        private static readonly object OnlineGenreCacheRoot = new();
+        private static readonly Dictionary<string, (long At, List<KeyValuePair<int, string>> Genres)> OnlineGenreCache =
+            new(StringComparer.OrdinalIgnoreCase);
+        private const int OnlineGenreCacheMs = 6 * 60 * 60 * 1000;
+
+        private static bool HasTmdbKey(JMSFusionConfiguration cfg)
+        {
+            var key = CleanText(cfg.TmdbApiKey, 200);
+            return !string.IsNullOrWhiteSpace(key) && !Same(key, "CHANGE_ME");
+        }
+
+        private bool IsOnlineDiscoveryConfigured(JMSFusionConfiguration cfg)
+            => cfg.EnableOnlineRecommendations && (HasTmdbKey(cfg) || IsSerrConnectionConfigured(cfg));
+
+        private static string? ResolveOnlineMediaType(string? value)
+        {
+            var type = NormalizeMediaType(value);
+            return type is "movie" or "tv" ? type : null;
+        }
+
+        private static void AddPage(Dictionary<string, string> qs, int page)
+            => qs["page"] = Math.Max(1, Math.Min(1000, page)).ToString(CultureInfo.InvariantCulture);
+
+        private static string NormalizeSortBy(string? value)
+        {
+            var v = (value ?? string.Empty).Trim().ToLowerInvariant();
+            return v switch
+            {
+                "top" or "rating" or "vote" => "vote_average.desc",
+                "new" or "recent" or "latest" => "primary_release_date.desc",
+                _ => "popularity.desc"
+            };
+        }
+
+        private IActionResult EmptyOnlineResults(string mediaType, int page)
+        {
+            NoCache();
+            return Ok(new
+            {
+                ok = true,
+                mediaType,
+                page = Math.Max(1, page),
+                totalPages = 0,
+                results = Array.Empty<object>()
+            });
+        }
+
+        private async Task<SerrCallResult> FetchOnlineAsync(
+            JMSFusionConfiguration cfg,
+            string tmdbPath,
+            Dictionary<string, string> tmdbQs,
+            string overseerrPath,
+            Dictionary<string, string> overseerrQs,
+            CancellationToken cancellationToken)
+        {
+            if (HasTmdbKey(cfg))
+            {
+                var qs = new Dictionary<string, string>(tmdbQs) { ["api_key"] = CleanText(cfg.TmdbApiKey, 200) };
+                var tmdbResponse = await SendTmdbAsync(tmdbPath + "?" + BuildQueryString(qs), cancellationToken);
+                if (tmdbResponse.Ok && tmdbResponse.Payload.ValueKind == JsonValueKind.Object) return tmdbResponse;
+            }
+
+            if (IsSerrConnectionConfigured(cfg))
+            {
+                var path = overseerrPath + (overseerrQs.Count > 0 ? "?" + BuildQueryString(overseerrQs) : string.Empty);
+                return await SendSerrAsync(cfg, HttpMethod.Get, path, null, cancellationToken);
+            }
+
+            return SerrCallResult.Fail(0, "No online recommendation source configured.");
+        }
+
+        private static int CountResults(JsonElement payload)
+        {
+            if (payload.ValueKind != JsonValueKind.Object) return 0;
+            return ReadArray(payload, "results", "Results").Count();
+        }
+
+        private sealed class OnlineDraft
+        {
+            public int TmdbId;
+            public string MediaType = "movie";
+            public string Title = string.Empty;
+            public int Year;
+            public string Overview = string.Empty;
+            public string PosterPath = string.Empty;
+            public string BackdropPath = string.Empty;
+            public double VoteAverage;
+            public List<int> GenreIds = new();
+            public bool Available;
+            public object? Local;
+            public string OfficialRating = string.Empty;
+            public long RuntimeTicks;
+            public string TrailerKey = string.Empty;
+
+            public object ToDto() => new
+            {
+                tmdbId = TmdbId,
+                mediaType = MediaType,
+                title = Title,
+                year = Year,
+                overview = Overview,
+                posterPath = PosterPath,
+                backdropPath = BackdropPath,
+                voteAverage = VoteAverage,
+                genreIds = GenreIds,
+                available = Available,
+                local = Local,
+                officialRating = OfficialRating,
+                runtimeTicks = RuntimeTicks,
+                trailerYoutubeKey = TrailerKey
+            };
+        }
+
+        private async Task<IActionResult> BuildOnlineResponse(SerrCallResult response, string mediaType, int page, int limit, CancellationToken cancellationToken)
+        {
+            if (!response.Ok || response.Payload.ValueKind != JsonValueKind.Object)
+            {
+                return EmptyOnlineResults(mediaType, page);
+            }
+
+            var cap = limit > 0 ? Math.Min(limit, 40) : 40;
+            var totalPages = ReadIntAny(response.Payload, "total_pages", "totalPages");
+            var seen = new HashSet<int>();
+            var drafts = new List<OnlineDraft>();
+            foreach (var item in ReadArray(response.Payload, "results", "Results"))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var draft = NormalizeOnlineResult(item, mediaType);
+                if (draft is null) continue;
+                if (!seen.Add(draft.TmdbId)) continue;
+                drafts.Add(draft);
+                // Trim before the (per-title) enrichment calls so rows stay fast.
+                if (drafts.Count >= cap) break;
+            }
+
+            var cfg = GetConfig();
+            if (cfg.EnableOnlineCardEnrichment && HasTmdbKey(cfg))
+            {
+                await EnrichDraftsAsync(cfg, drafts, cancellationToken);
+            }
+
+            NoCache();
+            return Ok(new
+            {
+                ok = true,
+                mediaType,
+                page = Math.Max(1, page),
+                totalPages,
+                results = drafts.Select(d => d.ToDto()).ToList()
+            });
+        }
+
+        private OnlineDraft? NormalizeOnlineResult(JsonElement item, string forcedMediaType)
+        {
+            var tmdbId = ReadIntAny(item, "id", "tmdbId", "tmdbid");
+            if (tmdbId <= 0) return null;
+
+            // Callers always request a concrete media type; keep rows strictly to
+            // that type so mixed sources (e.g. Overseerr /discover/trending) don't
+            // leak series into a movies row, and drop person/collection entries.
+            var declared = NormalizeMediaType(ReadStringAny(item, "mediaType", "media_type"));
+            if (!string.IsNullOrEmpty(declared) && declared != "movie" && declared != "tv")
+            {
+                return null; // person, collection, etc.
+            }
+            if ((declared == "movie" || declared == "tv") && forcedMediaType is "movie" or "tv" && declared != forcedMediaType)
+            {
+                return null; // wrong type for this row
+            }
+            var mediaType = forcedMediaType is "movie" or "tv" ? forcedMediaType : declared;
+            if (mediaType != "movie" && mediaType != "tv") return null;
+
+            var title = ReadStringAny(item, "title", "name", "originalTitle", "original_title", "originalName", "original_name");
+            if (string.IsNullOrWhiteSpace(title)) return null;
+
+            var dateStr = ReadStringAny(item, "releaseDate", "release_date", "firstAirDate", "first_air_date");
+            var year = 0;
+            if (dateStr.Length >= 4 && int.TryParse(dateStr.AsSpan(0, 4), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedYear))
+            {
+                year = parsedYear;
+            }
+
+            var draft = new OnlineDraft
+            {
+                TmdbId = tmdbId,
+                MediaType = mediaType,
+                Title = title,
+                Year = year,
+                Overview = ReadStringAny(item, "overview"),
+                PosterPath = ReadStringAny(item, "posterPath", "poster_path"),
+                BackdropPath = ReadStringAny(item, "backdropPath", "backdrop_path"),
+                VoteAverage = Math.Round(ReadDoubleAny(item, "voteAverage", "vote_average"), 1),
+                GenreIds = ReadIntArray(item, "genreIds", "genre_ids")
+            };
+
+            if (item.TryGetProperty("mediaInfo", out var mediaInfo) && mediaInfo.ValueKind == JsonValueKind.Object)
+            {
+                if (ReadIntValue(mediaInfo, "status") >= 4) draft.Available = true;
+            }
+
+            var locals = FindJellyfinItemsByTmdb(tmdbId);
+            if (locals.Count > 0)
+            {
+                BaseItem? match = null;
+                foreach (var candidate in locals)
+                {
+                    var candidateType = Same(candidate.GetType().Name, "Series") ? "tv" : "movie";
+                    if (candidateType == mediaType) { match = candidate; break; }
+                }
+                match ??= locals[0];
+                draft.Available = true;
+                draft.Local = new
+                {
+                    id = NormalizeItemId(match),
+                    type = match.GetType().Name,
+                    name = match.Name
+                };
+                // Owned locally: prefer the library's own rating/runtime.
+                if (!string.IsNullOrWhiteSpace(match.OfficialRating)) draft.OfficialRating = match.OfficialRating!;
+                if (match.RunTimeTicks.HasValue && match.RunTimeTicks.Value > 0) draft.RuntimeTicks = match.RunTimeTicks.Value;
+            }
+
+            return draft;
+        }
+
+        private static readonly object OnlineDetailCacheRoot = new();
+        private static readonly Dictionary<string, (long At, string Rating, long Ticks, string Trailer)> OnlineDetailCache =
+            new(StringComparer.OrdinalIgnoreCase);
+        private const int OnlineDetailCacheMs = 24 * 60 * 60 * 1000;
+
+        // Fills in content rating (certification) and runtime for online items
+        // that aren't owned locally, using per-title TMDb detail calls. Runs with
+        // bounded concurrency and a 24h cache so rows stay responsive.
+        private async Task EnrichDraftsAsync(JMSFusionConfiguration cfg, List<OnlineDraft> drafts, CancellationToken cancellationToken)
+        {
+            var region = ResolveContentRatingRegion(cfg);
+            var needing = drafts
+                .Where(d => string.IsNullOrEmpty(d.OfficialRating) || d.RuntimeTicks <= 0)
+                .ToList();
+            if (needing.Count == 0) return;
+
+            using var gate = new SemaphoreSlim(6);
+            var tasks = needing.Select(async draft =>
+            {
+                await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    var (rating, ticks, trailer) = await GetOnlineDetailAsync(cfg, draft.MediaType, draft.TmdbId, region, cancellationToken);
+                    if (string.IsNullOrEmpty(draft.OfficialRating) && !string.IsNullOrEmpty(rating)) draft.OfficialRating = rating;
+                    if (draft.RuntimeTicks <= 0 && ticks > 0) draft.RuntimeTicks = ticks;
+                    if (string.IsNullOrEmpty(draft.TrailerKey) && !string.IsNullOrEmpty(trailer)) draft.TrailerKey = trailer;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+                catch { /* enrichment is best-effort */ }
+                finally { gate.Release(); }
+            });
+            await Task.WhenAll(tasks);
+        }
+
+        private async Task<(string Rating, long Ticks, string Trailer)> GetOnlineDetailAsync(JMSFusionConfiguration cfg, string mediaType, int tmdbId, string region, CancellationToken cancellationToken)
+        {
+            var seg = mediaType == "tv" ? "tv" : "movie";
+            var cacheKey = seg + ":" + tmdbId.ToString(CultureInfo.InvariantCulture) + ":" + region;
+            lock (OnlineDetailCacheRoot)
+            {
+                if (OnlineDetailCache.TryGetValue(cacheKey, out var cached) && (NowMs() - cached.At) < OnlineDetailCacheMs)
+                {
+                    return (cached.Rating, cached.Ticks, cached.Trailer);
+                }
+            }
+
+            var rating = string.Empty;
+            long ticks = 0;
+            var trailer = string.Empty;
+            var qs = new Dictionary<string, string>
+            {
+                ["api_key"] = CleanText(cfg.TmdbApiKey, 200),
+                ["append_to_response"] = (seg == "tv" ? "content_ratings" : "release_dates") + ",videos"
+            };
+            var response = await SendTmdbAsync("/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "?" + BuildQueryString(qs), cancellationToken);
+            if (response.Ok && response.Payload.ValueKind == JsonValueKind.Object)
+            {
+                var payload = response.Payload;
+                if (seg == "movie")
+                {
+                    var minutes = ReadIntAny(payload, "runtime");
+                    if (minutes > 0) ticks = (long)minutes * 60L * 10_000_000L;
+                    rating = ParseMovieCertification(payload, region);
+                }
+                else
+                {
+                    var runs = ReadIntArray(payload, "episode_run_time");
+                    if (runs.Count > 0 && runs[0] > 0) ticks = (long)runs[0] * 60L * 10_000_000L;
+                    rating = ParseTvRating(payload, region);
+                }
+                trailer = ParseTrailerKey(payload);
+            }
+
+            lock (OnlineDetailCacheRoot)
+            {
+                OnlineDetailCache[cacheKey] = (NowMs(), rating, ticks, trailer);
+            }
+            return (rating, ticks, trailer);
+        }
+
+        // Picks a YouTube trailer key from a TMDb `videos` block, preferring an
+        // official Trailer, then any Trailer, then a Teaser.
+        private static string ParseTrailerKey(JsonElement payload)
+        {
+            if (!payload.TryGetProperty("videos", out var videos) || videos.ValueKind != JsonValueKind.Object)
+            {
+                return string.Empty;
+            }
+
+            string officialTrailer = string.Empty, anyTrailer = string.Empty, teaser = string.Empty;
+            foreach (var video in ReadArray(videos, "results"))
+            {
+                if (!Same(ReadStringAny(video, "site"), "YouTube")) continue;
+                var key = ReadStringAny(video, "key");
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                var type = ReadStringAny(video, "type");
+                if (Same(type, "Trailer"))
+                {
+                    if (ReadBool(video, "official") && string.IsNullOrEmpty(officialTrailer)) officialTrailer = key;
+                    if (string.IsNullOrEmpty(anyTrailer)) anyTrailer = key;
+                }
+                else if (Same(type, "Teaser") && string.IsNullOrEmpty(teaser))
+                {
+                    teaser = key;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(officialTrailer)) return officialTrailer;
+            if (!string.IsNullOrEmpty(anyTrailer)) return anyTrailer;
+            return teaser;
+        }
+
+        private static string? NormalizeRegionCode(string? value)
+        {
+            var v = (value ?? string.Empty).Trim().ToUpperInvariant();
+            if (v.Length == 2 && v[0] >= 'A' && v[0] <= 'Z' && v[1] >= 'A' && v[1] <= 'Z') return v;
+            return null;
+        }
+
+        private static string ResolveContentRatingRegion(JMSFusionConfiguration cfg)
+        {
+            var configured = CleanText(cfg.OnlineContentRatingRegion, 8);
+            if (!string.IsNullOrWhiteSpace(configured)) return configured.ToUpperInvariant();
+
+            var lang = NormalizeTmdbLanguage(cfg.SerrDefaultLanguage);
+            var dash = lang.IndexOf('-');
+            if (dash >= 0 && dash + 1 < lang.Length) return lang[(dash + 1)..].ToUpperInvariant();
+            return "US";
+        }
+
+        private static string ParseMovieCertification(JsonElement payload, string region)
+        {
+            if (!payload.TryGetProperty("release_dates", out var releaseDates) || releaseDates.ValueKind != JsonValueKind.Object)
+            {
+                return string.Empty;
+            }
+
+            string best = string.Empty, us = string.Empty, any = string.Empty;
+            foreach (var entry in ReadArray(releaseDates, "results"))
+            {
+                var country = ReadStringAny(entry, "iso_3166_1");
+                if (!entry.TryGetProperty("release_dates", out var dates) || dates.ValueKind != JsonValueKind.Array) continue;
+                var cert = string.Empty;
+                foreach (var date in dates.EnumerateArray())
+                {
+                    var c = ReadStringAny(date, "certification");
+                    if (!string.IsNullOrWhiteSpace(c)) { cert = c; break; }
+                }
+                if (string.IsNullOrWhiteSpace(cert)) continue;
+                if (Same(country, region)) best = cert;
+                if (Same(country, "US")) us = cert;
+                if (string.IsNullOrEmpty(any)) any = cert;
+            }
+            return !string.IsNullOrEmpty(best) ? best : (!string.IsNullOrEmpty(us) ? us : any);
+        }
+
+        private static string ParseTvRating(JsonElement payload, string region)
+        {
+            if (!payload.TryGetProperty("content_ratings", out var contentRatings) || contentRatings.ValueKind != JsonValueKind.Object)
+            {
+                return string.Empty;
+            }
+
+            string best = string.Empty, us = string.Empty, any = string.Empty;
+            foreach (var entry in ReadArray(contentRatings, "results"))
+            {
+                var country = ReadStringAny(entry, "iso_3166_1");
+                var rating = ReadStringAny(entry, "rating");
+                if (string.IsNullOrWhiteSpace(rating)) continue;
+                if (Same(country, region)) best = rating;
+                if (Same(country, "US")) us = rating;
+                if (string.IsNullOrEmpty(any)) any = rating;
+            }
+            return !string.IsNullOrEmpty(best) ? best : (!string.IsNullOrEmpty(us) ? us : any);
+        }
+
+        private async Task<int> ResolveGenreIdAsync(JMSFusionConfiguration cfg, string mediaType, string? genre, string? language, CancellationToken cancellationToken)
+        {
+            var raw = (genre ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(raw)) return 0;
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var numeric) && numeric > 0)
+            {
+                return numeric;
+            }
+
+            var genres = await FetchGenreListAsync(cfg, mediaType, language, cancellationToken);
+            foreach (var pair in genres)
+            {
+                if (Same(pair.Value, raw)) return pair.Key;
+            }
+
+            // Loose contains match (e.g. "Sci-Fi" vs "Science Fiction" is handled below).
+            foreach (var pair in genres)
+            {
+                if (pair.Value.Contains(raw, StringComparison.OrdinalIgnoreCase) ||
+                    raw.Contains(pair.Value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return pair.Key;
+                }
+            }
+
+            return 0;
+        }
+
+        private async Task<List<KeyValuePair<int, string>>> FetchGenreListAsync(JMSFusionConfiguration cfg, string mediaType, string? language, CancellationToken cancellationToken)
+        {
+            var seg = mediaType == "tv" ? "tv" : "movie";
+            var cacheKey = seg + "|" + (language ?? string.Empty);
+            lock (OnlineGenreCacheRoot)
+            {
+                if (OnlineGenreCache.TryGetValue(cacheKey, out var cached) && (NowMs() - cached.At) < OnlineGenreCacheMs)
+                {
+                    return cached.Genres;
+                }
+            }
+
+            var result = new List<KeyValuePair<int, string>>();
+            SerrCallResult response = default;
+            if (HasTmdbKey(cfg))
+            {
+                var qs = new Dictionary<string, string> { ["api_key"] = CleanText(cfg.TmdbApiKey, 200) };
+                if (!string.IsNullOrWhiteSpace(language)) qs["language"] = language;
+                response = await SendTmdbAsync("/genre/" + seg + "/list?" + BuildQueryString(qs), cancellationToken);
+            }
+            if ((!response.Ok || response.Payload.ValueKind == JsonValueKind.Undefined) && IsSerrConnectionConfigured(cfg))
+            {
+                response = await SendSerrAsync(cfg, HttpMethod.Get, "/genres/" + seg, null, cancellationToken);
+            }
+
+            if (response.Ok)
+            {
+                IEnumerable<JsonElement> entries;
+                if (response.Payload.ValueKind == JsonValueKind.Array)
+                {
+                    entries = response.Payload.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.Object);
+                }
+                else
+                {
+                    entries = ReadArray(response.Payload, "genres", "Genres");
+                }
+
+                foreach (var entry in entries)
+                {
+                    var id = ReadIntAny(entry, "id");
+                    var name = ReadStringAny(entry, "name");
+                    if (id > 0 && !string.IsNullOrWhiteSpace(name))
+                    {
+                        result.Add(new KeyValuePair<int, string>(id, name));
+                    }
+                }
+            }
+
+            lock (OnlineGenreCacheRoot)
+            {
+                OnlineGenreCache[cacheKey] = (NowMs(), result);
+            }
+            return result;
+        }
+
+        private static int ReadIntAny(JsonElement source, params string[] properties)
+        {
+            foreach (var property in properties)
+            {
+                if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty(property, out var el)) continue;
+                if (el.ValueKind == JsonValueKind.Number && el.TryGetInt32(out var value)) return value;
+                if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var dbl)) return (int)Math.Round(dbl);
+                if (el.ValueKind == JsonValueKind.String && int.TryParse(el.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) return parsed;
+            }
+            return 0;
+        }
+
+        private static double ReadDoubleAny(JsonElement source, params string[] properties)
+        {
+            foreach (var property in properties)
+            {
+                if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty(property, out var el)) continue;
+                if (el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var value)) return value;
+                if (el.ValueKind == JsonValueKind.String && double.TryParse(el.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)) return parsed;
+            }
+            return 0d;
+        }
+
+        private static List<int> ReadIntArray(JsonElement source, params string[] properties)
+        {
+            var output = new List<int>();
+            foreach (var property in properties)
+            {
+                if (source.ValueKind != JsonValueKind.Object || !source.TryGetProperty(property, out var el) || el.ValueKind != JsonValueKind.Array) continue;
+                foreach (var entry in el.EnumerateArray())
+                {
+                    if (entry.ValueKind == JsonValueKind.Number && entry.TryGetInt32(out var value)) output.Add(value);
+                    else if (entry.ValueKind == JsonValueKind.String && int.TryParse(entry.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)) output.Add(parsed);
+                }
+                if (output.Count > 0) break;
+            }
+            return output;
         }
 
         private static object? ToCollectionSearchDto(JsonElement item)
@@ -4002,7 +4735,15 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 confirmRequests = cfg.SerrEnable4KRequests || cfg.SerrConfirmRequests,
                 showMissingSearchButton = cfg.SerrShowMissingSearchButton,
                 enableNotifications = cfg.SerrEnableNotifications,
-                enable4KRequests = cfg.SerrEnable4KRequests
+                enable4KRequests = cfg.SerrEnable4KRequests,
+                enableOnlineRecommendations = cfg.EnableOnlineRecommendations,
+                enableOnlineTrendingRows = cfg.EnableOnlineTrendingRows,
+                enableOnlineCardEnrichment = cfg.EnableOnlineCardEnrichment,
+                onlineContentRatingRegion = cfg.OnlineContentRatingRegion,
+                tmdbApiKey = includeSensitive
+                    ? (Same(cfg.TmdbApiKey, "CHANGE_ME") ? string.Empty : cfg.TmdbApiKey)
+                    : string.Empty,
+                hasTmdbApiKey = HasTmdbKey(cfg)
             };
         }
 

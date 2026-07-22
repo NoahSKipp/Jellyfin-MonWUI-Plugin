@@ -284,6 +284,10 @@ These routes are used internally by the frontend modules.
 | `/Plugins/MonWUI/seerr/search` | Seerr search or Arr fallback search. |
 | `/Plugins/MonWUI/seerr/request` | Creates a MonWUI request and submits immediately when allowed. |
 | `/Plugins/MonWUI/seerr/requests` | Lists visible active or historical requests. |
+| `/Plugins/MonWUI/seerr/online/trending` | Trending movies/series (TMDb primary, Seerr fallback), deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/discover` | Discover by genre/sort (TMDb primary, Seerr fallback), deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/recommendations` | Recommendations/similar seeded from a TMDb id, deduped against the local library. |
+| `/Plugins/MonWUI/seerr/online/genres` | Genre id/name list for the requested media type. |
 | `/Plugins/MonWUI/seerr/requests/{id}/approve` | Admin-only approval. |
 | `/Plugins/MonWUI/seerr/requests/{id}/decline` | Admin-only decline. |
 | `/Plugins/MonWUI/seerr/requests/{id}/withdraw` | Request withdrawal. |
@@ -292,6 +296,54 @@ These routes are used internally by the frontend modules.
 | `/Plugins/MonWUI/arr/radarr/test` | Admin-only Radarr connection test and option fetch. |
 | `/Plugins/MonWUI/arr/episode` | Admin-only direct Sonarr episode request. |
 | `/Plugins/MonWUI/arr/movie` | Admin-only direct Radarr movie request. |
+
+## Online Recommendations
+
+The home recommendation rows (Personalized Recommendations, Because You Watched,
+and the Genre rows) are no longer local-only. When online recommendations are
+enabled, MonWUI blends in items sourced from TMDb (primary) or Overseerr /
+Jellyseerr (fallback):
+
+- **Personalized rows** are seeded from the user's recent watch history (TMDb
+  recommendations/similar), falling back to trending when history is thin.
+- **Genre rows** are enriched with TMDb discover results for that genre.
+- **Because You Watched** rows are seeded from that specific title's TMDb id.
+- Two new **Trending Movies** and **Trending Series** rows are added, rendered
+  with the same cards and CSS as every other row.
+- **Popular in your region** rows (movies + series) use TMDb region-aware
+  popularity (`/movie/popular?region=` and `/discover/tv?watch_region=`). The
+  region is taken from the viewer's browser locale (per-user), falling back to
+  the configured region, then `US` — no IP geolocation. They share the Trending
+  rows toggle.
+
+Items that already exist in the local Jellyfin library are deduped and rendered
+as normal local cards (they open the details modal). Items that are missing
+locally are rendered as online cards with a **Request** button that submits a
+Seerr/Arr request immediately through the existing request pipeline (confirm
+modal, admin approval, and Arr fallback all apply). The Request button only
+appears when a request backend (Seerr or Radarr/Sonarr) is configured.
+
+Online cards are enriched with the **content rating** (certification) and
+**runtime** so their chips match local cards. Owned items reuse the library's
+own values; missing items are filled from a per-title TMDb detail call
+(bounded concurrency, 24h cache). The certification region defaults to the
+Seerr language's region and can be overridden.
+
+### Settings
+
+All of this lives in its own **Recommendations** tab in the MonWUI settings
+(admin only):
+
+- **Show online recommendations** — master toggle.
+- **TMDb API key** — used for discovery and enrichment (get one free at
+  themoviedb.org).
+- **Show Trending Movies / Trending Series rows.**
+- **Fetch content rating and runtime for online cards** — enrichment toggle.
+- **Content rating region** — e.g. `US`, `TR`, `DE`; blank derives from the
+  Seerr language.
+
+Discovery works with a TMDb API key and/or a configured Seerr instance;
+requests require Seerr or Arr.
 
 ## Notes
 

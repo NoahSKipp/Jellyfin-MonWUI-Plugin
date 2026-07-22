@@ -179,6 +179,18 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("serrEnable4KRequests")]
         public bool SerrEnable4KRequests { get; set; } = false;
 
+        [JsonPropertyName("enableOnlineRecommendations")]
+        public bool EnableOnlineRecommendations { get; set; } = true;
+
+        [JsonPropertyName("enableOnlineTrendingRows")]
+        public bool EnableOnlineTrendingRows { get; set; } = true;
+
+        [JsonPropertyName("enableOnlineCardEnrichment")]
+        public bool EnableOnlineCardEnrichment { get; set; } = true;
+
+        [JsonPropertyName("onlineContentRatingRegion")]
+        public string OnlineContentRatingRegion { get; set; } = string.Empty;
+
         [JsonPropertyName("serrRequests")]
         public List<SerrRequestEntry> SerrRequests { get; set; } = new();
 

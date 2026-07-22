@@ -139,6 +139,38 @@ export async function searchJellyfinByTmdbId(id) {
   return request(`/local/tmdb/${encodeURIComponent(String(Math.floor(clean)))}`);
 }
 
+function onlineQuery(params = {}) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === "") continue;
+    qs.set(key, String(value));
+  }
+  const out = qs.toString();
+  return out ? `?${out}` : "";
+}
+
+export async function fetchOnlineTrending({ mediaType = "movie", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/trending${onlineQuery({ mediaType, page, language, limit: limit || undefined })}`);
+}
+
+export async function fetchOnlineDiscover({ mediaType = "movie", genre = "", sortBy = "", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/discover${onlineQuery({ mediaType, genre, sortBy, page, language, limit: limit || undefined })}`);
+}
+
+export async function fetchOnlinePopular({ mediaType = "movie", region = "", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/popular${onlineQuery({ mediaType, region, page, language, limit: limit || undefined })}`);
+}
+
+export async function fetchOnlineRecommendations({ mediaType = "movie", tmdbId = 0, page = 1, language = "", limit = 0 } = {}) {
+  const clean = Number(tmdbId);
+  if (!Number.isFinite(clean) || clean <= 0) return { ok: true, results: [] };
+  return request(`/online/recommendations${onlineQuery({ mediaType, tmdbId: Math.floor(clean), page, language, limit: limit || undefined })}`);
+}
+
+export async function fetchOnlineGenres({ mediaType = "movie", language = "" } = {}) {
+  return request(`/online/genres${onlineQuery({ mediaType, language })}`);
+}
+
 export async function createSerrRequest(payload = {}) {
   return request("/request", {
     method: "POST",

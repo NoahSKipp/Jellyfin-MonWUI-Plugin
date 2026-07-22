@@ -3445,10 +3445,11 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
   let openedModal = false;
   try {
     const cfg = getConfig();
+    const injectedItem = opts.item || null;
     const mode = (cfg?.globalPreviewMode || 'modal');
-    if (mode !== 'modal' || cfg?.allPreviewModal === false || !itemId) return false;
+    if (mode !== 'modal' || cfg?.allPreviewModal === false || (!itemId && !injectedItem)) return false;
     if (isLiveTvRouteActive() || isLiveTvCardElement(anchorEl)) return false;
-    if (!canOpenItem(itemId)) return false;
+    if (!injectedItem && !canOpenItem(itemId)) return false;
     if (modalIsVisible() && modalState.videoModal?.dataset?.itemId === String(itemId)) {
       if (anchorEl) positionModalRelativeToItem(modalState.videoModal, anchorEl);
       applyVolumePreference(modalState.videoModal);
@@ -3465,7 +3466,7 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
 
     const ac = new AbortController();
     const { signal } = ac;
-    const item = await fetchItemDetails(itemId, { signal });
+    const item = injectedItem || await fetchItemDetails(itemId, { signal });
     if (!item) return false;
     if (isLiveTvItemLike(item)) return false;
 
@@ -3494,6 +3495,7 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
     }
     const myToken = newRenderToken();
     modal.dataset.itemId = String(itemId);
+    try { modal.classList.toggle('online-preview', !!injectedItem); } catch {}
     if (anchorEl) positionModalRelativeToItem(modalState.videoModal, anchorEl);
     animatedShow(modal);
     openedModal = true;
@@ -3507,7 +3509,7 @@ export async function openPreviewModalForItem(itemId, anchorEl, opts = {}) {
     applyVolumePreference(modalState.videoModal);
 
     let videoUrl = null;
-    try { videoUrl = await preloadVideoPreview(itemId); } catch {}
+    if (!injectedItem) { try { videoUrl = await preloadVideoPreview(itemId); } catch {} }
     if (!isTokenAlive(myToken) || modal.dataset.itemId !== String(itemId)) return false;
     await updateModalContent(item, videoUrl);
 
