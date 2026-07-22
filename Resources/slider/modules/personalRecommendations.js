@@ -3,7 +3,7 @@ import { getConfig, getHomeSectionsRuntimeConfig, normalizeManagedCardTitleDispl
 import { getLanguageLabels, getDefaultLanguage } from "../language/index.js";
 import { attachMiniPosterHover } from "./studioHubsUtils.js";
 import { openGenreExplorer, openPersonalExplorer } from "./genreExplorer.js";
-import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS } from "./hoverTrailerModal.js";
+import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS, openPreviewModalForItem } from "./hoverTrailerModal.js";
 import { createTrailerIframe, formatOfficialRatingLabel } from "./utils.js";
 import { openDetailsModal } from "./detailsModalLoader.js";
 import {
@@ -3848,61 +3848,55 @@ function ensureOnlineRecsCardStyles() {
         box-shadow:0 4px 12px rgba(0,0,0,.35);font-size:.72rem;
       }
       .prc-online-badge-icon{line-height:1;}
-      .jms-online-trailer-host{
-        position:absolute;inset:0;z-index:1;opacity:0;transition:opacity .28s ease;
-        background:#000;display:flex;align-items:center;justify-content:center;
-        overflow:hidden;pointer-events:none;border-radius:inherit;
-      }
-      .jms-online-trailer-host.is-visible{opacity:1;}
-      .jms-online-trailer-frame{width:100%;aspect-ratio:16/9;border:0;pointer-events:none;}
+      /* Online preview reuses the local hover modal (same audio/mute handling),
+         but the id-based action buttons don't apply to TMDb-only items. */
+      .video-preview-modal.online-preview .preview-match-button,
+      .video-preview-modal.online-preview .preview-play-button,
+      .video-preview-modal.online-preview .preview-favorite-button,
+      .video-preview-modal.online-preview .preview-info-button{display:none !important;}
     `;
     (document.head || document.documentElement).appendChild(style);
   } catch {}
 }
 
-// Lightweight hover trailer for online cards: a muted YouTube embed layered over
-// the poster. Kept deliberately simple (no id-based fetches) since the full
-// hover modal is keyed to Jellyfin item ids and can't be reused for TMDb items.
+// Hover trailer for online cards. Reuses the real hover modal (so the popover
+// look, the YouTube trailer, and the mute/unmute handling all match local
+// cards) by handing it a pre-built item with RemoteTrailers and a synthetic id.
 function attachOnlineHoverTrailer(cardEl, item) {
   if (IS_MOBILE) return;
-  const key = item && item.__trailerKey;
-  if (!cardEl || !key) return;
+  if (!cardEl || !Array.isArray(item?.RemoteTrailers) || !item.RemoteTrailers.length) return;
+  ensureOnlineRecsCardStyles();
 
-  let host = null;
+  const syntheticId = `online:${item.__mediaType || "movie"}:${item.__tmdbId || makePRCKey(item)}`;
+  const previewItem = { ...item, Id: syntheticId, __online: true };
+
   let timer = null;
 
-  const close = () => {
-    if (timer) { clearTimeout(timer); timer = null; }
-    if (host) { try { host.remove(); } catch {} host = null; }
-  };
-
   const open = () => {
-    if (host || !cardEl.isConnected || !cardEl.matches(":hover")) return;
-    const container = cardEl.querySelector(".cardImageContainer");
-    if (!container) return;
-    host = document.createElement("div");
-    host.className = "jms-online-trailer-host";
-    const iframe = document.createElement("iframe");
-    iframe.className = "jms-online-trailer-frame";
-    iframe.setAttribute("allow", "autoplay; encrypted-media; picture-in-picture");
-    iframe.setAttribute("referrerpolicy", "strict-origin-when-cross-origin");
-    iframe.setAttribute("loading", "lazy");
-    const k = encodeURIComponent(key);
-    iframe.src = `https://www.youtube-nocookie.com/embed/${k}?autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&playsinline=1&loop=1&playlist=${k}`;
-    host.appendChild(iframe);
-    container.appendChild(host);
-    requestAnimationFrame(() => { if (host) host.classList.add("is-visible"); });
+    if (!cardEl.isConnected || !cardEl.matches(":hover")) return;
+    try {
+      openPreviewModalForItem(syntheticId, cardEl, { bypass: true, item: previewItem });
+    } catch (err) {
+      console.warn("online hover trailer failed:", err);
+    }
   };
 
   const onEnter = () => {
-    ensureOnlineRecsCardStyles();
     if (timer) clearTimeout(timer);
     timer = setTimeout(open, OPEN_HOVER_DELAY_MS);
   };
 
+  const onLeave = (e) => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    const rt = e?.relatedTarget || null;
+    const goingToModal = !!(rt && rt.closest && rt.closest(".video-preview-modal"));
+    if (goingToModal) return;
+    try { safeCloseHoverModal(); } catch {}
+  };
+
   cardEl.addEventListener("pointerenter", onEnter, { passive: true });
-  cardEl.addEventListener("pointerleave", close, { passive: true });
-  cardEl.addEventListener("jms:cleanup", close, { once: true });
+  cardEl.addEventListener("pointerleave", onLeave, { passive: true });
+  cardEl.addEventListener("jms:cleanup", onLeave, { once: true });
 }
 
 function mountOnlineRequestAffordance(card, item, itemName) {
