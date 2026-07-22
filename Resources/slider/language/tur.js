@@ -17,6 +17,8 @@ export const languageLabels = {
   serrEnableOnlineRecommendations: "Öneri satırlarında çevrimiçi (TMDb/Seerr) önerileri göster",
   trendingMovies: "Öne Çıkan Filmler",
   trendingSeries: "Öne Çıkan Diziler",
+  popularMoviesInRegion: "{region}'da Popüler Filmler",
+  popularSeriesInRegion: "{region}'da Popüler Diziler",
   recommendationsSettingsTab: "Öneriler",
   recommendationsSettingsHint: "Yerel kütüphaneye ek olarak TMDb / Seerr üzerinden çevrimiçi önerileri ana sayfa satırlarına harmanlar. Eksik başlıkları talep etmek için Seerr veya Radarr/Sonarr yapılandırılmış olmalıdır.",
   enableOnlineTrendingRows: "Öne Çıkan Filmler / Diziler satırlarını göster",

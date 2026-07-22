@@ -157,6 +157,10 @@ export async function fetchOnlineDiscover({ mediaType = "movie", genre = "", sor
   return request(`/online/discover${onlineQuery({ mediaType, genre, sortBy, page, language, limit: limit || undefined })}`);
 }
 
+export async function fetchOnlinePopular({ mediaType = "movie", region = "", page = 1, language = "", limit = 0 } = {}) {
+  return request(`/online/popular${onlineQuery({ mediaType, region, page, language, limit: limit || undefined })}`);
+}
+
 export async function fetchOnlineRecommendations({ mediaType = "movie", tmdbId = 0, page = 1, language = "", limit = 0 } = {}) {
   const clean = Number(tmdbId);
   if (!Number.isFinite(clean) || clean <= 0) return { ok: true, results: [] };

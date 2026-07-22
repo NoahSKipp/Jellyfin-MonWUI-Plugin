@@ -17,6 +17,8 @@ export const languageLabels = {
   serrEnableOnlineRecommendations: "おすすめ行にオンライン（TMDb/Seerr）のおすすめを表示",
   trendingMovies: "トレンドの映画",
   trendingSeries: "トレンドのシリーズ",
+  popularMoviesInRegion: "{region}で人気の映画",
+  popularSeriesInRegion: "{region}で人気のシリーズ",
   recommendationsSettingsTab: "おすすめ",
   recommendationsSettingsHint: "ローカルライブラリに加えて、TMDb / Seerr のオンラインおすすめをホーム行に混ぜて表示します。未所持の作品をリクエストするには Seerr または Radarr/Sonarr の設定が必要です。",
   enableOnlineTrendingRows: "「トレンドの映画」/「トレンドのシリーズ」行を表示",

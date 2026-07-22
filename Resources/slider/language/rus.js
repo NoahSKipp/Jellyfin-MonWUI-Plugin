@@ -17,6 +17,8 @@ export const languageLabels = {
   serrEnableOnlineRecommendations: "Показывать онлайн-рекомендации (TMDb/Seerr) в строках рекомендаций",
   trendingMovies: "Популярные фильмы",
   trendingSeries: "Популярные сериалы",
+  popularMoviesInRegion: "Популярные фильмы в регионе {region}",
+  popularSeriesInRegion: "Популярные сериалы в регионе {region}",
   recommendationsSettingsTab: "Рекомендации",
   recommendationsSettingsHint: "Добавляет онлайн-рекомендации из TMDb / Seerr к вашей локальной библиотеке в строках главной страницы. Для запроса отсутствующих объектов должен быть настроен Seerr или Radarr/Sonarr.",
   enableOnlineTrendingRows: "Показывать строки «Популярные фильмы» / «Популярные сериалы»",

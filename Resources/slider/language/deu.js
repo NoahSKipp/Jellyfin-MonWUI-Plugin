@@ -17,6 +17,8 @@ export const languageLabels = {
   serrEnableOnlineRecommendations: "Online-Empfehlungen (TMDb/Seerr) in den Empfehlungszeilen anzeigen",
   trendingMovies: "Angesagte Filme",
   trendingSeries: "Angesagte Serien",
+  popularMoviesInRegion: "Beliebte Filme in {region}",
+  popularSeriesInRegion: "Beliebte Serien in {region}",
   recommendationsSettingsTab: "Empfehlungen",
   recommendationsSettingsHint: "Mischt Online-Empfehlungen von TMDb / Seerr zusammen mit deiner lokalen Bibliothek in die Startseiten-Zeilen. Zum Anfragen fehlender Titel muss Seerr oder Radarr/Sonarr konfiguriert sein.",
   enableOnlineTrendingRows: "Zeilen „Angesagte Filme“ / „Angesagte Serien“ anzeigen",

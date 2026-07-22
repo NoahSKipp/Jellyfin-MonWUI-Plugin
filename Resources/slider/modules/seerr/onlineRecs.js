@@ -11,6 +11,7 @@ import {
   getSerrAccess,
   fetchOnlineTrending,
   fetchOnlineDiscover,
+  fetchOnlinePopular,
   fetchOnlineRecommendations,
   fetchOnlineGenres
 } from "./api.js";
@@ -35,18 +36,41 @@ async function ensureAccessFlags() {
       getSerrAccess(),
       new Promise((resolve) => setTimeout(() => resolve(null), 3000))
     ]);
-    if (access === null) return __accessFlags || { available: false, trending: false }; // timed out: don't poison cache
+    if (access === null) return __accessFlags || { available: false, trending: false, region: "" }; // timed out: don't poison cache
     __accessFlags = {
       available: access?.onlineRecommendations === true,
-      trending: access?.onlineTrendingRows === true
+      trending: access?.onlineTrendingRows === true,
+      region: String(access?.region || "").trim().toUpperCase()
     };
     __accessAt = now;
     return __accessFlags;
   } catch {
-    __accessFlags = { available: false, trending: false };
+    __accessFlags = { available: false, trending: false, region: "" };
     __accessAt = now;
     return __accessFlags;
   }
+}
+
+function detectBrowserRegion() {
+  try {
+    const langs = (Array.isArray(navigator.languages) && navigator.languages.length)
+      ? navigator.languages
+      : [navigator.language || ""];
+    for (const l of langs) {
+      const m = /[-_]([A-Za-z]{2})(?:[-_]|$)/.exec(String(l || ""));
+      if (m) return m[1].toUpperCase();
+    }
+  } catch {}
+  return "";
+}
+
+/** Effective region for "Popular in your region": per-user browser locale first,
+ *  then the admin-configured region, then US. */
+export async function getEffectiveRegion() {
+  const browser = detectBrowserRegion();
+  if (browser) return browser;
+  const flags = await ensureAccessFlags();
+  return (flags && flags.region) || "US";
 }
 
 /** Whether online recommendations are enabled and a source is configured. */
@@ -292,6 +316,16 @@ export async function getTrendingOnlineItems(mediaType = "movie", { limit = 20 }
   if (!(await onlineRecsAvailable())) return [];
   const type = mediaType === "tv" ? "tv" : "movie";
   const r = await fetchOnlineTrending({ mediaType: type, limit: limit + 2 }).catch(() => null);
+  const results = Array.isArray(r?.results) ? r.results : [];
+  return finalizeOnlineItems(results, { limit });
+}
+
+/** Popular items for the user's region (movie | tv). */
+export async function getPopularInRegionItems(mediaType = "movie", { limit = 20, region = "" } = {}) {
+  if (!(await onlineRecsAvailable())) return [];
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const cc = region || (await getEffectiveRegion());
+  const r = await fetchOnlinePopular({ mediaType: type, region: cc, limit: limit + 2 }).catch(() => null);
   const results = Array.isArray(r?.results) ? r.results : [];
   return finalizeOnlineItems(results, { limit });
 }

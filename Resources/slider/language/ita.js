@@ -17,6 +17,8 @@ export const languageLabels = {
   serrEnableOnlineRecommendations: "Mostra i consigli online (TMDb/Seerr) nelle righe dei consigli",
   trendingMovies: "Film di tendenza",
   trendingSeries: "Serie di tendenza",
+  popularMoviesInRegion: "Film popolari in {region}",
+  popularSeriesInRegion: "Serie popolari in {region}",
   recommendationsSettingsTab: "Consigli",
   recommendationsSettingsHint: "Combina i consigli online di TMDb / Seerr con la tua libreria locale nelle righe della home. Per richiedere i titoli mancanti è necessario configurare Seerr o Radarr/Sonarr.",
   enableOnlineTrendingRows: "Mostra le righe Film di tendenza / Serie di tendenza",

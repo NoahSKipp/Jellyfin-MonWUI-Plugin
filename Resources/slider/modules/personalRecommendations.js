@@ -19,6 +19,8 @@ import {
   getPersonalOnlineItems,
   getGenreOnlineItems,
   getTrendingOnlineItems,
+  getPopularInRegionItems,
+  getEffectiveRegion,
   getSeedItemOnlineRecs,
   onlineRecsAvailable,
   onlineTrendingRowsEnabled,
@@ -2134,6 +2136,48 @@ async function renderPersonalRecommendationsInternal(options = {}) {
           ),
         }));
       }
+
+      // "Popular in your region" rows, sharing the Trending toggle/gate.
+      const popularRegion = await getEffectiveRegion().catch(() => "");
+      for (const mediaType of ["movie", "tv"]) {
+        const popularSection = ensurePopularContainer(indexPage, mediaType, popularRegion);
+        try { registerManagedHomeRowAnchor(popularSection); } catch {}
+        const popularRow = popularSection?.querySelector?.(".popular-recs-row") || null;
+        if (!popularRow) continue;
+
+        tasks.push(enqueueManagedSectionRender(`popular-${mediaType}`, async () => {
+          try {
+            if (deferredSeq !== __deferredHomeSectionSeq) return;
+            if (!popularRow.isConnected || !hasActivePersonalRecsHomeSections()) return;
+            const cardCount = getPersonalRecsCardCount();
+            const { serverId } = getSessionInfo();
+            const items = await getPopularInRegionItems(mediaType, { limit: cardCount, region: popularRegion });
+            if (deferredSeq !== __deferredHomeSectionSeq || !popularRow.isConnected) return;
+            if (!items.length) {
+              cleanupTrendingSection(popularSection);
+              return;
+            }
+            if (!popularRow.dataset.mounted || popularRow.childElementCount === 0) {
+              popularRow.dataset.mounted = "1";
+              setupScroller(popularRow);
+            }
+            renderRecommendationCards(popularRow, items, serverId);
+          } catch (e) {
+            console.warn("Popular row render failed:", mediaType, e);
+            cleanupTrendingSection(popularSection);
+          }
+        }, {
+          timeoutMs: 25000,
+          force,
+          reuseKey: false,
+          getAnchor: () => popularSection?.isConnected ? popularSection : null,
+          isStillValid: () => (
+            deferredSeq === __deferredHomeSectionSeq &&
+            popularRow.isConnected &&
+            hasActivePersonalRecsHomeSections()
+          ),
+        }));
+      }
     }
 
     if (runtimeConfig.enableBecauseYouWatched) {
@@ -2742,7 +2786,7 @@ function ensureTrendingRowStyles() {
     const style = document.createElement("style");
     style.id = "jms-trending-row-styles";
     style.textContent = `
-      #trending-movies, #trending-series {
+      #trending-movies, #trending-series, #popular-movies, #popular-series {
         display: flex;
         flex-direction: column;
         gap: 14px;
@@ -2760,7 +2804,7 @@ function ensureTrendingRowStyles() {
         --jms-card-radius-tv: 19px;
       }
       @media (max-width: 820px) {
-        #trending-movies, #trending-series { gap: 10px; padding-inline: 2.8%; }
+        #trending-movies, #trending-series, #popular-movies, #popular-series { gap: 10px; padding-inline: 2.8%; }
       }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -2793,6 +2837,66 @@ function ensureTrendingContainer(indexPage, mediaType) {
 
   <div class="personal-recs-scroll-wrap">
     <div class="itemsContainer personal-recs-row trending-recs-row" role="list"></div>
+  </div>
+`;
+
+  placeSection(section, homeSections);
+  return section;
+}
+
+function getRegionDisplayName(regionCode) {
+  const cc = String(regionCode || "").trim().toUpperCase();
+  if (!cc) return "";
+  try {
+    const lang = getDefaultLanguage?.() || "en";
+    const dn = new Intl.DisplayNames([lang, "en"], { type: "region" });
+    return dn.of(cc) || cc;
+  } catch {
+    return cc;
+  }
+}
+
+function getPopularLabel(mediaType, regionCode) {
+  const l = config.languageLabels || labels || {};
+  const regionName = getRegionDisplayName(regionCode) || regionCode || "";
+  const tpl = (mediaType === "tv" ? (l.popularSeriesInRegion || l.popularInRegion) : (l.popularMoviesInRegion || l.popularInRegion))
+    || "Popular in {region}";
+  return String(tpl).replace("{region}", regionName);
+}
+
+function ensurePopularContainer(indexPage, mediaType, regionCode) {
+  ensureTrendingRowStyles();
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const sectionId = type === "tv" ? "popular-series" : "popular-movies";
+  const homeSections = getHomeSectionsContainer(indexPage);
+
+  let existing = getScopedSection(sectionId, indexPage);
+  if (existing) {
+    // Keep the title current if the region changed since it was created.
+    const titleEl = existing.querySelector(".prc-title-text");
+    if (titleEl) {
+      const t = getPopularLabel(type, regionCode);
+      titleEl.textContent = t;
+      titleEl.setAttribute("aria-label", t);
+    }
+    placeSection(existing, homeSections);
+    return existing;
+  }
+
+  const section = document.createElement("div");
+  section.id = sectionId;
+  section.classList.add("homeSection", "personal-recs-section", "trending-recs-section", "popular-recs-section");
+  section.dataset.popularMediaType = type;
+  const title = escapeHtml(getPopularLabel(type, regionCode));
+  section.innerHTML = `
+  <div class="sectionTitleContainer sectionTitleContainer-cards">
+    <h2 class="sectionTitle sectionTitle-cards prc-title">
+      <span class="prc-title-text" aria-label="${title}">${title}</span>
+    </h2>
+  </div>
+
+  <div class="personal-recs-scroll-wrap">
+    <div class="itemsContainer personal-recs-row trending-recs-row popular-recs-row" role="list"></div>
   </div>
 `;
 
@@ -5137,6 +5241,8 @@ export function resetPersonalRecsAndGenreState() {
       document.getElementById("genre-hubs"),
       document.getElementById("trending-movies"),
       document.getElementById("trending-series"),
+      document.getElementById("popular-movies"),
+      document.getElementById("popular-series"),
       ...Array.from(document.querySelectorAll('[id^="because-you-watched--"], #because-you-watched'))
     ].filter(Boolean)));
 

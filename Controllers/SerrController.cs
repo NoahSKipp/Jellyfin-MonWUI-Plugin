@@ -118,6 +118,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 arrSonarr4KEnabled = cfg.SerrEnable4KRequests && IsSonarr4KRequestConfigured(cfg),
                 onlineRecommendations = IsOnlineDiscoveryConfigured(cfg),
                 onlineTrendingRows = cfg.EnableOnlineTrendingRows && IsOnlineDiscoveryConfigured(cfg),
+                region = ResolveContentRatingRegion(cfg),
                 settings = BuildSettingsPayload(cfg, isAdmin)
             });
         }
@@ -419,6 +420,58 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             AddPage(tmdbQs, page);
 
             var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, "/discover/trending", overseerrQs, cancellationToken);
+            return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
+        }
+
+        [HttpGet("online/popular")]
+        public async Task<IActionResult> OnlinePopular([FromQuery] string? mediaType, [FromQuery] string? region = null, [FromQuery] int page = 1, [FromQuery] string? language = null, [FromQuery] int limit = 20, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            var type = ResolveOnlineMediaType(mediaType);
+            if (!IsOnlineDiscoveryConfigured(cfg) || type is null)
+            {
+                return EmptyOnlineResults(type ?? "movie", page);
+            }
+
+            var lang = NormalizeTmdbLanguage(string.IsNullOrWhiteSpace(language) ? cfg.SerrDefaultLanguage : language);
+            var cc = NormalizeRegionCode(region) ?? ResolveContentRatingRegion(cfg);
+
+            string tmdbPath;
+            Dictionary<string, string> tmdbQs;
+            if (type == "movie")
+            {
+                // /movie/popular's region filters by that country's release dates.
+                tmdbPath = "/movie/popular";
+                tmdbQs = new Dictionary<string, string> { ["region"] = cc };
+            }
+            else
+            {
+                // /tv/popular has no region param; discover with watch_region is the
+                // closest region-aware signal for series.
+                tmdbPath = "/discover/tv";
+                tmdbQs = new Dictionary<string, string>
+                {
+                    ["sort_by"] = "popularity.desc",
+                    ["watch_region"] = cc,
+                    ["include_null_first_air_dates"] = "false",
+                    ["vote_count.gte"] = "30"
+                };
+            }
+            if (!string.IsNullOrWhiteSpace(lang)) tmdbQs["language"] = lang;
+            AddPage(tmdbQs, page);
+
+            var overseerrPath = "/discover/" + (type == "tv" ? "tv" : "movies");
+            var overseerrQs = new Dictionary<string, string>
+            {
+                ["page"] = Math.Max(1, page).ToString(CultureInfo.InvariantCulture),
+                ["watchRegion"] = cc
+            };
+            if (!string.IsNullOrWhiteSpace(lang)) overseerrQs["language"] = lang;
+
+            var response = await FetchOnlineAsync(cfg, tmdbPath, tmdbQs, overseerrPath, overseerrQs, cancellationToken);
             return await BuildOnlineResponse(response, type, page, limit, cancellationToken);
         }
 
@@ -1479,6 +1532,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (!string.IsNullOrEmpty(officialTrailer)) return officialTrailer;
             if (!string.IsNullOrEmpty(anyTrailer)) return anyTrailer;
             return teaser;
+        }
+
+        private static string? NormalizeRegionCode(string? value)
+        {
+            var v = (value ?? string.Empty).Trim().ToUpperInvariant();
+            if (v.Length == 2 && v[0] >= 'A' && v[0] <= 'Z' && v[1] >= 'A' && v[1] <= 'Z') return v;
+            return null;
         }
 
         private static string ResolveContentRatingRegion(JMSFusionConfiguration cfg)

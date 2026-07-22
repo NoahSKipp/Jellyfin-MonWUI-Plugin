@@ -310,6 +310,11 @@ Jellyseerr (fallback):
 - **Because You Watched** rows are seeded from that specific title's TMDb id.
 - Two new **Trending Movies** and **Trending Series** rows are added, rendered
   with the same cards and CSS as every other row.
+- **Popular in your region** rows (movies + series) use TMDb region-aware
+  popularity (`/movie/popular?region=` and `/discover/tv?watch_region=`). The
+  region is taken from the viewer's browser locale (per-user), falling back to
+  the configured region, then `US` — no IP geolocation. They share the Trending
+  rows toggle.
 
 Items that already exist in the local Jellyfin library are deduped and rendered
 as normal local cards (they open the details modal). Items that are missing
