@@ -117,6 +117,14 @@ function normalizeOnlineDto(dto) {
     else item.RunTimeTicks = runtimeTicks;
   }
 
+  // YouTube trailer (from TMDb videos) so online cards can show a hover trailer
+  // just like local cards. Stored in Jellyfin's RemoteTrailers shape.
+  const trailerKey = String(dto.trailerYoutubeKey || "").trim();
+  if (trailerKey) {
+    item.__trailerKey = trailerKey;
+    item.RemoteTrailers = [{ Url: `https://www.youtube.com/watch?v=${trailerKey}`, Name: "Trailer" }];
+  }
+
   if (localId) {
     // Owned locally: render as a normal, openable Jellyfin card (no Request btn).
     item.Id = localId;

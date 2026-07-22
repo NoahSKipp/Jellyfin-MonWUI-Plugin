@@ -1236,6 +1236,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public object? Local;
             public string OfficialRating = string.Empty;
             public long RuntimeTicks;
+            public string TrailerKey = string.Empty;
 
             public object ToDto() => new
             {
@@ -1251,7 +1252,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 available = Available,
                 local = Local,
                 officialRating = OfficialRating,
-                runtimeTicks = RuntimeTicks
+                runtimeTicks = RuntimeTicks,
+                trailerYoutubeKey = TrailerKey
             };
         }
 
@@ -1368,7 +1370,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
         }
 
         private static readonly object OnlineDetailCacheRoot = new();
-        private static readonly Dictionary<string, (long At, string Rating, long Ticks)> OnlineDetailCache =
+        private static readonly Dictionary<string, (long At, string Rating, long Ticks, string Trailer)> OnlineDetailCache =
             new(StringComparer.OrdinalIgnoreCase);
         private const int OnlineDetailCacheMs = 24 * 60 * 60 * 1000;
 
@@ -1389,9 +1391,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    var (rating, ticks) = await GetOnlineDetailAsync(cfg, draft.MediaType, draft.TmdbId, region, cancellationToken);
+                    var (rating, ticks, trailer) = await GetOnlineDetailAsync(cfg, draft.MediaType, draft.TmdbId, region, cancellationToken);
                     if (string.IsNullOrEmpty(draft.OfficialRating) && !string.IsNullOrEmpty(rating)) draft.OfficialRating = rating;
                     if (draft.RuntimeTicks <= 0 && ticks > 0) draft.RuntimeTicks = ticks;
+                    if (string.IsNullOrEmpty(draft.TrailerKey) && !string.IsNullOrEmpty(trailer)) draft.TrailerKey = trailer;
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
                 catch { /* enrichment is best-effort */ }
@@ -1400,7 +1403,7 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             await Task.WhenAll(tasks);
         }
 
-        private async Task<(string Rating, long Ticks)> GetOnlineDetailAsync(JMSFusionConfiguration cfg, string mediaType, int tmdbId, string region, CancellationToken cancellationToken)
+        private async Task<(string Rating, long Ticks, string Trailer)> GetOnlineDetailAsync(JMSFusionConfiguration cfg, string mediaType, int tmdbId, string region, CancellationToken cancellationToken)
         {
             var seg = mediaType == "tv" ? "tv" : "movie";
             var cacheKey = seg + ":" + tmdbId.ToString(CultureInfo.InvariantCulture) + ":" + region;
@@ -1408,16 +1411,17 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             {
                 if (OnlineDetailCache.TryGetValue(cacheKey, out var cached) && (NowMs() - cached.At) < OnlineDetailCacheMs)
                 {
-                    return (cached.Rating, cached.Ticks);
+                    return (cached.Rating, cached.Ticks, cached.Trailer);
                 }
             }
 
             var rating = string.Empty;
             long ticks = 0;
+            var trailer = string.Empty;
             var qs = new Dictionary<string, string>
             {
                 ["api_key"] = CleanText(cfg.TmdbApiKey, 200),
-                ["append_to_response"] = seg == "tv" ? "content_ratings" : "release_dates"
+                ["append_to_response"] = (seg == "tv" ? "content_ratings" : "release_dates") + ",videos"
             };
             var response = await SendTmdbAsync("/" + seg + "/" + tmdbId.ToString(CultureInfo.InvariantCulture) + "?" + BuildQueryString(qs), cancellationToken);
             if (response.Ok && response.Payload.ValueKind == JsonValueKind.Object)
@@ -1435,13 +1439,46 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                     if (runs.Count > 0 && runs[0] > 0) ticks = (long)runs[0] * 60L * 10_000_000L;
                     rating = ParseTvRating(payload, region);
                 }
+                trailer = ParseTrailerKey(payload);
             }
 
             lock (OnlineDetailCacheRoot)
             {
-                OnlineDetailCache[cacheKey] = (NowMs(), rating, ticks);
+                OnlineDetailCache[cacheKey] = (NowMs(), rating, ticks, trailer);
             }
-            return (rating, ticks);
+            return (rating, ticks, trailer);
+        }
+
+        // Picks a YouTube trailer key from a TMDb `videos` block, preferring an
+        // official Trailer, then any Trailer, then a Teaser.
+        private static string ParseTrailerKey(JsonElement payload)
+        {
+            if (!payload.TryGetProperty("videos", out var videos) || videos.ValueKind != JsonValueKind.Object)
+            {
+                return string.Empty;
+            }
+
+            string officialTrailer = string.Empty, anyTrailer = string.Empty, teaser = string.Empty;
+            foreach (var video in ReadArray(videos, "results"))
+            {
+                if (!Same(ReadStringAny(video, "site"), "YouTube")) continue;
+                var key = ReadStringAny(video, "key");
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                var type = ReadStringAny(video, "type");
+                if (Same(type, "Trailer"))
+                {
+                    if (ReadBool(video, "official") && string.IsNullOrEmpty(officialTrailer)) officialTrailer = key;
+                    if (string.IsNullOrEmpty(anyTrailer)) anyTrailer = key;
+                }
+                else if (Same(type, "Teaser") && string.IsNullOrEmpty(teaser))
+                {
+                    teaser = key;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(officialTrailer)) return officialTrailer;
+            if (!string.IsNullOrEmpty(anyTrailer)) return anyTrailer;
+            return teaser;
         }
 
         private static string ResolveContentRatingRegion(JMSFusionConfiguration cfg)
