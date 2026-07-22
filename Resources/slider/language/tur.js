@@ -76,6 +76,7 @@ export const languageLabels = {
   serrStatusWithdrawn: "Geri çekildi",
   serrStatusRequested: "İstendi",
   serrAllSeasons: "Tüm sezonlar",
+  serrEpisodes: "Bölüm",
   serrTv: "Dizi",
   serrMovie: "Film",
   serrRequestedBy: "İsteyen",

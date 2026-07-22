@@ -564,7 +564,7 @@ export async function requestSerrFromItem(item, options = {}) {
     throw new Error(L("serrTmdbMissing", "TMDb ID bulunamadı. Seerr araması ile devam edin."));
   }
 
-  const confirmed = await confirmRequestBeforeSend(payload, access);
+  const confirmed = options.skipConfirm === true ? true : await confirmRequestBeforeSend(payload, access);
   if (!confirmed) return { cancelled: true };
   if (confirmed === "4k") payload.is4K = true;
 
@@ -626,12 +626,16 @@ export function createSerrRequestButton(item, options = {}) {
     let completed = false;
     try {
       button.disabled = true;
-      const result = await requestSerrFromItem(item, {
-        ...options,
-        onBeforeSubmit: () => {
-          button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestSending", "Gönderiliyor..."))}</span>`;
-        }
-      });
+      const pickSeasons = options.chooseSeasons === true
+        && (options.mediaType === "tv" || normalizeItemType(item) === "tv");
+      const result = pickSeasons
+        ? await openSerrSeasonModal(item, { ...options })
+        : await requestSerrFromItem(item, {
+            ...options,
+            onBeforeSubmit: () => {
+              button.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestSending", "Gönderiliyor..."))}</span>`;
+            }
+          });
       if (shouldMarkRequestButtonRequested(result)) {
         markRequestButtonRequested(button);
         completed = true;
@@ -648,6 +652,174 @@ export function createSerrRequestButton(item, options = {}) {
   });
 
   return button;
+}
+
+let __seasonStylesInjected = false;
+function ensureSeasonModalStyles() {
+  if (__seasonStylesInjected) return;
+  __seasonStylesInjected = true;
+  try {
+    if (document.getElementById("monwui-serr-season-styles")) return;
+    const style = document.createElement("style");
+    style.id = "monwui-serr-season-styles";
+    style.textContent = `
+      .monwui-serr-season-list{display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow-y:auto;margin-top:10px;padding-right:4px}
+      .monwui-serr-season-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;background:rgba(255,255,255,.05);cursor:pointer;font-size:.92rem}
+      .monwui-serr-season-row:hover{background:rgba(255,255,255,.09)}
+      .monwui-serr-season-row input{width:17px;height:17px;flex:0 0 auto;accent-color:#33c1a0;cursor:pointer}
+      .monwui-serr-season-row .monwui-serr-season-eps{margin-left:auto;opacity:.6;font-size:.82rem}
+      .monwui-serr-season-all{font-weight:600;margin-top:4px}
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+}
+
+function closeSeasonModal(modal, value) {
+  if (!modal) return;
+  modal.classList.remove("open");
+  modal.setAttribute("hidden", "hidden");
+  const resolve = modal.__seasonResolve;
+  modal.__seasonResolve = null;
+  if (typeof resolve === "function") resolve(value);
+}
+
+function showSeasonSelectionModal(item, seasons, access, options = {}) {
+  ensureSerrStyles();
+  ensureSeasonModalStyles();
+
+  const previous = document.getElementById("monwuiSerrSeasonModal");
+  if (previous) { try { previous.remove(); } catch {} }
+
+  const modal = document.createElement("div");
+  modal.id = "monwuiSerrSeasonModal";
+  modal.className = "monwuiSerrConfirmModalScope";
+  modal.setAttribute("hidden", "hidden");
+
+  const name = text(options.title || itemTitle(item), L("serrUntitled", "İçerik"));
+  const rows = seasons.map((s) => {
+    const epsLabel = s.episodeCount > 0
+      ? `<span class="monwui-serr-season-eps">${s.episodeCount} ${escapeHtml(L("serrEpisodes", "Bölüm"))}</span>`
+      : "";
+    const seasonName = s.name || `${L("season", "Sezon")} ${s.seasonNumber}`;
+    return `<label class="monwui-serr-season-row">
+        <input type="checkbox" data-season-cb value="${s.seasonNumber}" checked>
+        <span>${escapeHtml(seasonName)}</span>${epsLabel}
+      </label>`;
+  }).join("");
+
+  modal.innerHTML = `
+    <div class="monwui-serr-card monwui-serr-confirm-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(L("serrNativeSeasonModalTitle", "Seerr Sezon İsteği"))}">
+      <div class="monwui-serr-head">
+        <h2 class="monwui-serr-title">${escapeHtml(L("serrNativeSeasonModalTitle", "Seerr Sezon İsteği"))}</h2>
+        <button type="button" class="monwui-serr-close" data-season-cancel aria-label="${escapeHtml(L("close", "Kapat"))}">
+          <i class="fas fa-times" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="monwui-serr-confirm-body">
+        <div class="monwui-serr-confirm-name">${escapeHtml(name)}</div>
+        <label class="monwui-serr-season-row monwui-serr-season-all">
+          <input type="checkbox" data-season-all checked>
+          <span>${escapeHtml(L("serrAllSeasons", "Tüm sezonlar"))}</span>
+        </label>
+        <div class="monwui-serr-season-list" data-season-list>${rows}</div>
+      </div>
+      <div class="monwui-serr-footer">
+        <button type="button" class="monwui-serr-mini-btn" data-season-cancel>${escapeHtml(L("cancel", "İptal"))}</button>
+        <button type="button" class="monwui-serr-btn" data-season-submit>
+          <i class="fas fa-paper-plane" aria-hidden="true"></i><span>${escapeHtml(L("serrRequestButton", "İste"))}</span>
+        </button>
+      </div>
+    </div>
+  `;
+
+  const allCb = modal.querySelector("[data-season-all]");
+  const seasonCbs = () => Array.from(modal.querySelectorAll("[data-season-cb]"));
+  const syncAllState = () => {
+    const boxes = seasonCbs();
+    const checked = boxes.filter((b) => b.checked).length;
+    if (allCb) {
+      allCb.checked = checked === boxes.length;
+      allCb.indeterminate = checked > 0 && checked < boxes.length;
+    }
+  };
+
+  modal.addEventListener("change", (event) => {
+    if (event.target === allCb) {
+      seasonCbs().forEach((b) => { b.checked = allCb.checked; });
+    } else if (event.target?.matches?.("[data-season-cb]")) {
+      syncAllState();
+    }
+  });
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal || event.target?.closest?.("[data-season-cancel]")) {
+      closeSeasonModal(modal, null);
+      return;
+    }
+    if (event.target?.closest?.("[data-season-submit]")) {
+      const nums = seasonCbs().filter((b) => b.checked).map((b) => Number(b.value)).filter((n) => Number.isFinite(n));
+      if (!nums.length) return; // nothing selected
+      closeSeasonModal(modal, { seasonNumbers: nums, is4K: false });
+    }
+  });
+  modal.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeSeasonModal(modal, null);
+  });
+
+  document.body.appendChild(modal);
+  return new Promise((resolve) => {
+    modal.__seasonResolve = resolve;
+    modal.classList.add("open");
+    modal.removeAttribute("hidden");
+    setTimeout(() => modal.querySelector("[data-season-submit]")?.focus?.(), 0);
+  });
+}
+
+// Opens a season picker for a TV item, then submits the request for the chosen
+// seasons through the shared request pipeline. Used by online recommendation
+// cards so requesting a show isn't an all-or-nothing action.
+export async function openSerrSeasonModal(item, options = {}) {
+  const access = await getSerrAccess().catch(() => null);
+  if (!access?.enabled || !accessCanRequestMedia(access, "tv", options.is4K === true)) {
+    notify(L("serrDisabled", "Seerr entegrasyonu etkin değil."), "error");
+    return { cancelled: true };
+  }
+
+  const tmdbId = Number(options.mediaId || inferTmdbId(item));
+  let rawSeasons = [];
+  if (Number.isFinite(tmdbId) && tmdbId > 0) {
+    try {
+      const details = await getSerrTvDetails(tmdbId);
+      rawSeasons = Array.isArray(details?.seasons) ? details.seasons : [];
+    } catch {}
+  }
+
+  const seasons = rawSeasons
+    .map((s) => ({
+      seasonNumber: Number(s?.seasonNumber ?? s?.season_number),
+      name: text(s?.name),
+      episodeCount: Number(s?.episodeCount ?? s?.episode_count ?? 0)
+    }))
+    .filter((s) => Number.isFinite(s.seasonNumber) && s.seasonNumber >= 1)
+    .sort((a, b) => a.seasonNumber - b.seasonNumber);
+
+  // Without usable season data, fall back to a normal (all-seasons) request.
+  if (!seasons.length) {
+    return requestSerrFromItem(item, { ...options, mediaType: "tv", requestAllSeasons: true, allowAvailable: true });
+  }
+
+  const choice = await showSeasonSelectionModal(item, seasons, access, options);
+  if (!choice) return { cancelled: true };
+
+  const all = choice.seasonNumbers.length >= seasons.length;
+  return requestSerrFromItem(item, {
+    ...options,
+    mediaType: "tv",
+    is4K: choice.is4K === true || options.is4K === true,
+    seasons: all ? [] : choice.seasonNumbers,
+    requestAllSeasons: all,
+    allowAvailable: true,
+    skipConfirm: true
+  });
 }
 
 export async function appendSerrRequestButton(host, item, options = {}) {

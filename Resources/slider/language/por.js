@@ -76,6 +76,7 @@ export const languageLabels = {
   serrStatusWithdrawn: "Retirada",
   serrStatusRequested: "Solicitada",
   serrAllSeasons: "Todas as temporadas",
+  serrEpisodes: "Episódios",
   serrTv: "Série",
   serrMovie: "Filme",
   serrRequestedBy: "Solicitado por",

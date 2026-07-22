@@ -76,6 +76,7 @@ export const languageLabels = {
   serrStatusWithdrawn: "取り下げ済み",
   serrStatusRequested: "リクエスト済み",
   serrAllSeasons: "すべてのシーズン",
+  serrEpisodes: "話",
   serrTv: "シリーズ",
   serrMovie: "映画",
   serrRequestedBy: "リクエスト者",

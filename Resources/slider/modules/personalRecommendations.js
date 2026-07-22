@@ -12,7 +12,7 @@ import {
 } from "./jfUrl.js";
 import { faIconHtml, findFaIcon } from "./faIcons.js";
 import { resolveSliderAssetHref } from "./assetLinks.js";
-import { appendSerrRequestButton, requestSerrFromItem } from "./seerr/ui.js";
+import { appendSerrRequestButton, requestSerrFromItem, openSerrSeasonModal } from "./seerr/ui.js";
 import { ensureSerrStyles } from "./seerr/styles.js";
 import { showNotification } from "./player/ui/notification.js";
 import {
@@ -3769,9 +3769,14 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
       e.stopPropagation();
       if (isOnline) {
         try {
-          // Online items are the ones missing locally; enrichment gives them a
-          // runtime, so allowAvailable prevents a false "already in library".
-          await requestSerrFromItem(item, { source: "monwui-recs", allowAvailable: true });
+          if (item.__mediaType === "tv") {
+            // Let the user pick seasons instead of requesting the whole show.
+            await openSerrSeasonModal(item, { source: "monwui-recs" });
+          } else {
+            // Online items are the ones missing locally; enrichment gives them a
+            // runtime, so allowAvailable prevents a false "already in library".
+            await requestSerrFromItem(item, { source: "monwui-recs", allowAvailable: true });
+          }
         } catch (err) {
           const msg = String(err?.message || "").trim()
             || (config.languageLabels?.serrRequestFailed || labels.serrRequestFailed || "Request failed.");
@@ -3862,6 +3867,7 @@ function mountOnlineRequestAffordance(card, item, itemName) {
     appendSerrRequestButton(actions, item, {
       source: "monwui-recs",
       allowAvailable: true,
+      chooseSeasons: item.__mediaType === "tv",
       className: "monwui-serr-btn prc-online-request-btn"
     }).then((button) => {
       if (!button) { try { actions.remove(); } catch {} return; }
