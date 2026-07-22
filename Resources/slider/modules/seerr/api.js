@@ -161,6 +161,10 @@ export async function fetchOnlinePopular({ mediaType = "movie", region = "", pag
   return request(`/online/popular${onlineQuery({ mediaType, region, page, language, limit: limit || undefined })}`);
 }
 
+export async function fetchOnlineCountries({ language = "" } = {}) {
+  return request(`/online/countries${onlineQuery({ language })}`);
+}
+
 export async function fetchOnlineRecommendations({ mediaType = "movie", tmdbId = 0, page = 1, language = "", limit = 0 } = {}) {
   const clean = Number(tmdbId);
   if (!Number.isFinite(clean) || clean <= 0) return { ok: true, results: [] };

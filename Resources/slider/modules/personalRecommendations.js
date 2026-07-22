@@ -19,11 +19,12 @@ import {
   getPersonalOnlineItems,
   getGenreOnlineItems,
   getTrendingOnlineItems,
-  getPopularInRegionItems,
-  getEffectiveRegion,
+  getPopularMergedForRegion,
+  getConfiguredPopularRegions,
   getSeedItemOnlineRecs,
   onlineRecsAvailable,
   onlineTrendingRowsEnabled,
+  onlinePopularRowsEnabled,
   isRequestableOnlineItem
 } from "./seerr/onlineRecs.js";
 import {
@@ -2137,21 +2138,26 @@ async function renderPersonalRecommendationsInternal(options = {}) {
         }));
       }
 
-      // "Popular in your region" rows, sharing the Trending toggle/gate.
-      const popularRegion = await getEffectiveRegion().catch(() => "");
-      for (const mediaType of ["movie", "tv"]) {
-        const popularSection = ensurePopularContainer(indexPage, mediaType, popularRegion);
+    }
+
+    // "Popular in X" rows: one merged (movie+series) row per configured country.
+    if (await onlinePopularRowsEnabled()) {
+      const regions = await getConfiguredPopularRegions().catch(() => []);
+      const keepIds = new Set(regions.map((r) => popularSectionId(r)));
+      cleanupStalePopularSections(indexPage, keepIds);
+      for (const region of regions) {
+        const popularSection = ensurePopularContainer(indexPage, region);
         try { registerManagedHomeRowAnchor(popularSection); } catch {}
         const popularRow = popularSection?.querySelector?.(".popular-recs-row") || null;
         if (!popularRow) continue;
 
-        tasks.push(enqueueManagedSectionRender(`popular-${mediaType}`, async () => {
+        tasks.push(enqueueManagedSectionRender(`popular-${region}`, async () => {
           try {
             if (deferredSeq !== __deferredHomeSectionSeq) return;
             if (!popularRow.isConnected || !hasActivePersonalRecsHomeSections()) return;
             const cardCount = getPersonalRecsCardCount();
             const { serverId } = getSessionInfo();
-            const items = await getPopularInRegionItems(mediaType, { limit: cardCount, region: popularRegion });
+            const items = await getPopularMergedForRegion(region, { limit: cardCount });
             if (deferredSeq !== __deferredHomeSectionSeq || !popularRow.isConnected) return;
             if (!items.length) {
               cleanupTrendingSection(popularSection);
@@ -2163,7 +2169,7 @@ async function renderPersonalRecommendationsInternal(options = {}) {
             }
             renderRecommendationCards(popularRow, items, serverId);
           } catch (e) {
-            console.warn("Popular row render failed:", mediaType, e);
+            console.warn("Popular row render failed:", region, e);
             cleanupTrendingSection(popularSection);
           }
         }, {
@@ -2786,7 +2792,7 @@ function ensureTrendingRowStyles() {
     const style = document.createElement("style");
     style.id = "jms-trending-row-styles";
     style.textContent = `
-      #trending-movies, #trending-series, #popular-movies, #popular-series {
+      .trending-recs-section {
         display: flex;
         flex-direction: column;
         gap: 14px;
@@ -2804,7 +2810,7 @@ function ensureTrendingRowStyles() {
         --jms-card-radius-tv: 19px;
       }
       @media (max-width: 820px) {
-        #trending-movies, #trending-series, #popular-movies, #popular-series { gap: 10px; padding-inline: 2.8%; }
+        .trending-recs-section { gap: 10px; padding-inline: 2.8%; }
       }
     `;
     (document.head || document.documentElement).appendChild(style);
@@ -2856,26 +2862,28 @@ function getRegionDisplayName(regionCode) {
   }
 }
 
-function getPopularLabel(mediaType, regionCode) {
+function getPopularLabel(regionCode) {
   const l = config.languageLabels || labels || {};
   const regionName = getRegionDisplayName(regionCode) || regionCode || "";
-  const tpl = (mediaType === "tv" ? (l.popularSeriesInRegion || l.popularInRegion) : (l.popularMoviesInRegion || l.popularInRegion))
-    || "Popular in {region}";
+  const tpl = l.popularInRegion || "Popular in {region}";
   return String(tpl).replace("{region}", regionName);
 }
 
-function ensurePopularContainer(indexPage, mediaType, regionCode) {
+function popularSectionId(regionCode) {
+  return "popular-" + String(regionCode || "").trim().toLowerCase();
+}
+
+function ensurePopularContainer(indexPage, regionCode) {
   ensureTrendingRowStyles();
-  const type = mediaType === "tv" ? "tv" : "movie";
-  const sectionId = type === "tv" ? "popular-series" : "popular-movies";
+  const sectionId = popularSectionId(regionCode);
   const homeSections = getHomeSectionsContainer(indexPage);
 
   let existing = getScopedSection(sectionId, indexPage);
   if (existing) {
-    // Keep the title current if the region changed since it was created.
+    // Keep the title current if the localization/region name changed.
     const titleEl = existing.querySelector(".prc-title-text");
     if (titleEl) {
-      const t = getPopularLabel(type, regionCode);
+      const t = getPopularLabel(regionCode);
       titleEl.textContent = t;
       titleEl.setAttribute("aria-label", t);
     }
@@ -2886,8 +2894,8 @@ function ensurePopularContainer(indexPage, mediaType, regionCode) {
   const section = document.createElement("div");
   section.id = sectionId;
   section.classList.add("homeSection", "personal-recs-section", "trending-recs-section", "popular-recs-section");
-  section.dataset.popularMediaType = type;
-  const title = escapeHtml(getPopularLabel(type, regionCode));
+  section.dataset.popularRegion = String(regionCode || "").toUpperCase();
+  const title = escapeHtml(getPopularLabel(regionCode));
   section.innerHTML = `
   <div class="sectionTitleContainer sectionTitleContainer-cards">
     <h2 class="sectionTitle sectionTitle-cards prc-title">
@@ -2902,6 +2910,16 @@ function ensurePopularContainer(indexPage, mediaType, regionCode) {
 
   placeSection(section, homeSections);
   return section;
+}
+
+// Remove any managed "Popular in X" sections whose region is no longer configured.
+function cleanupStalePopularSections(indexPage, keepIds) {
+  try {
+    const root = getHomeSectionsContainer(indexPage) || document;
+    root.querySelectorAll('.popular-recs-section').forEach((el) => {
+      if (!keepIds.has(el.id)) cleanupTrendingSection(el);
+    });
+  } catch {}
 }
 
 function ensurePersonalRecsContainer(indexPage) {
@@ -5241,8 +5259,7 @@ export function resetPersonalRecsAndGenreState() {
       document.getElementById("genre-hubs"),
       document.getElementById("trending-movies"),
       document.getElementById("trending-series"),
-      document.getElementById("popular-movies"),
-      document.getElementById("popular-series"),
+      ...Array.from(document.querySelectorAll('.popular-recs-section')),
       ...Array.from(document.querySelectorAll('[id^="because-you-watched--"], #because-you-watched'))
     ].filter(Boolean)));
 
