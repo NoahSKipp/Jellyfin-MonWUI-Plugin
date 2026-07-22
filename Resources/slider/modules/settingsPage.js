@@ -161,9 +161,10 @@ export function createSettingsModal() {
     const serrTab = config?.currentUserIsAdmin
       ? createTab('serr', 'fa-clapperboard', labels.serrSettingsTab || 'Seerr & Arr Entegrasyonu')
       : null;
-    const recommendationsTab = config?.currentUserIsAdmin
-      ? createTab('recommendations', 'fa-wand-magic-sparkles', labels.recommendationsSettingsTab || 'Recommendations')
-      : null;
+    // Recommendations tab is available to all users: it hosts the per-user row
+    // settings (moved from the Studio tab). The server-side online settings
+    // inside it are only built for admins.
+    const recommendationsTab = createTab('recommendations', 'fa-wand-magic-sparkles', labels.recommendationsSettingsTab || 'Recommendations');
     const detailsModalTab = createTab('details-modal', 'fa-circle-info', labels.detailsModalSettingsTab || 'Detaylar Modülü Ayarları');
     const avatarTab = createTab('avatar', 'fa-user', labels.avatarCreateInput || 'Avatar Ayarları');
     const parentalPinTab = config?.currentUserIsAdmin
@@ -208,9 +209,21 @@ export function createSettingsModal() {
     const serrPanel = config?.currentUserIsAdmin
       ? createSerrPanel(config, labels)
       : null;
-    const recommendationsPanel = config?.currentUserIsAdmin
-      ? createRecommendationsPanel(config, labels)
-      : null;
+    const recommendationsPanel = createRecommendationsPanel(config, labels);
+    // Relocate the recommendation-adjacent row settings built by the Studio panel
+    // into the Recommendations tab (re-parenting preserves their bindings). They
+    // go above the online/server settings, under their own heading.
+    if (recommendationsPanel && Array.isArray(studioPanel?.__relocatableRecSections)) {
+      const localHeading = document.createElement('h3');
+      localHeading.className = 'settings-subheading';
+      localHeading.textContent = labels.recommendationLocalRowsHeading
+        || 'Home recommendation rows (this browser)';
+      const localWrap = document.createElement('div');
+      localWrap.className = 'settings-section rec-local-rows';
+      localWrap.appendChild(localHeading);
+      studioPanel.__relocatableRecSections.forEach((sec) => { if (sec) localWrap.appendChild(sec); });
+      recommendationsPanel.insertBefore(localWrap, recommendationsPanel.firstChild || null);
+    }
     const detailsModalPanel = createDetailsModalPanel(config, labels);
     const watchlistSettingsPanel = createWatchlistPanel(config, labels);
     const dbManagementPanel = createDbManagementPanel(config, labels);

@@ -254,7 +254,14 @@ export function createRecommendationsPanel(config, labels) {
   panel.id = "recommendations-panel";
   panel.className = "settings-panel";
 
-  const section = createSection(L(labels, "recommendationsSettingsTab", "Recommendations"));
+  // Only admins get the server-side online settings (TMDb key, online toggles,
+  // region picker). Non-admins still get the per-user row settings relocated
+  // here by the settings modal.
+  if (config?.currentUserIsAdmin !== true) {
+    return panel;
+  }
+
+  const section = createSection(L(labels, "onlineRecommendationsHeading", "Online recommendations (server-wide)"));
 
   const intro = document.createElement("div");
   intro.className = "description-text2";

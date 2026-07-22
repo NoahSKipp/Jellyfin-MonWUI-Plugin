@@ -1858,12 +1858,18 @@ export function createStudioHubsPanel(config, labels) {
   cardTitleModeWrap.appendChild(cardTitleModeSelect);
   section.appendChild(cardTitleModeWrap);
 
+  // "For You" (personal recommendations) — grouped into its own section so it
+  // can be relocated into the Recommendations tab as a unit.
+  const forYouSection = createSection(
+    labels?.personalRecommendations || config.languageLabels?.personalRecommendations || 'Personalized Recommendations'
+  );
+
   const enableForYouCheckbox = createCheckbox(
     'enablePersonalRecommendations',
     labels?.enableForYou || config.languageLabels.enableForYou || 'Sana Özel Koleksiyonları Etkinleştir',
     config.enablePersonalRecommendations
   );
-  section.appendChild(enableForYouCheckbox);
+  forYouSection.appendChild(enableForYouCheckbox);
 
   const ratingWrap = createNumberInput(
    'studioHubsMinRating',
@@ -1882,7 +1888,7 @@ export function createStudioHubsPanel(config, labels) {
     1,
     20
   );
-  section.appendChild(personalcountWrap);
+  forYouSection.appendChild(personalcountWrap);
 
   const raHeading = document.createElement('h3');
   raHeading.textContent =
@@ -2991,10 +2997,12 @@ export function createStudioHubsPanel(config, labels) {
   });
 
   panel.appendChild(section);
-  panel.appendChild(becauseYouWatchedSection);
-  panel.appendChild(genreSection);
-  panel.appendChild(dirSection);
   panel.appendChild(managedOrderSection);
+
+  // These recommendation-adjacent sections are built here (with all their local
+  // helpers/bindings intact) but relocated into the Recommendations tab by the
+  // settings modal. Re-parenting the built DOM preserves their event bindings.
+  panel.__relocatableRecSections = [forYouSection, becauseYouWatchedSection, genreSection, dirSection];
 
   return panel;
 }
