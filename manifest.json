@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
     {
+        "version": "3.9.1.0",
+        "changelog": "v3.9.1\n\nChanges:\n- Patch: fixes and improvements from latest merge\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/download/v3.9.1/JMSFusion-3.9.1.0-server.zip",
+        "checksum": "f6d49d22fbbb8dbc1aec9e702e24c901",
+        "timestamp": "2026-07-23T17:58:27.8835001Z"
+      },
+    {
         "version": "3.9.0.0",
         "changelog": "v3.9.0\n\nChanges:\n- Blended online (TMDb/Seerr) recommendations into home rows\n- Added content-rating and runtime enrichment for online cards with a dedicated Recommendations settings tab\n- Added season selection when requesting online shows via Seerr\n- Hover trailer on online cards now reuses the real hover modal\n- Added multi-country 'Popular in X' rows with a country picker\n- Added 'Popular in your region' rows (TMDb, per-user region)\n- Fixed Trending row positioning and load speed\n- Localized all new strings across all supported languages\n- Fixed online card requests flow\n- Reorganized settings: recommendation rows moved into a Recommendations tab\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",
