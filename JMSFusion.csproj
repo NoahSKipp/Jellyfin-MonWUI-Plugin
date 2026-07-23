@@ -45,6 +45,24 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 
+  <!--
+    Microsoft.Extensions.FileProviders.Abstractions and Microsoft.Extensions.Primitives
+    (IFileProvider/IChangeToken) are already part of the Microsoft.AspNetCore.App shared
+    framework above. Letting the FileProviders.Embedded package also copy its own private
+    build-time-resolved copies into the plugin folder causes Jellyfin's plugin loader to
+    load two separate identities of the same assembly side by side, which throws
+    ReflectionTypeLoadException ("Method 'Watch' ... does not have an implementation") at
+    startup and silently disables the whole plugin. Drop them from the copy-local output;
+    the shared framework's copies satisfy the reference at runtime.
+  -->
+  <Target Name="RemoveSharedFrameworkDuplicateAssemblies" AfterTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <ReferenceCopyLocalPaths Remove="@(ReferenceCopyLocalPaths)"
+                                Condition="'%(ReferenceCopyLocalPaths.Filename)' == 'Microsoft.Extensions.FileProviders.Abstractions' Or
+                                           '%(ReferenceCopyLocalPaths.Filename)' == 'Microsoft.Extensions.Primitives'" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <EmbeddedResource Include="Web/**/*" />
     <EmbeddedResource Include="Resources/**/*" />
