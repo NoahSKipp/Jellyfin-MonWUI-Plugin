@@ -69,6 +69,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             public bool? EnableOnlineTrendingRows { get; set; }
             public bool? EnableOnlineCardEnrichment { get; set; }
             public string? OnlineContentRatingRegion { get; set; }
+            public bool? EnableOnlinePopularRows { get; set; }
+            public List<string>? PopularRegions { get; set; }
             public string? TmdbApiKey { get; set; }
         }
 
@@ -118,6 +120,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 arrSonarr4KEnabled = cfg.SerrEnable4KRequests && IsSonarr4KRequestConfigured(cfg),
                 onlineRecommendations = IsOnlineDiscoveryConfigured(cfg),
                 onlineTrendingRows = cfg.EnableOnlineTrendingRows && IsOnlineDiscoveryConfigured(cfg),
+                onlinePopularRows = cfg.EnableOnlinePopularRows && IsOnlineDiscoveryConfigured(cfg),
+                popularRegions = NormalizePopularRegions(cfg.PopularRegions),
                 region = ResolveContentRatingRegion(cfg),
                 settings = BuildSettingsPayload(cfg, isAdmin)
             });
@@ -166,6 +170,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             if (request?.EnableOnlineTrendingRows.HasValue == true) cfg.EnableOnlineTrendingRows = request.EnableOnlineTrendingRows.Value;
             if (request?.EnableOnlineCardEnrichment.HasValue == true) cfg.EnableOnlineCardEnrichment = request.EnableOnlineCardEnrichment.Value;
             if (request?.OnlineContentRatingRegion is not null) cfg.OnlineContentRatingRegion = CleanText(request.OnlineContentRatingRegion, 8).ToUpperInvariant();
+            if (request?.EnableOnlinePopularRows.HasValue == true) cfg.EnableOnlinePopularRows = request.EnableOnlinePopularRows.Value;
+            if (request?.PopularRegions is not null) cfg.PopularRegions = NormalizePopularRegions(request.PopularRegions);
             if (request?.TmdbApiKey is not null)
             {
                 var tmdbKey = request.TmdbApiKey.Trim();
@@ -576,6 +582,28 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 ok = true,
                 mediaType = type,
                 genres = genres.Select(g => new { id = g.Key, name = g.Value }).ToList()
+            });
+        }
+
+        [HttpGet("online/countries")]
+        public async Task<IActionResult> OnlineCountries([FromQuery] string? language = null, CancellationToken cancellationToken = default)
+        {
+            var userCheck = TryGetRequestUser();
+            if (userCheck.Result is not null) return userCheck.Result;
+
+            var cfg = GetConfig();
+            if (!IsOnlineDiscoveryConfigured(cfg))
+            {
+                NoCache();
+                return Ok(new { ok = true, countries = Array.Empty<object>() });
+            }
+
+            var countries = await FetchCountryListAsync(cfg, cancellationToken);
+            NoCache();
+            return Ok(new
+            {
+                ok = true,
+                countries = countries.Select(c => new { code = c.Key, name = c.Value }).ToList()
             });
         }
 
@@ -1541,6 +1569,23 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             return null;
         }
 
+        private const int MaxPopularRegions = 5;
+
+        private static List<string> NormalizePopularRegions(IEnumerable<string>? values)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var output = new List<string>();
+            foreach (var raw in values ?? Array.Empty<string>())
+            {
+                var v = (raw ?? string.Empty).Trim();
+                var norm = Same(v, "auto") ? "auto" : NormalizeRegionCode(v);
+                if (norm is null || !seen.Add(norm)) continue;
+                output.Add(norm);
+                if (output.Count >= MaxPopularRegions) break;
+            }
+            return output;
+        }
+
         private static string ResolveContentRatingRegion(JMSFusionConfiguration cfg)
         {
             var configured = CleanText(cfg.OnlineContentRatingRegion, 8);
@@ -1624,6 +1669,50 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
 
             return 0;
+        }
+
+        private static readonly object OnlineCountryCacheRoot = new();
+        private static (long At, List<KeyValuePair<string, string>>? List) OnlineCountryCache;
+        private const int OnlineCountryCacheMs = 24 * 60 * 60 * 1000;
+
+        // Canonical ISO 3166-1 country list from TMDb, for the "Popular in X"
+        // region picker. Names are English; the frontend localizes them.
+        private async Task<List<KeyValuePair<string, string>>> FetchCountryListAsync(JMSFusionConfiguration cfg, CancellationToken cancellationToken)
+        {
+            lock (OnlineCountryCacheRoot)
+            {
+                if (OnlineCountryCache.List is not null && (NowMs() - OnlineCountryCache.At) < OnlineCountryCacheMs)
+                {
+                    return OnlineCountryCache.List;
+                }
+            }
+
+            var result = new List<KeyValuePair<string, string>>();
+            if (HasTmdbKey(cfg))
+            {
+                var qs = new Dictionary<string, string> { ["api_key"] = CleanText(cfg.TmdbApiKey, 200) };
+                var response = await SendTmdbAsync("/configuration/countries?" + BuildQueryString(qs), cancellationToken);
+                if (response.Ok && response.Payload.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var entry in response.Payload.EnumerateArray())
+                    {
+                        if (entry.ValueKind != JsonValueKind.Object) continue;
+                        var code = ReadStringAny(entry, "iso_3166_1");
+                        var name = ReadStringAny(entry, "english_name", "native_name");
+                        if (code.Length == 2 && !string.IsNullOrWhiteSpace(name))
+                        {
+                            result.Add(new KeyValuePair<string, string>(code.ToUpperInvariant(), name));
+                        }
+                    }
+                }
+            }
+            result = result.OrderBy(pair => pair.Value, StringComparer.OrdinalIgnoreCase).ToList();
+
+            lock (OnlineCountryCacheRoot)
+            {
+                OnlineCountryCache = (NowMs(), result);
+            }
+            return result;
         }
 
         private async Task<List<KeyValuePair<int, string>>> FetchGenreListAsync(JMSFusionConfiguration cfg, string mediaType, string? language, CancellationToken cancellationToken)
@@ -4740,6 +4829,8 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 enableOnlineTrendingRows = cfg.EnableOnlineTrendingRows,
                 enableOnlineCardEnrichment = cfg.EnableOnlineCardEnrichment,
                 onlineContentRatingRegion = cfg.OnlineContentRatingRegion,
+                enableOnlinePopularRows = cfg.EnableOnlinePopularRows,
+                popularRegions = NormalizePopularRegions(cfg.PopularRegions),
                 tmdbApiKey = includeSensitive
                     ? (Same(cfg.TmdbApiKey, "CHANGE_ME") ? string.Empty : cfg.TmdbApiKey)
                     : string.Empty,

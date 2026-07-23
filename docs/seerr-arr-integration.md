@@ -310,11 +310,11 @@ Jellyseerr (fallback):
 - **Because You Watched** rows are seeded from that specific title's TMDb id.
 - Two new **Trending Movies** and **Trending Series** rows are added, rendered
   with the same cards and CSS as every other row.
-- **Popular in your region** rows (movies + series) use TMDb region-aware
-  popularity (`/movie/popular?region=` and `/discover/tv?watch_region=`). The
-  region is taken from the viewer's browser locale (per-user), falling back to
-  the configured region, then `US` — no IP geolocation. They share the Trending
-  rows toggle.
+- **Popular in X** rows: one merged (movies + series) row per configured
+  country, using TMDb region-aware popularity (`/movie/popular?region=` and
+  `/discover/tv?watch_region=`). Admins pick the countries in settings (up to 5);
+  an **Auto-detect** entry resolves per-viewer from the browser locale (no IP
+  geolocation). Own enable toggle.
 
 Items that already exist in the local Jellyfin library are deduped and rendered
 as normal local cards (they open the details modal). Items that are missing
@@ -331,16 +331,25 @@ Seerr language's region and can be overridden.
 
 ### Settings
 
-All of this lives in its own **Recommendations** tab in the MonWUI settings
-(admin only):
+Everything recommendation-related lives in a single **Recommendations** tab,
+available to all users. It has two parts:
 
-- **Show online recommendations** — master toggle.
-- **TMDb API key** — used for discovery and enrichment (get one free at
-  themoviedb.org).
-- **Show Trending Movies / Trending Series rows.**
-- **Fetch content rating and runtime for online cards** — enrichment toggle.
-- **Content rating region** — e.g. `US`, `TR`, `DE`; blank derives from the
-  Seerr language.
+- **Home recommendation rows (this browser)** — per-user, saved locally, applied
+  instantly. These moved here from the Studio tab: Personalized ("For You"),
+  Because You Watched, Genre Hubs, and Director Collections (enable toggles,
+  hero-card toggles, row/card counts, genre order). *(Recently-added / Top 10 /
+  TMDb rows stay under the Studio tab's "Recent rows" group, which they're gated
+  by.)*
+- **Online recommendations (server-wide)** — admin only, saved to the plugin
+  config:
+  - **Show online recommendations** — master toggle.
+  - **TMDb API key** — used for discovery and enrichment (free at themoviedb.org).
+  - **Show Trending Movies / Trending Series rows.**
+  - **Show 'Popular in <country>' rows** + a **country picker** (up to 5, plus
+    an Auto-detect option).
+  - **Fetch content rating and runtime for online cards** — enrichment toggle.
+  - **Content rating region** — e.g. `US`, `TR`, `DE`; blank derives from the
+    Seerr language.
 
 Discovery works with a TMDb API key and/or a configured Seerr instance;
 requests require Seerr or Arr.

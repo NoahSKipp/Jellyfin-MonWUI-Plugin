@@ -191,6 +191,15 @@ namespace Jellyfin.Plugin.JMSFusion
         [JsonPropertyName("onlineContentRatingRegion")]
         public string OnlineContentRatingRegion { get; set; } = string.Empty;
 
+        [JsonPropertyName("enableOnlinePopularRows")]
+        public bool EnableOnlinePopularRows { get; set; } = true;
+
+        // Countries for the "Popular in X" rows. Each entry is an ISO 3166-1
+        // alpha-2 country code, or the sentinel "auto" to detect from the
+        // viewer's browser locale. Defaults to one auto-detected row.
+        [JsonPropertyName("popularRegions")]
+        public List<string> PopularRegions { get; set; } = new() { "auto" };
+
         [JsonPropertyName("serrRequests")]
         public List<SerrRequestEntry> SerrRequests { get; set; } = new();
 
