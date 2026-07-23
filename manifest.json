@@ -13,7 +13,7 @@
         "changelog": "v3.9.0\n\nChanges:\n- Blended online (TMDb/Seerr) recommendations into home rows\n- Added content-rating and runtime enrichment for online cards with a dedicated Recommendations settings tab\n- Added season selection when requesting online shows via Seerr\n- Hover trailer on online cards now reuses the real hover modal\n- Added multi-country 'Popular in X' rows with a country picker\n- Added 'Popular in your region' rows (TMDb, per-user region)\n- Fixed Trending row positioning and load speed\n- Localized all new strings across all supported languages\n- Fixed online card requests flow\n- Reorganized settings: recommendation rows moved into a Recommendations tab\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/download/v3.9.0/JMSFusion-3.9.0.0-server.zip",
-        "checksum": "a98bbd2009e415513ad41893183194a9",
+        "checksum": "b7d4f1bcb0d256f32c61a7dcaacccb04",
         "timestamp": "2026-07-23T16:57:00.0000000Z"
       },
     {
