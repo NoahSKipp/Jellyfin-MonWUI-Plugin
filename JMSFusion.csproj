@@ -63,6 +63,14 @@
     </ItemGroup>
   </Target>
 
+  <Target Name="RemoveSharedFrameworkDuplicateAssembliesPublish" AfterTargets="ComputeResolvedFilesToPublishList">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                                Condition="'%(ResolvedFileToPublish.Filename)' == 'Microsoft.Extensions.FileProviders.Abstractions' Or
+                                           '%(ResolvedFileToPublish.Filename)' == 'Microsoft.Extensions.Primitives'" />
+    </ItemGroup>
+  </Target>
+
   <ItemGroup>
     <EmbeddedResource Include="Web/**/*" />
     <EmbeddedResource Include="Resources/**/*" />
