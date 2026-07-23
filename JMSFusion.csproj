@@ -34,7 +34,7 @@
     <PackageReference Include="Jellyfin.Common"    Version="10.11.0" />
     <PackageReference Include="Jellyfin.Data"      Version="10.11.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="9.0.10" />
-    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.FileProviders.Embedded" Version="9.0.10" />
   </ItemGroup>
 
   <PropertyGroup>
