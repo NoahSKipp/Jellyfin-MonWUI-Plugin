@@ -1,0 +1,15 @@
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/bin/Release/net9.0/meta.json
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/bin/Release/net9.0/Jellyfin.Plugin.JMSFusion.deps.json
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/bin/Release/net9.0/Jellyfin.Plugin.JMSFusion.dll
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/bin/Release/net9.0/Jellyfin.Plugin.JMSFusion.pdb
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.csproj.AssemblyReference.cache
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.EmbeddedFilesManifest.cache
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.GeneratedMSBuildEditorConfig.editorconfig
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.AssemblyInfoInputs.cache
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.AssemblyInfo.cs
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.csproj.CoreCompileInputs.cache
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/JMSFusion.sourcelink.json
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/Jellyfin.Plugin.JMSFusion.dll
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/refint/Jellyfin.Plugin.JMSFusion.dll
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/Jellyfin.Plugin.JMSFusion.pdb
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/obj/Release/net9.0/ref/Jellyfin.Plugin.JMSFusion.dll

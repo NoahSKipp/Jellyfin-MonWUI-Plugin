@@ -1,0 +1,5 @@
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/publish/meta.json
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/publish/Jellyfin.Plugin.JMSFusion.dll
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/publish/Jellyfin.Plugin.JMSFusion.deps.json
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/publish/Jellyfin.Plugin.JMSFusion.pdb
+/home/noahsk/Documents/Jellyfin-MonWUI-Plugin/publish/Microsoft.Extensions.FileProviders.Embedded.dll

@@ -8,14 +8,22 @@
     "category": "General",
     "imageUrl": "https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/img/icon.png",
     "versions": [
-    {
-        "version": "3.9.2.0",
-        "changelog": "v3.9.2\n\nChanges:\n- Removed duplicate Abstractions/Primitives assemblies that caused Watch errors.\n\nNotes:\n- Restart Jellyfin after update",
-        "targetAbi": "10.11.0.0",
-        "sourceUrl": "https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/download/v3.9.2/JMSFusion-3.9.2.0-server.zip",
-        "checksum": "6a5115e4730eb379f3c52af368cd946b",
-        "timestamp": "2026-07-23T18:17:00.6529083Z"
-      },
+        {
+            "version": "3.9.3.0",
+            "changelog": "Fix ReflectionTypeLoadException by strictly excluding all duplicate Microsoft.Extensions dependencies during publish. The plugin now perfectly integrates with the host framework.",
+            "targetAbi": "10.11.0.0",
+            "sourceUrl": "https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/download/v3.9.3/JMSFusion-3.9.3.0-server.zip",
+            "checksum": "2a00c3379b97c37e0cc8b545c4a71375",
+            "timestamp": "2026-07-23T19:35:00Z"
+        },
+        {
+            "version": "3.9.2.0",
+            "changelog": "Bump version to bypass cache. Hard refresh (Ctrl + F5) may be required.",
+            "targetAbi": "10.11.0.0",
+            "sourceUrl": "https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/download/v3.9.2/JMSFusion-3.9.2.0-server.zip",
+            "checksum": "6a5115e4730eb379f3c52af368cd946b",
+            "timestamp": "2026-07-23T19:07:14Z"
+        },
     {
         "version": "3.9.1.0",
         "changelog": "v3.9.1\n\nChanges:\n- Patch: fixes and improvements from latest merge\n\nNotes:\n- Restart Jellyfin after update\n- Hard refresh (Ctrl + F5) may be required",
