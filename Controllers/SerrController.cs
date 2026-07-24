@@ -704,8 +704,11 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
             }
             var isAdmin = IsAdminUser(userCheck.User);
 
-            if (includeDownloads &&
-                cfg.EnableSerrIntegration &&
+            // Sync request status from Seerr regardless of includeDownloads: that flag
+            // only controls the heavier Arr download-snapshot lookup below. Gating the
+            // sync on it too meant lightweight status checks (e.g. "already requested?"
+            // from the recommendation cards) never refreshed stale/removed requests.
+            if (cfg.EnableSerrIntegration &&
                 !string.IsNullOrWhiteSpace(cfg.SerrBaseUrl) &&
                 !string.IsNullOrWhiteSpace(cfg.SerrApiKey) &&
                 ShouldRunSerrListSync())
@@ -3447,6 +3450,10 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
 
             var changed = false;
             var updates = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+            // Requests Seerr no longer knows about (deleted there) instead of just
+            // failing to update -- otherwise a deleted request stays "Requested"
+            // locally forever, since nothing else ever removes it.
+            var removedIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in active)
             {
                 if (!entry.SerrRequestId.HasValue) continue;
@@ -3455,9 +3462,13 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                 {
                     updates[entry.Id] = response.Payload;
                 }
+                else if (response.StatusCode == 404)
+                {
+                    removedIds.Add(entry.Id);
+                }
             }
 
-            if (!updates.Any()) return;
+            if (!updates.Any() && !removedIds.Any()) return;
 
             lock (SyncRoot)
             {
@@ -3476,6 +3487,12 @@ namespace Jellyfin.Plugin.JMSFusion.Controllers
                         target.UpdatedAtUtc = NowMs();
                         changed = true;
                     }
+                }
+
+                if (removedIds.Any())
+                {
+                    var removedCount = cfg.SerrRequests.RemoveAll(x => removedIds.Contains(x.Id));
+                    if (removedCount > 0) changed = true;
                 }
 
                 if (changed)
