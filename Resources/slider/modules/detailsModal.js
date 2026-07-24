@@ -4316,11 +4316,12 @@ wireMiniCardDelegation();
   function wireSerrRequestButtons() {
     const actions = root.querySelector(".jmsdm-actions");
     if (actions && isTrailerItem) {
+      const requestMediaType = baseItem?.__mediaType === "tv" ? "tv" : "movie";
       appendSerrRequestButton(actions, baseItem, {
-        source: "tmdb-trailer-row",
+        source: baseItem?.__requestSource || "tmdb-trailer-row",
         label: label("serrRequestFromTrailer", "İste"),
-        requestAllSeasons: false,
-        mediaType: "movie",
+        mediaType: requestMediaType,
+        chooseSeasons: requestMediaType === "tv",
         mediaId: Number(baseItem?.__tmdbId || 0),
         title: name
       }).catch(() => {});

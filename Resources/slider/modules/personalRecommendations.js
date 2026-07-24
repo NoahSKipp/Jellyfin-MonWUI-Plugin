@@ -3,7 +3,7 @@ import { getConfig, getHomeSectionsRuntimeConfig, normalizeManagedCardTitleDispl
 import { getLanguageLabels, getDefaultLanguage } from "../language/index.js";
 import { attachMiniPosterHover } from "./studioHubsUtils.js";
 import { openGenreExplorer, openPersonalExplorer } from "./genreExplorer.js";
-import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS, openPreviewModalForItem } from "./hoverTrailerModal.js";
+import { REOPEN_COOLDOWN_MS, OPEN_HOVER_DELAY_MS } from "./hoverTrailerModal.js";
 import { createTrailerIframe, formatOfficialRatingLabel } from "./utils.js";
 import { openDetailsModal } from "./detailsModalLoader.js";
 import {
@@ -12,9 +12,7 @@ import {
 } from "./jfUrl.js";
 import { faIconHtml, findFaIcon } from "./faIcons.js";
 import { resolveSliderAssetHref } from "./assetLinks.js";
-import { appendSerrRequestButton, requestSerrFromItem, openSerrSeasonModal } from "./seerr/ui.js";
 import { ensureSerrStyles } from "./seerr/styles.js";
-import { showNotification } from "./player/ui/notification.js";
 import {
   getPersonalOnlineItems,
   getGenreOnlineItems,
@@ -3881,7 +3879,7 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
   }
 
   if (isOnline) {
-    mountOnlineRequestAffordance(card, item, itemName);
+    mountOnlineBadge(card, item, itemName);
   }
 
   const cardLink = card.querySelector(".cardLink");
@@ -3889,33 +3887,27 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     cardLink.addEventListener("click", async (e) => {
       e.preventDefault();
       e.stopPropagation();
+      const hostEl = card.querySelector(".cardImageContainer");
+      const backdropIndex = localStorage.getItem("jms_backdrop_index") || "0";
       if (isOnline) {
+        // Reuse the same details modal MonWUI's own TMDb trailer rows use (trailer
+        // playback + Request button live there), instead of a bespoke online-card
+        // popup/hover system.
+        const virtualItem = toVirtualTrailerItem(item);
         try {
-          if (item.__mediaType === "tv") {
-            // Let the user pick seasons instead of requesting the whole show.
-            await openSerrSeasonModal(item, { source: "monwui-recs" });
-          } else {
-            // Online items are the ones missing locally; enrichment gives them a
-            // runtime, so allowAvailable prevents a false "already in library".
-            await requestSerrFromItem(item, { source: "monwui-recs", allowAvailable: true });
-          }
+          await openDetailsModal({
+            item: virtualItem,
+            itemId: virtualItem.Id,
+            preferBackdropIndex: backdropIndex,
+            originEl: hostEl?.querySelector?.("img.cardImage") || hostEl || card,
+            originEvent: e,
+          });
         } catch (err) {
-          const msg = String(err?.message || "").trim()
-            || (config.languageLabels?.serrRequestFailed || labels.serrRequestFailed || "Request failed.");
-          try {
-            showNotification(
-              `<i class="fas fa-clapperboard" style="margin-right:8px;"></i>${escapeHtml(msg)}`,
-              3200,
-              "error"
-            );
-          } catch {}
-          console.warn("Seerr request failed (online recs card):", err);
+          console.warn("openDetailsModal failed (online recs card):", err);
         }
         return;
       }
       if (!itemId) return;
-      const hostEl = card.querySelector(".cardImageContainer");
-      const backdropIndex = localStorage.getItem("jms_backdrop_index") || "0";
       try {
         await openDetailsModal({
           itemId,
@@ -3934,8 +3926,6 @@ function createRecommendationCard(item, serverId, renderOptions = false) {
     const mode = (getConfig()?.globalPreviewMode === 'studioMini') ? 'studioMini' : 'modal';
     const defer = window.requestIdleCallback || ((fn)=>setTimeout(fn, 0));
     defer(() => attachPreviewByMode(card, { ...item, Id: itemId, Name: itemName }, mode));
-  } else if (item.__trailerKey) {
-    attachOnlineHoverTrailer(card, item);
   }
   card.addEventListener('jms:cleanup', () => {
     cleanupManagedImage(img);
@@ -3957,12 +3947,6 @@ function ensureOnlineRecsCardStyles() {
     const style = document.createElement("style");
     style.id = "jms-online-recs-card-styles";
     style.textContent = `
-      .personal-recs-card--online .prc-online-actions{
-        display:flex;justify-content:flex-end;margin-top:8px;pointer-events:auto;
-      }
-      .personal-recs-card--online .prc-online-request-btn{
-        width:100%;justify-content:center;font-size:.82rem;padding:7px 10px;border-radius:12px;
-      }
       .prc-online-badge{
         display:inline-flex;align-items:center;justify-content:center;
         width:26px;height:26px;border-radius:999px;
@@ -3970,81 +3954,48 @@ function ensureOnlineRecsCardStyles() {
         box-shadow:0 4px 12px rgba(0,0,0,.35);font-size:.72rem;
       }
       .prc-online-badge-icon{line-height:1;}
-      /* Online preview reuses the local hover modal (same audio/mute handling),
-         but the id-based action buttons don't apply to TMDb-only items. */
-      .video-preview-modal.online-preview .preview-match-button,
-      .video-preview-modal.online-preview .preview-play-button,
-      .video-preview-modal.online-preview .preview-favorite-button,
-      .video-preview-modal.online-preview .preview-info-button{display:none !important;}
     `;
     (document.head || document.documentElement).appendChild(style);
   } catch {}
 }
 
-// Hover trailer for online cards. Reuses the real hover modal (so the popover
-// look, the YouTube trailer, and the mute/unmute handling all match local
-// cards) by handing it a pre-built item with RemoteTrailers and a synthetic id.
-function attachOnlineHoverTrailer(cardEl, item) {
-  if (IS_MOBILE) return;
-  if (!cardEl || !Array.isArray(item?.RemoteTrailers) || !item.RemoteTrailers.length) return;
-  ensureOnlineRecsCardStyles();
-
-  const syntheticId = `online:${item.__mediaType || "movie"}:${item.__tmdbId || makePRCKey(item)}`;
-  const previewItem = { ...item, Id: syntheticId, __online: true };
-
-  let timer = null;
-
-  const open = () => {
-    if (!cardEl.isConnected || !cardEl.matches(":hover")) return;
-    try {
-      openPreviewModalForItem(syntheticId, cardEl, { bypass: true, item: previewItem });
-    } catch (err) {
-      console.warn("online hover trailer failed:", err);
-    }
+// Builds a TMDb-only "virtual trailer" item from an online recommendation
+// item, matching the shape MonWUI's own TMDb trailer rows already use
+// (recentRows.js's buildTmdbTrailerRowItemFromCache). Feeding this into
+// openDetailsModal reuses that modal's trailer playback and Request button
+// wiring wholesale instead of a bespoke online-card popup/hover system.
+function toVirtualTrailerItem(item) {
+  const tmdbId = Number(item.__tmdbId) || 0;
+  const mediaType = item.__mediaType === "tv" ? "tv" : "movie";
+  return {
+    Id: `online-trailer-${mediaType}-${tmdbId}`,
+    Name: item.Name || "",
+    Type: "Trailer",
+    MediaType: "Video",
+    ProductionYear: item.ProductionYear || null,
+    Overview: item.Overview || "",
+    CommunityRating: Number.isFinite(item.CommunityRating) ? item.CommunityRating : null,
+    Genres: [],
+    OfficialRating: item.OfficialRating || "",
+    RunTimeTicks: item.RunTimeTicks,
+    CumulativeRunTimeTicks: item.CumulativeRunTimeTicks,
+    UserData: { IsFavorite: false, PlaybackPositionTicks: 0 },
+    RemoteTrailers: Array.isArray(item.RemoteTrailers) ? item.RemoteTrailers : [],
+    __monwuiVirtualTrailer: true,
+    __tmdbId: tmdbId,
+    __mediaType: mediaType,
+    __posterExternalUrl: item.__posterUrl || "",
+    __backdropExternalUrl: item.__backdropUrl || "",
+    __detailsHref: mediaType === "tv"
+      ? `https://www.themoviedb.org/tv/${encodeURIComponent(tmdbId)}`
+      : `https://www.themoviedb.org/movie/${encodeURIComponent(tmdbId)}`,
+    __requestSource: "monwui-recs"
   };
-
-  const onEnter = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(open, OPEN_HOVER_DELAY_MS);
-  };
-
-  const onLeave = (e) => {
-    if (timer) { clearTimeout(timer); timer = null; }
-    const rt = e?.relatedTarget || null;
-    const goingToModal = !!(rt && rt.closest && rt.closest(".video-preview-modal"));
-    if (goingToModal) return;
-    try { safeCloseHoverModal(); } catch {}
-  };
-
-  cardEl.addEventListener("pointerenter", onEnter, { passive: true });
-  cardEl.addEventListener("pointerleave", onLeave, { passive: true });
-  cardEl.addEventListener("jms:cleanup", onLeave, { once: true });
 }
 
-function mountOnlineRequestAffordance(card, item, itemName) {
+function mountOnlineBadge(card, item, itemName) {
   try {
     ensureOnlineRecsCardStyles();
-    const overlay = card.querySelector(".prc-overlay");
-    if (!overlay) return;
-
-    const actions = document.createElement("div");
-    actions.className = "prc-online-actions";
-    overlay.appendChild(actions);
-
-    // Append the request button only when the user can actually request
-    // (seerr/arr configured). Discovery can be TMDb-only, in which case no
-    // button is shown and the card is informational.
-    appendSerrRequestButton(actions, item, {
-      source: "monwui-recs",
-      allowAvailable: true,
-      chooseSeasons: item.__mediaType === "tv",
-      className: "monwui-serr-btn prc-online-request-btn"
-    }).then((button) => {
-      if (!button) { try { actions.remove(); } catch {} return; }
-      // Keep clicks on the button from bubbling to the card link handler.
-      button.addEventListener("click", (e) => { e.stopPropagation(); }, { capture: true });
-    }).catch(() => { try { actions.remove(); } catch {} });
-
     const badges = card.querySelector(".prc-top-badges");
     if (badges && !badges.querySelector(".prc-online-badge")) {
       const badge = document.createElement("div");
@@ -4054,7 +4005,7 @@ function mountOnlineRequestAffordance(card, item, itemName) {
       badges.appendChild(badge);
     }
   } catch (err) {
-    console.warn("Failed to mount online request affordance:", err);
+    console.warn("Failed to mount online badge:", err);
   }
 }
 

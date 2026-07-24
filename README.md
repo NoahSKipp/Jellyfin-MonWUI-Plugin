@@ -9,21 +9,21 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/G-grbz/Jellyfin-MonWUI-Plugin#notes">
+  <a href="https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin#notes">
     <img
       alt="Install Name"
       src="https://img.shields.io/badge/Install%20Name-JMSFusion-0ea5e9?style=for-the-badge"
     />
   </a>
 
-  <a href="https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/releases/latest">
+  <a href="https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/releases/latest">
     <img
       alt="Version"
-      src="https://img.shields.io/github/v/release/G-grbz/Jellyfin-MonWUI-Plugin?style=for-the-badge&cacheSeconds=3600"
+      src="https://img.shields.io/github/v/release/NoahSKipp/Jellyfin-MonWUI-Plugin?style=for-the-badge&cacheSeconds=3600"
     />
   </a>
 
-  <a href="https://github.com/G-grbz/Jellyfin-MonWUI-Plugin/blob/main/LICENSE">
+  <a href="https://github.com/NoahSKipp/Jellyfin-MonWUI-Plugin/blob/main/LICENSE">
     <img
       alt="License"
       src="https://img.shields.io/badge/License-GPLv3-7c3aed?style=for-the-badge"
@@ -33,6 +33,7 @@
 
 
 <p align="center">
+  <a href="#about-this-fork">About This Fork</a> •
   <a href="#overview">Overview</a> •
   <a href="#screenshots">Screenshots</a> •
   <a href="#highlights">Highlights</a> •
@@ -42,6 +43,21 @@
   <a href="#license">License</a> •
   <a href="https://github.com/G-grbz/G-TMCE">G-TMCE</a>
 </p>
+
+---
+
+## About This Fork
+
+This repository is a fork of [G-grbz/Jellyfin-MonWUI-Plugin](https://github.com/G-grbz/Jellyfin-MonWUI-Plugin) by **G-Grbz**, modified and redistributed under the terms of the GPL-3.0 license (see [License](#license)). All credit for the original JMSFusion plugin — the slider engine, hover previews, pause screens, studio hubs, and everything else described below — belongs to the upstream project.
+
+Starting July 2026, this fork adds a set of online-recommendation features on top of the original plugin:
+
+* **Online (TMDb/Seerr) recommendations** blended directly into the existing home rows, alongside your local library, using the same cards and details modal
+* **Trending** and **"Popular in \<country\>"** rows (TMDb-powered, with a multi-country picker and per-viewer auto-detect)
+* A **Request** button on missing titles, wired through Seerr/Overseerr and Radarr/Sonarr
+* A reorganized **Recommendations** settings tab consolidating these and the existing recommendation-row controls
+
+Because releases, versions, and the plugin manifest here have diverged from upstream, the install links, badges, and instructions in this README point at this fork rather than the original — see [Installation](#installation).
 
 ---
 
@@ -125,7 +141,7 @@ In short: if the client does not render `/web/index.html`, JMSFusion cannot run 
 2. Go to **Plugins → Repositories**
 3. Add:
 ```text
-https://raw.githubusercontent.com/G-grbz/Jellyfin-MonWUI-Plugin/main/manifest.json
+https://raw.githubusercontent.com/NoahSKipp/Jellyfin-MonWUI-Plugin/main/manifest.json
 ```
 4. Go to **Plugins → Available**
 5. Install **JMSFusion**
